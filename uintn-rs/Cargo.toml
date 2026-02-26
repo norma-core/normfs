@@ -7,7 +7,6 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description = "Variable-width unsigned integers with infinite scaling (u8, u16, u32, u64, BigInt)"
-readme = "README.md"
 
 [dependencies]
 dashu-int = "0.4.1"
