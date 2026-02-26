@@ -1,0 +1,4 @@
+github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
+github.com/google/uuid v1.6.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
+github.com/norma-core/norma-core/shared/gremlin_go v0.0.0-20260213171720-ca7c2eed0f31 h1:+P+VJnC6jlBjSE/SS7GOBqDNGWxOjuY3DMTimxUstz8=
+github.com/norma-core/norma-core/shared/gremlin_go v0.0.0-20260213171720-ca7c2eed0f31/go.mod h1:GjIWNraGOkatJCiWYLIdI8VWkf1uSZWJJP8cSbQQhg8=

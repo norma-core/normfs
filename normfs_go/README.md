@@ -65,11 +65,9 @@ func main() {
 ### Creating a Client
 
 ```go
-// Basic connection
+// Basic connection with connection pooling (4 read connections, 1 write connection)
 logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-// Basic client with connection pooling (16 read connections, 1 write connection)
 client, err := normfs.NewClient("localhost:8888", logger)
-
 ```
 
 ### Writing Data

@@ -9,7 +9,7 @@ members = [
     "normfs-crypto",
     "uintn-rs",
 ]
-exclude = ["normfs_go"]
+exclude = ["normfs_go", "go.work", "go.work.sum"]
 
 [workspace.package]
 version = "0.1.0-beta.0"

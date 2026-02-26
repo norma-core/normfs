@@ -6,6 +6,32 @@
 
 Storage engine with automatic data lifecycle management across memory, disk, and cloud. Built for high-frequency sensor data ingestion. Available as embeddable library or standalone server.
 
+## 📊 Latency
+
+![Fanout Scaling](images/fanout-scaling.jpg)
+
+**Fanout Latency**: Time for a message to propagate from write to all N concurrent subscribers over TCP. Measures the server's ability to efficiently distribute messages to multiple clients simultaneously - critical for real-time multi-sensor coordination in robotics and distributed systems.
+
+**TCP Fanout Benchmarks** (200k iterations, 1KB message):
+
+| Clients | Total Fanout | P50 | P95 | P99 |
+|---------|--------------|-----|-----|-----|
+| 1 | 200 MB | 49µs | 65µs | 88µs |
+| 2 | 400 MB | 59µs | 78µs | 97µs |
+| 4 | 800 MB | 81µs | 109µs | 145µs |
+| 8 | 1.6 GB | 146µs | 183µs | 224µs |
+| 16 | 3.2 GB | 243µs | 305µs | 347µs |
+| 32 | 6.4 GB | 357µs | 436µs | 508µs |
+| 64 | 12.8 GB | 549µs | 656µs | 809µs |
+| 128 | 25.6 GB | 956µs | 1.1ms | 1.5ms |
+| 256 | 51.2 GB | 1.8ms | 2.0ms | 3.0ms |
+| 512 | 102 GB | 3.7ms | 5.0ms | 6.5ms |
+| 1024 | 205 GB | 7.0ms | 8.2ms | 19ms |
+
+*Benchmarked on Apple M3 Max MacBook Pro. Embedded library performance is significantly faster.*
+
+📈 **[Full TCP benchmarks →](normfs_go/bench/README.md)**
+
 ## ✨ Features
 
 - 🗄️ **Tiered Storage**: Memory → WAL → Compressed Store → Cloud archival
@@ -78,16 +104,20 @@ See language-specific documentation:
 
 ### Cross-Compilation
 
-Build for multiple platforms using [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild):
+Build the server for multiple platforms using [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild):
 
 ```bash
 # Install cargo-zigbuild
 cargo install cargo-zigbuild
 
-# Cross-compile for different targets
-cargo zigbuild --release --target x86_64-unknown-linux-gnu
-cargo zigbuild --release --target aarch64-unknown-linux-gnu
-cargo zigbuild --release --target x86_64-unknown-freebsd
+# Build server for different platforms
+cargo zigbuild --release --features server-bin --bin normfs-server --target x86_64-unknown-linux-gnu
+cargo zigbuild --release --features server-bin --bin normfs-server --target aarch64-unknown-linux-gnu
+cargo zigbuild --release --features server-bin --bin normfs-server --target aarch64-apple-darwin
+cargo zigbuild --release --features server-bin --bin normfs-server --target x86_64-apple-darwin
+cargo zigbuild --release --features server-bin --bin normfs-server --target x86_64-unknown-freebsd
+
+# Binaries will be at: target/<target-triple>/release/normfs-server
 ```
 
 ## 💻 Platform Support

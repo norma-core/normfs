@@ -30,7 +30,7 @@ import (
 )
 
 const (
-	numReadConnections  = 16
+	numReadConnections  = 4
 	numWriteConnections = 1
 )
 

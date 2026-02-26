@@ -4,6 +4,37 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+#[cfg(unix)]
+fn setup_ulimits() -> Result<(), Box<dyn std::error::Error>> {
+    use libc::{getrlimit, setrlimit, rlimit, RLIMIT_NOFILE};
+    use std::mem::MaybeUninit;
+
+    unsafe {
+        let mut rlim = MaybeUninit::<rlimit>::uninit();
+        if getrlimit(RLIMIT_NOFILE, rlim.as_mut_ptr()) != 0 {
+            return Err("Failed to get current RLIMIT_NOFILE".into());
+        }
+
+        let mut rlim = rlim.assume_init();
+        rlim.rlim_cur = 256000;
+        rlim.rlim_max = 256000;
+
+        if setrlimit(RLIMIT_NOFILE, &rlim) != 0 {
+            return Err("Failed to set RLIMIT_NOFILE to 256000".into());
+        }
+
+        log::info!("Set RLIMIT_NOFILE to 256000 for high load");
+    }
+
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn setup_ulimits() -> Result<(), Box<dyn std::error::Error>> {
+    log::warn!("RLIMIT_NOFILE configuration not supported on this platform");
+    Ok(())
+}
+
 /// NormFS TCP Server - A standalone TCP server for NormFS
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -48,6 +79,8 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    setup_ulimits()?;
 
     let args = Args::parse();
 

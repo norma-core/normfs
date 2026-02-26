@@ -1,0 +1,6 @@
+go 1.25.6
+
+use (
+	./normfs_go
+	./normfs_go/bench
+)
