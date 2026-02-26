@@ -60,6 +60,31 @@ func RunFanoutLatencyBenchmark(addr string, logger *slog.Logger, queuePath strin
 		log.Fatalf("Failed to create writer client: %v", err)
 	}
 
+	// Progress tracking every 30 seconds
+	stopProgress := make(chan struct{})
+	var completedIters atomic.Int32
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				completed := int(completedIters.Load())
+				if completed > 0 {
+					var sum int64
+					for i := 0; i < completed; i++ {
+						sum += latencies[i]
+					}
+					avgLatency := time.Duration(sum / int64(completed))
+					log.Printf("Progress: %d/%d iterations (avg latency: %v)", completed, iterations, avgLatency)
+				}
+			case <-stopProgress:
+				return
+			}
+		}
+	}()
+	defer close(stopProgress)
+
 	for iter := 0; iter < iterations; iter++ {
 		var wg sync.WaitGroup
 		var allSeenTime atomic.Int64
@@ -103,6 +128,7 @@ func RunFanoutLatencyBenchmark(addr string, logger *slog.Logger, queuePath strin
 
 		fanoutLatency := allSeenTime.Load() - writeStart.UnixNano()
 		latencies[iter] = fanoutLatency
+		completedIters.Add(1)
 	}
 
 	totalDuration := time.Duration(0)

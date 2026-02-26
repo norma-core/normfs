@@ -12,21 +12,24 @@ Storage engine with automatic data lifecycle management across memory, disk, and
 
 **Fanout Latency**: Time for a message to propagate from write to all N concurrent subscribers over TCP. Measures the server's ability to efficiently distribute messages to multiple clients simultaneously - critical for real-time multi-sensor coordination in robotics and distributed systems.
 
-**TCP Fanout Benchmarks** (200k iterations, 1KB message):
+**TCP Fanout Benchmarks** (1KB message):
 
-| Clients | Total Fanout | P50 | P95 | P99 |
-|---------|--------------|-----|-----|-----|
-| 1 | 200 MB | 49µs | 65µs | 88µs |
-| 2 | 400 MB | 59µs | 78µs | 97µs |
-| 4 | 800 MB | 81µs | 109µs | 145µs |
-| 8 | 1.6 GB | 146µs | 183µs | 224µs |
-| 16 | 3.2 GB | 243µs | 305µs | 347µs |
-| 32 | 6.4 GB | 357µs | 436µs | 508µs |
-| 64 | 12.8 GB | 549µs | 656µs | 809µs |
-| 128 | 25.6 GB | 956µs | 1.1ms | 1.5ms |
-| 256 | 51.2 GB | 1.8ms | 2.0ms | 3.0ms |
-| 512 | 102 GB | 3.7ms | 5.0ms | 6.5ms |
-| 1024 | 205 GB | 7.0ms | 8.2ms | 19ms |
+| Clients | P50 | P95 | P99 |
+|---------|-----|-----|-----|
+| 1 | 49µs | 65µs | 88µs |
+| 2 | 59µs | 78µs | 97µs |
+| 4 | 81µs | 109µs | 145µs |
+| 8 | 146µs | 183µs | 224µs |
+| 16 | 243µs | 305µs | 347µs |
+| 32 | 357µs | 436µs | 508µs |
+| 64 | 549µs | 656µs | 809µs |
+| 128 | 956µs | 1.1ms | 1.5ms |
+| 256 | 1.8ms | 2.0ms | 3.0ms |
+| 512 | 3.7ms | 5.0ms | 6.5ms |
+| 1024 | 7.0ms | 8.2ms | 19ms |
+| 2048 | 15.0ms | 17.9ms | 37.1ms |
+| 4096 | 35.9ms | 40.3ms | 78.5ms |
+| 8192 | 792ms | 1.08s | 1.26s |
 
 *Benchmarked on Apple M3 Max MacBook Pro. Embedded library performance is significantly faster.*
 

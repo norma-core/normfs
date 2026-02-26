@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"syscall"
 
 	"github.com/norma-core/normfs/normfs_go/bench"
 )
@@ -16,6 +17,11 @@ func main() {
 	dataSize := flag.Int("size", 1024, "payload size in bytes")
 	queueID := flag.String("queue", "bench/latency", "queue ID to use")
 	flag.Parse()
+
+	if err := setupRLimits(); err != nil {
+		fmt.Printf("Failed to set up for high load: %v\n", err)
+		return
+	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
@@ -33,10 +39,40 @@ func main() {
 		testData[i] = byte(i % 256)
 	}
 
+	// Set up defer to print results
+	var result bench.LatencyResult
+	defer func() {
+		if result.TotalOps > 0 {
+			fmt.Printf("\n")
+			bench.PrintLatencyResult(result)
+			fmt.Printf("\n✅ Benchmark complete!\n\n")
+		}
+	}()
+
 	// Run fanout benchmark
 	fmt.Printf("📢 Running fanout benchmark (time until all %d clients see message)...\n", *numClients)
-	result := bench.RunFanoutLatencyBenchmark(*addr, logger, *queueID, *numClients, *iterations, testData)
-	bench.PrintLatencyResult(result)
+	result = bench.RunFanoutLatencyBenchmark(*addr, logger, *queueID, *numClients, *iterations, testData)
+}
 
-	fmt.Printf("\n✅ Benchmark complete!\n\n")
+func setupRLimits() error {
+	var rLimit syscall.Rlimit
+	err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rLimit)
+	if err != nil {
+		return err
+	} else {
+		var changed = false
+		if rLimit.Cur < 256000 {
+			rLimit.Cur = 256000
+			changed = true
+		}
+		if rLimit.Max < 256000 {
+			rLimit.Max = 256000
+			changed = true
+		}
+		if !changed {
+			return nil
+		}
+
+		return syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rLimit)
+	}
 }

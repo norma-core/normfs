@@ -18,15 +18,11 @@ make run-bin SIZE=4096                  # Custom message size (bytes)
 make run-bin CLIENTS=10 N=50000         # Custom clients and iterations
 ```
 
-### Full Suite (200k messages, 1kb, varying clients)
-```bash
-make run-all    # Runs with 1,2,4,8,16,32,64,128,256,512,1024 clients
-```
-
 ## Requirements
 
 - Go 1.21+
-- Running NormFS server (default: `localhost:8888`)
+- Running NormFS TCP server (default: `localhost:8888`)
+- **High concurrency (1000+ clients)**: Benchmark auto-sets ulimits to 256k. May need to expand local port range to 10000-65535.
 
 ## Benchmark Types
 
@@ -70,8 +66,7 @@ go test -bench=. -benchmem
 
 ## Makefile Targets
 
-- `make run-bin` - Run single fanout latency benchmark (configurable clients/iterations/size)
-- `make run-all` - Run full suite: 200k messages, 1kb size, clients from 1 to 1024
+- `make run-bin` - Run fanout latency benchmark (configurable clients/iterations/size)
 - `make run-gobench` - Run fast Go test benchmarks
 - `make clean` - Remove built binaries
 
