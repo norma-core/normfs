@@ -1,11 +1,16 @@
 [package]
 name = "normfs-crypto"
-version = "0.1.0-beta.0"
+version.workspace = true
 edition = "2021"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Cryptographic primitives for NormFS (AES-256-GCM encryption, Ed25519 signatures)"
 
 [dependencies]
-normfs-types = { path = "../normfs-types" }
-uintn = { path = "../uintn-rs" }
+normfs-types = { version = "0.1.0-beta.0", path = "../normfs-types" }
+uintn = { version = "0.1.0-beta.0", path = "../uintn-rs" }
 bytes = "1"
 getrandom = { version = "0.2", default-features = false, features = ["std"] }
 rand_chacha = { version = "0.3", default-features = false }

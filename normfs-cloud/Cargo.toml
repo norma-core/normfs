@@ -1,7 +1,12 @@
 [package]
 name = "normfs-cloud"
-version = "0.1.0-beta.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "S3-compatible cloud storage integration for NormFS"
 
 [dependencies]
 rusty-s3 = "0.5"
@@ -10,10 +15,10 @@ quick-xml = { version = "0.37", features = ["serialize"] }
 serde = { version = "1.0", features = ["derive"] }
 url = "2.5"
 urlencoding = "2.1"
-uintn = { path = "../uintn-rs" }
-normfs-types = { path = "../normfs-types" }
-normfs-store = { path = "../normfs-store" }
-normfs-wal = { path = "../normfs-wal" }
+uintn = { version = "0.1.0-beta.0", path = "../uintn-rs" }
+normfs-types = { version = "0.1.0-beta.0", path = "../normfs-types" }
+normfs-store = { version = "0.1.0-beta.0", path = "../normfs-store" }
+normfs-wal = { version = "0.1.0-beta.0", path = "../normfs-wal" }
 tokio = { version = "1", features = ["full"] }
 bytes = "1"
 log = "0.4"

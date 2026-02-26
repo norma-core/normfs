@@ -1,13 +1,18 @@
 [package]
 name = "normfs-wal"
-version = "0.1.0-beta.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Write-ahead log implementation for NormFS with crash recovery"
 
 [dependencies]
 log = "0.4"
 bytes = "1"
-uintn = { path = "../uintn-rs" }
-normfs-types = { path = "../normfs-types" }
+uintn = { version = "0.1.0-beta.0", path = "../uintn-rs" }
+normfs-types = { version = "0.1.0-beta.0", path = "../normfs-types" }
 tokio = { version = "1", features = ["full"] }
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 walkdir = "2"

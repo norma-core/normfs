@@ -1,7 +1,12 @@
 [package]
 name = "normfs-store"
-version = "0.1.0-beta.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Compressed and encrypted persistent storage for NormFS"
 
 [features]
 default = ["c-libs"]
@@ -10,12 +15,12 @@ pure-rust = ["dep:ruzstd"]
 
 [dependencies]
 log = "0.4"
-uintn = { path = "../uintn-rs" }
-normfs-types = { path = "../normfs-types" }
-normfs-crypto = { path = "../normfs-crypto" }
+uintn = { version = "0.1.0-beta.0", path = "../uintn-rs" }
+normfs-types = { version = "0.1.0-beta.0", path = "../normfs-types" }
+normfs-crypto = { version = "0.1.0-beta.0", path = "../normfs-crypto" }
 tokio = { version = "1", features = ["full"] }
 bytes = "1"
-normfs-wal = { path = "../normfs-wal" }
+normfs-wal = { version = "0.1.0-beta.0", path = "../normfs-wal" }
 uuid = { version = "1", features = ["v4", "fast-rng"] }
 
 # Compression libraries - C bindings (default, faster for zstd)

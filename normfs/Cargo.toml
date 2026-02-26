@@ -1,7 +1,13 @@
 [package]
 name = "normfs"
-version = "0.1.0-beta.0"
+version.workspace = true
 edition = "2021"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "High-performance persistent queue storage with tiered memory/disk/cloud lifecycle management"
+readme = "../README.md"
 
 [features]
 default = []
@@ -9,12 +15,12 @@ websocket = ["fastwebsockets", "hyper", "hyper-util", "http-body-util"]
 server-bin = ["clap", "env_logger"]
 
 [dependencies]
-uintn = { path = "../uintn-rs" }
-normfs-types = { path = "../normfs-types" }
-normfs-wal = { path = "../normfs-wal" }
-normfs-store = { path = "../normfs-store" }
-normfs-cloud = { path = "../normfs-cloud" }
-normfs-crypto = { path = "../normfs-crypto" }
+uintn = { version = "0.1.0-beta.0", path = "../uintn-rs" }
+normfs-types = { version = "0.1.0-beta.0", path = "../normfs-types" }
+normfs-wal = { version = "0.1.0-beta.0", path = "../normfs-wal" }
+normfs-store = { version = "0.1.0-beta.0", path = "../normfs-store" }
+normfs-cloud = { version = "0.1.0-beta.0", path = "../normfs-cloud" }
+normfs-crypto = { version = "0.1.0-beta.0", path = "../normfs-crypto" }
 tokio = { workspace = true }
 bytes = { workspace = true }
 prost = { workspace = true }

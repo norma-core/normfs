@@ -1,8 +1,13 @@
 [package]
 name = "normfs-types"
-version = "0.1.0-beta.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Core type definitions and serialization for NormFS"
 
 [dependencies]
 bytes = "1.5"
-uintn = { path = "../uintn-rs" }
+uintn = { version = "0.1.0-beta.0", path = "../uintn-rs" }
