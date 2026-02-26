@@ -7,9 +7,9 @@ fn main() -> Result<()> {
     prost_build::Config::new()
         .out_dir(&out_dir)
         .bytes(["."])
-        .compile_protos(&["../proto/normfs.proto"], &["../proto/"])?;
+        .compile_protos(&["proto/normfs.proto"], &["proto/"])?;
 
-    println!("cargo:rerun-if-changed=../proto/normfs.proto");
+    println!("cargo:rerun-if-changed=proto/normfs.proto");
 
     Ok(())
 }
