@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [
+    "normfs",
+    "normfs-types",
+    "normfs-wal",
+    "normfs-store",
+    "normfs-cloud",
+    "normfs-crypto",
+    "uintn-rs",
+]
+
+[workspace.package]
+version = "0.1.0-beta.0"
+edition = "2024"
+authors = ["Norma Core Team"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/norma-core/normfs"
+
+[workspace.dependencies]
+# Shared dependencies across workspace
+tokio = { version = "1.49", features = ["full"] }
+bytes = "1.11"
+prost = "0.12"
+log = "0.4.28"
+
+# Internal workspace crates
+uintn = { path = "uintn-rs" }
+normfs-types = { path = "normfs-types" }
+normfs-wal = { path = "normfs-wal" }
+normfs-store = { path = "normfs-store" }
+normfs-cloud = { path = "normfs-cloud" }
+normfs-crypto = { path = "normfs-crypto" }
+
+# Dev dependencies
+tempfile = "3.25"
+criterion = "0.5"
+env_logger = "0.11"

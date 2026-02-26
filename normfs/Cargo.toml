@@ -1,0 +1,76 @@
+[package]
+name = "normfs"
+version = "0.1.0-beta.0"
+edition = "2021"
+
+[features]
+default = []
+websocket = ["fastwebsockets", "hyper", "hyper-util", "http-body-util"]
+server-bin = ["clap", "env_logger"]
+
+[dependencies]
+uintn = { path = "../uintn-rs" }
+normfs-types = { path = "../normfs-types" }
+normfs-wal = { path = "../normfs-wal" }
+normfs-store = { path = "../normfs-store" }
+normfs-cloud = { path = "../normfs-cloud" }
+normfs-crypto = { path = "../normfs-crypto" }
+tokio = { workspace = true }
+bytes = { workspace = true }
+prost = { workspace = true }
+log = { workspace = true }
+libc = "0.2"
+url = "2.5"
+globset = "0.4"
+
+# Optional dependencies for binary
+clap = { version = "4", features = ["derive", "env"], optional = true }
+env_logger = { workspace = true, optional = true }
+
+# Optional websocket dependencies
+fastwebsockets = { version = "0.10.0", optional = true, features = ["upgrade"] }
+hyper = { version = "1.7.0", optional = true, features = ["http1", "server"] }
+hyper-util = { version = "0.1.6", optional = true, features = ["full"] }
+http-body-util = { version = "0.1", optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+env_logger = { workspace = true }
+criterion = { workspace = true, features = ["async_tokio"] }
+fastrand = "2.0"
+
+[build-dependencies]
+prost-build = "0.12"
+
+[[bench]]
+name = "latency_benchmark"
+harness = false
+
+[[bench]]
+name = "write_benchmark"
+harness = false
+
+[[bench]]
+name = "read_benchmark"
+harness = false
+
+[[bench]]
+name = "subscribe_benchmark"
+harness = false
+
+[[bench]]
+name = "write_benchmark_compressed_encrypted"
+harness = false
+
+[[bench]]
+name = "read_benchmark_compressed_encrypted"
+harness = false
+
+[[bench]]
+name = "parallel_tail_benchmark"
+harness = false
+
+[[bin]]
+name = "normfs-server"
+path = "src/bin/normfs-server.rs"
+required-features = ["server-bin"]

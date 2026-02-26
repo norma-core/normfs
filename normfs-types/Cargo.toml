@@ -1,0 +1,8 @@
+[package]
+name = "normfs-types"
+version = "0.1.0-beta.0"
+edition = "2024"
+
+[dependencies]
+bytes = "1.5"
+uintn = { path = "../uintn-rs" }

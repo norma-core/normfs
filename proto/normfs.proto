@@ -1,0 +1,108 @@
+syntax = "proto3";
+
+package normfs;
+
+message ClientRequest {
+    SetupRequest setup = 1;
+    PingRequest  ping  = 2;
+
+    WriteRequest write = 10;
+    ReadRequest  read  = 11;
+}
+
+message ServerResponse {
+    SetupResponse setup = 1;
+    PingResponse  ping  = 2;
+
+    WriteResponse write = 10;
+    ReadResponse  read  = 11;
+}
+
+message Id {
+    bytes raw = 1;
+}
+
+enum OffsetType {
+    OT_ABSOLUTE = 0;
+    OT_SHIFT_FROM_TAIL = 1;
+}
+
+message Offset {
+    Id         id   = 1;
+    OffsetType type = 2;
+}
+
+message SetupRequest {
+    uint64 version = 1;
+}
+
+message SetupResponse {
+    uint64 version = 1;
+    bytes  instance_id_bytes = 2;
+    string instance_id = 3;
+}
+
+message PingRequest {
+    uint64 sequence             = 1;
+    uint64 client_timestamp_ns  = 2;
+}
+
+message PingResponse {
+    uint64 local_stamp_ns       = 2;
+    uint64 monotonic_stamp_ns   = 3;
+    PingRequest request         = 4;
+}
+
+message WriteRequest {
+    uint64 write_id = 1;
+    string queue_id = 2;
+
+    repeated bytes packets = 10;
+}
+
+message WriteResponse {
+    enum Result {
+        WR_DONE         = 0;
+        WR_SERVER_ERROR = 1;
+    }
+
+    uint64 write_id = 1;
+    Result result   = 2;
+
+    repeated Id ids = 10;
+}
+
+message ReadRequest {
+    uint64 read_id  = 1;
+    string queue_id = 2;
+    uint64 step     = 3;
+
+    Offset offset = 10;
+    uint64 limit  = 11;
+}
+
+message ReadResponse {
+    enum Result {
+        RR_START           = 0;
+        RR_ENTRY           = 1;
+        RR_END             = 2;
+        RR_QUEUE_NOT_FOUND = 3;
+        RR_NOT_FOUND       = 4;
+        RR_SERVER_ERROR    = 5;
+    }
+
+    enum DataSource {
+        DS_NONE       = 0;
+        DS_CLOUD      = 1;
+        DS_DISK_STORE = 2;
+        DS_DISK_WAL   = 3;
+        DS_MEMORY     = 4;
+    }
+
+    uint64 read_id = 1;
+    Result result  = 2;
+
+    Id         id          = 10;
+    bytes      data        = 11;
+    DataSource data_source = 12;
+}

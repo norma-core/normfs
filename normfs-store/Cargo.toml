@@ -1,0 +1,36 @@
+[package]
+name = "normfs-store"
+version = "0.1.0-beta.0"
+edition = "2024"
+
+[features]
+default = ["c-libs"]
+c-libs = ["dep:zstd"]
+pure-rust = ["dep:ruzstd"]
+
+[dependencies]
+log = "0.4"
+uintn = { path = "../uintn-rs" }
+normfs-types = { path = "../normfs-types" }
+normfs-crypto = { path = "../normfs-crypto" }
+tokio = { version = "1", features = ["full"] }
+bytes = "1"
+normfs-wal = { path = "../normfs-wal" }
+uuid = { version = "1", features = ["v4", "fast-rng"] }
+
+# Compression libraries - C bindings (default, faster for zstd)
+zstd = { version = "0.13.1", optional = true, default-features = false }
+
+# Compression libraries - Pure Rust (for platforms like FreeBSD)
+ruzstd = { version = "0.8", optional = true }
+
+# XZ/LZMA - Pure Rust for both features (no C dependency)
+lzma-rust2 = "0.16"
+
+[dev-dependencies]
+criterion = { version = "0.4", features = ["async_tokio"] }
+tempfile = "3"
+
+[[bench]]
+name = "read_performance"
+harness = false
