@@ -1,5 +1,7 @@
 # NormFS 🚀
 
+[![Crates.io](https://img.shields.io/crates/v/normfs.svg)](https://crates.io/crates/normfs)
+
 **High-performance persistent queue storage for robotics and embedded systems**
 
 Storage engine with automatic data lifecycle management across memory, disk, and cloud. Built for high-frequency sensor data ingestion. Available as embeddable library or standalone server.
