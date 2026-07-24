@@ -32,6 +32,11 @@ normfs_wal_header_field_size_is_valid(uint64_t size)
     ensures \result == NORMFS_WAL_HEADER_OK <==>
               (normfs_wal_header_valid_field_size(header->data_size_bytes) &&
                normfs_wal_header_valid_field_size(header->id_size_bytes));
+    ensures \result == NORMFS_WAL_HEADER_ERR_INVALID_DATA_SIZE <==>
+              !normfs_wal_header_valid_field_size(header->data_size_bytes);
+    ensures \result == NORMFS_WAL_HEADER_ERR_INVALID_ID_SIZE <==>
+              (normfs_wal_header_valid_field_size(header->data_size_bytes) &&
+               !normfs_wal_header_valid_field_size(header->id_size_bytes));
 */
 int
 normfs_wal_header_v1_validate(const struct normfs_wal_header_v1 *header)
@@ -225,10 +230,11 @@ normfs_wal_header_v1_decode(const uint8_t *buf, size_t len)
             \result.status == NORMFS_WAL_HEADER_ERR_OVERFLOW ||
             \result.status == NORMFS_WAL_HEADER_ERR_NON_CANONICAL;
     ensures \result.status == NORMFS_WAL_HEADER_OK ==> \result.consumed <= len;
-    ensures \result.status == NORMFS_WAL_HEADER_OK && \result.version == 0 ==>
-              \result.consumed == 0;
-    ensures \result.status == NORMFS_WAL_HEADER_OK && \result.version != 0 ==>
-              1 <= \result.consumed <= 10;
+    ensures \result.status == NORMFS_WAL_HEADER_OK && len >= 1 && buf[0] == 0 ==>
+              \result.version == 0 && \result.consumed == 0;
+    ensures \result.status == NORMFS_WAL_HEADER_OK && len >= 1 && buf[0] != 0 ==>
+              1 <= \result.consumed <= 10 &&
+              \result.consumed == normfs_uintn_varint64_size_logic(\result.version);
     ensures \result.status != NORMFS_WAL_HEADER_OK ==>
               \result.version == 0 && \result.consumed == 0;
 */
