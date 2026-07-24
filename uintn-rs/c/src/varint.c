@@ -162,6 +162,31 @@ normfs_uintn_varint64_encode_ffi(uint64_t value, uint8_t *out, size_t out_len)
               1 <= \result.consumed <= 5 && \result.consumed <= len;
     ensures \result.status == NORMFS_UINTN_VARINT_OK ==>
               \result.consumed == normfs_uintn_varint32_size_logic(\result.value);
+    ensures \result.status == NORMFS_UINTN_VARINT_OK &&
+            \result.consumed == 1 ==>
+              buf[0] < 128 &&
+              \result.value == buf[0];
+    ensures \result.status == NORMFS_UINTN_VARINT_OK &&
+            \result.consumed == 2 ==>
+              buf[0] >= 128 && buf[1] < 128 &&
+              \result.value == (buf[0] - 128) + 128 * buf[1];
+    ensures \result.status == NORMFS_UINTN_VARINT_OK &&
+            \result.consumed == 3 ==>
+              buf[0] >= 128 && buf[1] >= 128 && buf[2] < 128 &&
+              \result.value == (buf[0] - 128) + 128 * (buf[1] - 128) +
+                               16384 * buf[2];
+    ensures \result.status == NORMFS_UINTN_VARINT_OK &&
+            \result.consumed == 4 ==>
+              buf[0] >= 128 && buf[1] >= 128 && buf[2] >= 128 && buf[3] < 128 &&
+              \result.value == (buf[0] - 128) + 128 * (buf[1] - 128) +
+                               16384 * (buf[2] - 128) + 2097152 * buf[3];
+    ensures \result.status == NORMFS_UINTN_VARINT_OK &&
+            \result.consumed == 5 ==>
+              buf[0] >= 128 && buf[1] >= 128 && buf[2] >= 128 &&
+              buf[3] >= 128 && buf[4] < 16 &&
+              \result.value == (buf[0] - 128) + 128 * (buf[1] - 128) +
+                               16384 * (buf[2] - 128) + 2097152 * (buf[3] - 128) +
+                               268435456 * buf[4];
     ensures \result.status != NORMFS_UINTN_VARINT_OK ==>
               \result.value == 0 && \result.consumed == 0;
 */
@@ -181,6 +206,83 @@ normfs_uintn_varint32_decode_ffi(const uint8_t *buf, size_t len)
               1 <= \result.consumed <= 10 && \result.consumed <= len;
     ensures \result.status == NORMFS_UINTN_VARINT_OK ==>
               \result.consumed == normfs_uintn_varint64_size_logic(\result.value);
+    ensures \result.status == NORMFS_UINTN_VARINT_OK &&
+            \result.consumed == 1 ==>
+              buf[0] < 128 &&
+              \result.value == buf[0];
+    ensures \result.status == NORMFS_UINTN_VARINT_OK &&
+            \result.consumed == 2 ==>
+              buf[0] >= 128 && buf[1] < 128 &&
+              \result.value == (buf[0] - 128) + 128 * buf[1];
+    ensures \result.status == NORMFS_UINTN_VARINT_OK &&
+            \result.consumed == 3 ==>
+              buf[0] >= 128 && buf[1] >= 128 && buf[2] < 128 &&
+              \result.value == (buf[0] - 128) + 128 * (buf[1] - 128) +
+                               16384 * buf[2];
+    ensures \result.status == NORMFS_UINTN_VARINT_OK &&
+            \result.consumed == 4 ==>
+              buf[0] >= 128 && buf[1] >= 128 && buf[2] >= 128 && buf[3] < 128 &&
+              \result.value == (buf[0] - 128) + 128 * (buf[1] - 128) +
+                               16384 * (buf[2] - 128) + 2097152 * buf[3];
+    ensures \result.status == NORMFS_UINTN_VARINT_OK &&
+            \result.consumed == 5 ==>
+              buf[0] >= 128 && buf[1] >= 128 && buf[2] >= 128 &&
+              buf[3] >= 128 && buf[4] < 128 &&
+              \result.value == (buf[0] - 128) + 128 * (buf[1] - 128) +
+                               16384 * (buf[2] - 128) + 2097152 * (buf[3] - 128) +
+                               268435456 * buf[4];
+    ensures \result.status == NORMFS_UINTN_VARINT_OK &&
+            \result.consumed == 6 ==>
+              buf[0] >= 128 && buf[1] >= 128 && buf[2] >= 128 &&
+              buf[3] >= 128 && buf[4] >= 128 && buf[5] < 128 &&
+              \result.value == (buf[0] - 128) + 128 * (buf[1] - 128) +
+                               16384 * (buf[2] - 128) + 2097152 * (buf[3] - 128) +
+                               268435456 * (buf[4] - 128) + 34359738368 * buf[5];
+    ensures \result.status == NORMFS_UINTN_VARINT_OK &&
+            \result.consumed == 7 ==>
+              buf[0] >= 128 && buf[1] >= 128 && buf[2] >= 128 &&
+              buf[3] >= 128 && buf[4] >= 128 && buf[5] >= 128 && buf[6] < 128 &&
+              \result.value == (buf[0] - 128) + 128 * (buf[1] - 128) +
+                               16384 * (buf[2] - 128) + 2097152 * (buf[3] - 128) +
+                               268435456 * (buf[4] - 128) +
+                               34359738368 * (buf[5] - 128) +
+                               4398046511104 * buf[6];
+    ensures \result.status == NORMFS_UINTN_VARINT_OK &&
+            \result.consumed == 8 ==>
+              buf[0] >= 128 && buf[1] >= 128 && buf[2] >= 128 &&
+              buf[3] >= 128 && buf[4] >= 128 && buf[5] >= 128 &&
+              buf[6] >= 128 && buf[7] < 128 &&
+              \result.value == (buf[0] - 128) + 128 * (buf[1] - 128) +
+                               16384 * (buf[2] - 128) + 2097152 * (buf[3] - 128) +
+                               268435456 * (buf[4] - 128) +
+                               34359738368 * (buf[5] - 128) +
+                               4398046511104 * (buf[6] - 128) +
+                               562949953421312 * buf[7];
+    ensures \result.status == NORMFS_UINTN_VARINT_OK &&
+            \result.consumed == 9 ==>
+              buf[0] >= 128 && buf[1] >= 128 && buf[2] >= 128 &&
+              buf[3] >= 128 && buf[4] >= 128 && buf[5] >= 128 &&
+              buf[6] >= 128 && buf[7] >= 128 && buf[8] < 128 &&
+              \result.value == (buf[0] - 128) + 128 * (buf[1] - 128) +
+                               16384 * (buf[2] - 128) + 2097152 * (buf[3] - 128) +
+                               268435456 * (buf[4] - 128) +
+                               34359738368 * (buf[5] - 128) +
+                               4398046511104 * (buf[6] - 128) +
+                               562949953421312 * (buf[7] - 128) +
+                               72057594037927936 * buf[8];
+    ensures \result.status == NORMFS_UINTN_VARINT_OK &&
+            \result.consumed == 10 ==>
+              buf[0] >= 128 && buf[1] >= 128 && buf[2] >= 128 &&
+              buf[3] >= 128 && buf[4] >= 128 && buf[5] >= 128 &&
+              buf[6] >= 128 && buf[7] >= 128 && buf[8] >= 128 && buf[9] < 2 &&
+              \result.value == (buf[0] - 128) + 128 * (buf[1] - 128) +
+                               16384 * (buf[2] - 128) + 2097152 * (buf[3] - 128) +
+                               268435456 * (buf[4] - 128) +
+                               34359738368 * (buf[5] - 128) +
+                               4398046511104 * (buf[6] - 128) +
+                               562949953421312 * (buf[7] - 128) +
+                               72057594037927936 * (buf[8] - 128) +
+                               9223372036854775808 * buf[9];
     ensures \result.status != NORMFS_UINTN_VARINT_OK ==>
               \result.value == 0 && \result.consumed == 0;
 */

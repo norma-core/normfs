@@ -9,7 +9,13 @@ use normfs_types::{CompressionType, EncryptionType};
 
 pub const STORE_HEADER_V0_VERSION: u64 = 0;
 pub const STORE_HEADER_V1_VERSION: u64 = 1;
-pub const STORE_HEADER_V1_MAX_SIZE: usize = 41;
+
+/// The version word keeps its V0 encoding, a fixed 8 byte little-endian u64,
+/// so that readers predating V1 still report an unsupported version instead of
+/// misparsing the file.
+pub const STORE_HEADER_VERSION_SIZE: usize = 8;
+pub const STORE_HEADER_V1_MIN_SIZE: usize = 12;
+pub const STORE_HEADER_V1_MAX_SIZE: usize = 48;
 
 const NORMFS_STORE_HEADER_OK: c_int = 0;
 const NORMFS_STORE_HEADER_ERR_TRUNCATED: c_int = 1;
@@ -89,6 +95,7 @@ struct CEncodeResult {
 #[repr(C)]
 struct CDecodeResult {
     header: CStoreHeaderV1,
+    version: u64,
     consumed: usize,
     status: c_int,
 }
@@ -128,10 +135,11 @@ fn map_status(status: c_int, version: u64) -> Result<(), StoreHeaderV1Error> {
     }
 }
 
-/// Reads the version of a header without consuming it.
+/// Reads the version word of a header without consuming the rest of it.
 ///
-/// A V0 header starts with a `u64` little-endian zero, so byte zero tells the
-/// two encodings apart before either decoder runs.
+/// Both versions carry the version as a `u64` little-endian word at offset 0,
+/// which is what lets a reader tell them apart, and what lets a V0-only reader
+/// reject a V1 file cleanly.
 pub fn peek_version(data: &[u8]) -> Result<u64, StoreHeaderV1Error> {
     let result = unsafe { normfs_store_header_peek_version(data.as_ptr(), data.len()) };
     map_status(result.status, result.version)?;
@@ -208,8 +216,7 @@ impl StoreHeaderV1 {
 
     pub fn from_bytes(data: &[u8]) -> Result<(Self, usize), StoreHeaderV1Error> {
         let result = unsafe { normfs_store_header_v1_decode(data.as_ptr(), data.len()) };
-        let version = peek_version(data).unwrap_or(STORE_HEADER_V1_VERSION);
-        map_status(result.status, version)?;
+        map_status(result.status, result.version)?;
 
         let compression = compression_type_from_u64(result.header.compression)
             .map_err(|_| StoreHeaderV1Error::UnsupportedCompression(result.header.compression))?;

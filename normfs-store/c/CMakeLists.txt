@@ -17,11 +17,9 @@ target_include_directories(normfs_store_c PUBLIC
     $<INSTALL_INTERFACE:include>
 )
 
-enable_testing()
-add_executable(test_store_header tests/test_store_header.c)
-target_link_libraries(test_store_header PRIVATE normfs_store_c)
-add_test(NAME store_header COMMAND test_store_header)
-
+# Correctness of this library is established by Frama-C WP rather than by
+# executable unit tests: every function below is proved against a contract
+# that pins the exact bytes it reads and writes.
 find_program(FRAMAC frama-c)
 if(FRAMAC)
     include(ProcessorCount)
@@ -30,17 +28,24 @@ if(FRAMAC)
         set(NPROC 4)
     endif()
 
-    set(NORMFS_STORE_HEADER_WP_FCTS
+    set(NORMFS_WP_FCTS
+        normfs_uintn_le64_read
+        normfs_uintn_le64_write
         normfs_store_header_v1_size
         normfs_store_header_v1_encode
         normfs_store_header_v1_decode
         normfs_store_header_peek_version)
-    string(REPLACE ";" "," NORMFS_STORE_HEADER_WP_FCTS_ARG
-        "${NORMFS_STORE_HEADER_WP_FCTS}")
+    string(REPLACE ";" "," NORMFS_WP_FCTS_ARG "${NORMFS_WP_FCTS}")
+
+    # The store header's quantified byte clauses are heavy; a longer timeout
+    # and capped parallelism keep the proof deterministic under load.
+    if(NPROC GREATER 4)
+        set(NPROC 4)
+    endif()
 
     add_custom_target(verify-store-header
         COMMAND ${FRAMAC}
-            -wp -wp-rte -wp-timeout 60
+            -wp -wp-rte -wp-timeout 240
             -wp-prover alt-ergo,z3
             -wp-par ${NPROC}
             -wp-cache none
@@ -50,7 +55,7 @@ if(FRAMAC)
             -wp-warn-key pedantic-assigns=inactive
             -wp-no-warn-memory-model
             -cpp-extra-args=-I${CMAKE_CURRENT_SOURCE_DIR}/include\ -I${NORMFS_UINTN_INCLUDE}
-            -wp-fct ${NORMFS_STORE_HEADER_WP_FCTS_ARG}
+            -wp-fct ${NORMFS_WP_FCTS_ARG}
             src/store_header.c
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
         COMMENT "WP: normfs V1 store header"

@@ -21,7 +21,8 @@ pub use reader::{ReadRangeResult, WalContent, get_wal_header};
 pub use wal_header::{WalHeader, WalHeaderError};
 pub use wal_header_v1::{
     AnyWalHeader, AnyWalHeaderError, WAL_HEADER_V0_VERSION, WAL_HEADER_V1_MAX_SIZE,
-    WAL_HEADER_V1_VERSION, WalHeaderV1, WalHeaderV1Error, peek_version as peek_wal_header_version,
+    WAL_HEADER_V1_MIN_SIZE, WAL_HEADER_V1_VERSION, WAL_HEADER_VERSION_SIZE, WalHeaderV1,
+    WalHeaderV1Error, peek_version as peek_wal_header_version,
 };
 
 #[cfg(test)]

@@ -7,26 +7,21 @@ CPPFLAGS := -Iinclude -I$(UINTN_INCLUDE)
 BUILD := build
 LIB := $(BUILD)/libnormfs_store_c.a
 OBJ := $(BUILD)/store_header.o
-TEST := $(BUILD)/test_store_header
+HEADERS := $(wildcard include/normfs/*.h) $(UINTN_INCLUDE)/uintn/varint.h \
+           $(UINTN_INCLUDE)/uintn/le.h
 
-.PHONY: all test clean
+.PHONY: all clean
 
 all: $(LIB)
 
 $(BUILD):
 	mkdir -p $(BUILD)
 
-$(OBJ): src/store_header.c include/normfs/store_header.h | $(BUILD)
+$(OBJ): src/store_header.c $(HEADERS) | $(BUILD)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
 
 $(LIB): $(OBJ)
 	$(AR) crs $@ $(OBJ)
-
-$(TEST): tests/test_store_header.c $(LIB)
-	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(LIB) -o $@
-
-test: $(TEST)
-	$(TEST)
 
 clean:
 	rm -rf $(BUILD)

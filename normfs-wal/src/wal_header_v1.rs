@@ -8,7 +8,13 @@ use super::wal_header::{WalHeader, WalHeaderError};
 
 pub const WAL_HEADER_V0_VERSION: u64 = 0;
 pub const WAL_HEADER_V1_VERSION: u64 = 1;
-pub const WAL_HEADER_V1_MAX_SIZE: usize = 13;
+
+/// The version word keeps its V0 encoding, a fixed 8 byte little-endian u64,
+/// so that readers predating V1 still report an unsupported version instead of
+/// misparsing the file.
+pub const WAL_HEADER_VERSION_SIZE: usize = 8;
+pub const WAL_HEADER_V1_MIN_SIZE: usize = 11;
+pub const WAL_HEADER_V1_MAX_SIZE: usize = 20;
 
 const NORMFS_WAL_HEADER_OK: c_int = 0;
 const NORMFS_WAL_HEADER_ERR_TRUNCATED: c_int = 1;
@@ -89,6 +95,7 @@ struct CEncodeResult {
 #[repr(C)]
 struct CDecodeResult {
     header: CWalHeaderV1,
+    version: u64,
     consumed: usize,
     status: c_int,
 }
@@ -101,6 +108,8 @@ struct CVersionResult {
 }
 
 unsafe extern "C" {
+    fn normfs_wal_header_v1_validate(header: *const CWalHeaderV1) -> c_int;
+
     fn normfs_wal_header_v1_size(header: *const CWalHeaderV1) -> usize;
 
     fn normfs_wal_header_v1_encode(
@@ -134,10 +143,11 @@ fn map_status(status: c_int, header: &CWalHeaderV1, version: u64) -> Result<(), 
     }
 }
 
-/// Reads the version of a header without consuming it.
+/// Reads the version word of a header without consuming the rest of it.
 ///
-/// A V0 header starts with a `u64` little-endian zero, so byte zero tells the
-/// two encodings apart before either decoder runs.
+/// Both versions carry the version as a `u64` little-endian word at offset 0,
+/// which is what lets a reader tell them apart, and what lets a V0-only reader
+/// reject a V1 file cleanly.
 pub fn peek_version(data: &[u8]) -> Result<u64, WalHeaderV1Error> {
     let result = unsafe { normfs_wal_header_peek_version(data.as_ptr(), data.len()) };
     map_status(
@@ -152,6 +162,12 @@ pub fn peek_version(data: &[u8]) -> Result<u64, WalHeaderV1Error> {
     Ok(result.version)
 }
 
+/// Reads one varint off a stream without reading past its end.
+///
+/// Where the varint stops is decided by the verified C decoder, not here: a
+/// byte is appended and handed to it, and only its `Truncated` status causes
+/// another byte to be pulled. Rust supplies the I/O, the framing rules stay in
+/// one place.
 async fn read_varint_u64<R: AsyncRead + Unpin>(
     reader: &mut R,
 ) -> Result<(u64, usize), WalHeaderV1Error> {
@@ -164,13 +180,15 @@ async fn read_varint_u64<R: AsyncRead + Unpin>(
             .await
             .map_err(|_| WalHeaderV1Error::Truncated)?;
         len += 1;
-        if buf[len - 1] < 0x80 {
-            break;
+
+        match varint::decode_u64(&buf[..len]) {
+            Ok(decoded) => return Ok((decoded.value, decoded.consumed)),
+            Err(varint::VarintError::Truncated) => continue,
+            Err(e) => return Err(e.into()),
         }
     }
 
-    let decoded = varint::decode_u64(&buf[..len])?;
-    Ok((decoded.value, decoded.consumed))
+    Err(WalHeaderV1Error::Overflow)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -186,12 +204,14 @@ impl WalHeaderV1 {
         id_size_bytes: u64,
         num_entries_before: u64,
     ) -> Result<Self, WalHeaderV1Error> {
-        if !UintN::is_valid_data_size(data_size_bytes) {
-            return Err(WalHeaderV1Error::InvalidDataSizeBytes(data_size_bytes));
-        }
-        if !UintN::is_valid_data_size(id_size_bytes) {
-            return Err(WalHeaderV1Error::InvalidIdSizeBytes(id_size_bytes));
-        }
+        let candidate = CWalHeaderV1 {
+            data_size_bytes,
+            id_size_bytes,
+            num_entries_before,
+        };
+
+        let status = unsafe { normfs_wal_header_v1_validate(&candidate) };
+        map_status(status, &candidate, WAL_HEADER_V1_VERSION)?;
 
         Ok(Self {
             data_size_bytes,
@@ -241,8 +261,7 @@ impl WalHeaderV1 {
 
     pub fn from_bytes(data: &[u8]) -> Result<(Self, usize), WalHeaderV1Error> {
         let result = unsafe { normfs_wal_header_v1_decode(data.as_ptr(), data.len()) };
-        let version = peek_version(data).unwrap_or(WAL_HEADER_V1_VERSION);
-        map_status(result.status, &result.header, version)?;
+        map_status(result.status, &result.header, result.version)?;
 
         Ok((
             Self {
@@ -257,7 +276,13 @@ impl WalHeaderV1 {
     pub async fn from_reader<R: AsyncRead + Unpin>(
         reader: &mut R,
     ) -> Result<(Self, usize), WalHeaderV1Error> {
-        let (version, version_len) = read_varint_u64(reader).await?;
+        let mut version_word = [0u8; WAL_HEADER_VERSION_SIZE];
+        reader
+            .read_exact(&mut version_word)
+            .await
+            .map_err(|_| WalHeaderV1Error::Truncated)?;
+
+        let version = peek_version(&version_word)?;
         if version != WAL_HEADER_V1_VERSION {
             return Err(WalHeaderV1Error::UnsupportedVersion(version));
         }
@@ -270,7 +295,7 @@ impl WalHeaderV1 {
 
         Ok((
             header,
-            version_len + data_size_len + id_size_len + num_entries_len,
+            WAL_HEADER_VERSION_SIZE + data_size_len + id_size_len + num_entries_len,
         ))
     }
 }
@@ -332,15 +357,16 @@ impl AnyWalHeader {
     pub async fn from_reader<R: AsyncRead + Unpin>(
         reader: &mut R,
     ) -> Result<(Self, usize), AnyWalHeaderError> {
-        let mut version_byte = [0u8; 1];
+        let mut version_word = [0u8; WAL_HEADER_VERSION_SIZE];
         reader
-            .read_exact(&mut version_byte)
+            .read_exact(&mut version_word)
             .await
             .map_err(|_| WalHeaderV1Error::Truncated)?;
 
-        let mut reader = Cursor::new(version_byte).chain(reader);
+        let version = peek_version(&version_word)?;
+        let mut reader = Cursor::new(version_word).chain(reader);
 
-        if version_byte[0] == 0 {
+        if version == WAL_HEADER_V0_VERSION {
             let (header, bytes_read) = WalHeader::from_reader(&mut reader).await?;
             return Ok((AnyWalHeader::V0(header), bytes_read));
         }

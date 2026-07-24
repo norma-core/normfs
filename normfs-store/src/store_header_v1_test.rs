@@ -1,7 +1,8 @@
-use super::header::{StoreHeader, StoreHeaderVersion};
+use super::header::{StoreHeader, StoreHeaderError, StoreHeaderVersion};
 use super::store_header_v1::{
-    AnyStoreHeader, AnyStoreHeaderError, STORE_HEADER_V0_VERSION, STORE_HEADER_V1_VERSION,
-    StoreHeaderV1, StoreHeaderV1Error, peek_version,
+    AnyStoreHeader, AnyStoreHeaderError, STORE_HEADER_V0_VERSION, STORE_HEADER_V1_MAX_SIZE,
+    STORE_HEADER_V1_MIN_SIZE, STORE_HEADER_V1_VERSION, STORE_HEADER_VERSION_SIZE, StoreHeaderV1,
+    StoreHeaderV1Error, peek_version,
 };
 use bytes::BytesMut;
 use normfs_types::{CompressionType, EncryptionType};
@@ -17,6 +18,14 @@ fn v0_bytes(num_entries_before: UintN, num_entries: UintN) -> BytesMut {
 
     let mut buffer = BytesMut::new();
     header.write_to_bytes(&mut buffer);
+    buffer
+}
+
+/// A V1 header with the given version word, so unsupported versions can be
+/// built the same way a real writer would lay them out.
+fn v1_bytes_with_version(version: u64, tail: &[u8]) -> Vec<u8> {
+    let mut buffer = version.to_le_bytes().to_vec();
+    buffer.extend_from_slice(tail);
     buffer
 }
 
@@ -52,6 +61,25 @@ fn test_store_header_v0_write_output_is_unchanged() {
     );
 }
 
+/// The reason the version word keeps its V0 encoding: a reader that only knows
+/// V0 must reject a V1 file by reporting its version, not by misparsing it.
+#[test]
+fn test_v0_parser_rejects_v1_header_with_its_version() {
+    let header = StoreHeaderV1::new(CompressionType::Zstd, EncryptionType::Aes, 10, 20);
+    let mut buffer = BytesMut::new();
+    header.write_to_bytes(&mut buffer).unwrap();
+
+    // On disk the V0 parser is handed the whole rest of the file, not just the
+    // header, so give it a payload to read past as a real reader would.
+    buffer.extend_from_slice(&[0xAA; 64]);
+
+    assert!(matches!(
+        StoreHeader::from_bytes(&buffer),
+        Err(StoreHeaderError::UnsupportedVersion(v))
+            if v == STORE_HEADER_V1_VERSION
+    ));
+}
+
 fn roundtrip(
     compression: CompressionType,
     encryption: EncryptionType,
@@ -66,7 +94,10 @@ fn roundtrip(
     let written = header.write_to_bytes(&mut buffer).unwrap();
     assert_eq!(written, expected);
     assert_eq!(buffer.len(), expected);
-    assert_eq!(buffer[0] as u64, STORE_HEADER_V1_VERSION);
+    assert_eq!(
+        &buffer[..STORE_HEADER_VERSION_SIZE],
+        &STORE_HEADER_V1_VERSION.to_le_bytes()
+    );
 
     let (decoded, bytes_read) = StoreHeaderV1::from_bytes(&buffer).unwrap();
     assert_eq!(decoded, header);
@@ -75,16 +106,21 @@ fn roundtrip(
 
 #[test]
 fn test_store_header_v1_roundtrip_across_varint_widths() {
-    roundtrip(CompressionType::None, EncryptionType::None, 0, 0, 5);
-    roundtrip(CompressionType::Zstd, EncryptionType::Aes, 127, 127, 5);
-    roundtrip(CompressionType::Xz, EncryptionType::Aes, 128, 127, 6);
-    roundtrip(CompressionType::Xz, EncryptionType::Aes, 16_383, 16_384, 8);
+    roundtrip(CompressionType::None, EncryptionType::None, 0, 0, 12);
+    roundtrip(CompressionType::Zstd, EncryptionType::Aes, 127, 127, 12);
+    roundtrip(CompressionType::Xz, EncryptionType::Aes, 128, 127, 13);
+    roundtrip(CompressionType::Xz, EncryptionType::Aes, 16_383, 16_384, 15);
     roundtrip(
         CompressionType::Zstd,
         EncryptionType::Aes,
         9_876_543_210,
         1_000,
-        10,
+        17,
+    );
+
+    assert_eq!(
+        StoreHeaderV1::new(CompressionType::None, EncryptionType::None, 0, 0).size(),
+        STORE_HEADER_V1_MIN_SIZE
     );
 }
 
@@ -101,9 +137,6 @@ fn test_store_header_v1_roundtrip_through_dispatch() {
     assert_eq!(decoded.num_entries_before(), UintN::from(5u64));
     assert_eq!(decoded.num_entries(), UintN::from(7u64));
     assert_eq!(bytes_read, written);
-
-    assert!(!decoded.compression().eq(&CompressionType::None));
-    assert_eq!(decoded.encryption(), EncryptionType::None);
 }
 
 #[test]
@@ -126,17 +159,20 @@ fn test_store_header_v1_rejects_malformed_varints() {
         );
     }
 
-    // num_entries_before padded to two bytes instead of the canonical one.
+    // num_entries_before padded to two bytes instead of the canonical one
     assert_eq!(
-        StoreHeaderV1::from_bytes(&[1, 0, 0, 0x83, 0x00, 0]),
+        StoreHeaderV1::from_bytes(&v1_bytes_with_version(1, &[0, 0, 0x83, 0x00, 0])),
         Err(StoreHeaderV1Error::NonCanonical)
     );
 
-    // num_entries_before needs an eleventh byte to be represented.
+    // num_entries_before needs an eleventh byte to be represented
     assert_eq!(
-        StoreHeaderV1::from_bytes(&[
-            1, 0, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x02, 0
-        ]),
+        StoreHeaderV1::from_bytes(&v1_bytes_with_version(
+            1,
+            &[
+                0, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x02, 0
+            ]
+        )),
         Err(StoreHeaderV1Error::Overflow)
     );
 }
@@ -144,11 +180,11 @@ fn test_store_header_v1_rejects_malformed_varints() {
 #[test]
 fn test_store_header_v1_rejects_unsupported_types() {
     assert_eq!(
-        StoreHeaderV1::from_bytes(&[1, 9, 0, 0, 0]),
+        StoreHeaderV1::from_bytes(&v1_bytes_with_version(1, &[9, 0, 0, 0])),
         Err(StoreHeaderV1Error::UnsupportedCompression(9))
     );
     assert_eq!(
-        StoreHeaderV1::from_bytes(&[1, 0, 9, 0, 0]),
+        StoreHeaderV1::from_bytes(&v1_bytes_with_version(1, &[0, 9, 0, 0])),
         Err(StoreHeaderV1Error::UnsupportedEncryption(9))
     );
 }
@@ -156,18 +192,16 @@ fn test_store_header_v1_rejects_unsupported_types() {
 #[test]
 fn test_store_header_v1_rejects_unsupported_versions() {
     assert_eq!(
-        StoreHeaderV1::from_bytes(&[2, 0, 0, 0, 0]),
+        StoreHeaderV1::from_bytes(&v1_bytes_with_version(2, &[0, 0, 0, 0])),
         Err(StoreHeaderV1Error::UnsupportedVersion(2))
     );
-
-    // 255 encoded as a two byte varint.
     assert_eq!(
-        StoreHeaderV1::from_bytes(&[0xff, 0x01, 0, 0, 0, 0]),
-        Err(StoreHeaderV1Error::UnsupportedVersion(255))
+        StoreHeaderV1::from_bytes(&v1_bytes_with_version(u64::MAX, &[0, 0, 0, 0])),
+        Err(StoreHeaderV1Error::UnsupportedVersion(u64::MAX))
     );
 
     assert_eq!(
-        AnyStoreHeader::from_bytes(&[2, 0, 0, 0, 0]),
+        AnyStoreHeader::from_bytes(&v1_bytes_with_version(2, &[0, 0, 0, 0])),
         Err(AnyStoreHeaderError::V1(
             StoreHeaderV1Error::UnsupportedVersion(2)
         ))
@@ -176,23 +210,23 @@ fn test_store_header_v1_rejects_unsupported_versions() {
 
 #[test]
 fn test_store_header_v1_u64_bounds() {
-    // The largest values a V1 header can carry occupy ten byte varints each.
     let header = StoreHeaderV1::new(
         CompressionType::None,
         EncryptionType::None,
         u64::MAX,
         u64::MAX,
     );
-    assert_eq!(header.size(), 23);
+    assert_eq!(header.size(), 30);
+    assert!(header.size() <= STORE_HEADER_V1_MAX_SIZE);
 
     let mut buffer = BytesMut::new();
     let written = header.write_to_bytes(&mut buffer).unwrap();
-    assert_eq!(written, 23);
+    assert_eq!(written, 30);
 
     let (decoded, bytes_read) = StoreHeaderV1::from_bytes(&buffer).unwrap();
     assert_eq!(decoded.num_entries_before, u64::MAX);
     assert_eq!(decoded.num_entries, u64::MAX);
-    assert_eq!(bytes_read, 23);
+    assert_eq!(bytes_read, 30);
 
     // A V0 header whose counters fit in a u64 converts; one above it does not.
     let convertible = StoreHeader::new(

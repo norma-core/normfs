@@ -4,14 +4,23 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "uintn/le.h"
 #include "uintn/varint.h"
 
 #define NORMFS_WAL_HEADER_V0 0
 #define NORMFS_WAL_HEADER_V1 1
 
-/* version(1) + data_size_bytes(1) + id_size_bytes(1) + num_entries_before(10) */
-#define NORMFS_WAL_HEADER_V1_MAX_SIZE 13
-#define NORMFS_WAL_HEADER_V1_MIN_SIZE 4
+/*
+ * The version word keeps the V0 encoding: a fixed 8 byte little-endian u64 at
+ * offset 0. Anything else would break existing readers, which read those eight
+ * bytes unconditionally and report the value back as an unsupported version.
+ * Only the fields after it become varints.
+ */
+#define NORMFS_WAL_HEADER_VERSION_SIZE 8
+
+/* version(8) + data_size_bytes(1) + id_size_bytes(1) + num_entries_before(10) */
+#define NORMFS_WAL_HEADER_V1_MAX_SIZE 20
+#define NORMFS_WAL_HEADER_V1_MIN_SIZE 11
 
 /* Codes 0 .. 4 mirror enum normfs_uintn_varint_status. */
 enum normfs_wal_header_status {
@@ -38,6 +47,7 @@ struct normfs_wal_header_encode_result {
 
 struct normfs_wal_header_decode_result {
 	struct normfs_wal_header_v1 header;
+	uint64_t version;
 	size_t consumed;
 	int status;
 };
@@ -59,13 +69,15 @@ normfs_wal_header_v1_encode(const struct normfs_wal_header_v1 *header,
 struct normfs_wal_header_decode_result
 normfs_wal_header_v1_decode(const uint8_t *buf, size_t len);
 
-/*
- * A V0 header opens with a u64 little-endian version of zero, so its first
- * byte is 0x00. A V1 header opens with a canonical varint version. Byte zero
- * therefore separates the two encodings. V0 reports consumed == 0 because its
- * version field is not a varint and has to be re-read by the V0 decoder.
- */
+/* Reads the version word without consuming the rest of the header. */
 struct normfs_wal_header_version_result
 normfs_wal_header_peek_version(const uint8_t *buf, size_t len);
+
+/*
+ * Returns 1 exactly when the header has valid field sizes. The point is the
+ * proof, not the runtime value: Frama-C establishes that for every such header
+ * decoding its encoding recovers it byte for byte, i.e. decode(encode(h)) == h.
+ */
+int normfs_wal_header_v1_roundtrip_holds(const struct normfs_wal_header_v1 *header);
 
 #endif /* NORMFS_WAL_HEADER_H */
