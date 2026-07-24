@@ -15,10 +15,14 @@ mod compression;
 pub mod header;
 pub mod parser;
 mod ranges;
+pub mod store_header_v1;
 mod writer;
 
 #[cfg(test)]
 mod header_test;
+
+#[cfg(test)]
+mod store_header_v1_test;
 
 #[cfg(test)]
 mod signature_test;

@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description = "Variable-width unsigned integers with infinite scaling (u8, u16, u32, u64, BigInt)"
+links = "normfs_uintn_c"
 
 [dependencies]
 dashu-int = "0.4.1"

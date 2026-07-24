@@ -98,6 +98,7 @@ normfs_uintn_varint64_size(uint64_t value)
               \result.written == normfs_uintn_varint32_size_logic(value);
     ensures \result.status == NORMFS_UINTN_VARINT_ERR_NO_SPACE ==>
               \result.written == 0;
+    ensures \result.written <= out_len;
     ensures \result.status == NORMFS_UINTN_VARINT_OK &&
             value < 0x80 ==>
               out[0] == (uint8_t)value;
@@ -169,6 +170,7 @@ normfs_uintn_varint32_encode(uint32_t value, uint8_t *out, size_t out_len)
               \result.written == normfs_uintn_varint64_size_logic(value);
     ensures \result.status == NORMFS_UINTN_VARINT_ERR_NO_SPACE ==>
               \result.written == 0;
+    ensures \result.written <= out_len;
     ensures \result.status == NORMFS_UINTN_VARINT_OK &&
             value < 0x80 ==>
               out[0] == (uint8_t)value;

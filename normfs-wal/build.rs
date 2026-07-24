@@ -1,5 +1,5 @@
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn run(mut cmd: Command) {
@@ -9,18 +9,26 @@ fn run(mut cmd: Command) {
     }
 }
 
+fn uintn_include_dir(manifest_dir: &Path) -> PathBuf {
+    match env::var_os("DEP_NORMFS_UINTN_C_INCLUDE") {
+        Some(dir) => PathBuf::from(dir),
+        None => manifest_dir.join("../uintn-rs/c/include"),
+    }
+}
+
 fn main() {
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let include_dir = manifest_dir.join("c/include");
-    let src = manifest_dir.join("c/src/varint.c");
-    let obj = out_dir.join("varint.o");
-    let lib = out_dir.join("libnormfs_uintn_c.a");
+    let uintn_include_dir = uintn_include_dir(&manifest_dir);
+    let src = manifest_dir.join("c/src/wal_header.c");
+    let obj = out_dir.join("wal_header.o");
+    let lib = out_dir.join("libnormfs_wal_c.a");
 
     println!("cargo:rerun-if-changed={}", src.display());
     println!(
         "cargo:rerun-if-changed={}",
-        include_dir.join("uintn/varint.h").display()
+        include_dir.join("normfs/wal_header.h").display()
     );
 
     let cc = env::var_os("CC").unwrap_or_else(|| "cc".into());
@@ -36,6 +44,8 @@ fn main() {
         .arg("-pedantic")
         .arg("-I")
         .arg(&include_dir)
+        .arg("-I")
+        .arg(&uintn_include_dir)
         .arg("-c")
         .arg(&src)
         .arg("-o")
@@ -47,6 +57,5 @@ fn main() {
     run(ar_cmd);
 
     println!("cargo:rustc-link-search=native={}", out_dir.display());
-    println!("cargo:rustc-link-lib=static=normfs_uintn_c");
-    println!("cargo:include={}", include_dir.display());
+    println!("cargo:rustc-link-lib=static=normfs_wal_c");
 }

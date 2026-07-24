@@ -12,15 +12,23 @@ mod errors;
 mod reader;
 mod wal_entry;
 mod wal_header;
+mod wal_header_v1;
 mod writer;
 mod writer_buffer;
 
 pub use errors::*;
 pub use reader::{ReadRangeResult, WalContent, get_wal_header};
 pub use wal_header::{WalHeader, WalHeaderError};
+pub use wal_header_v1::{
+    AnyWalHeader, AnyWalHeaderError, WAL_HEADER_V0_VERSION, WAL_HEADER_V1_MAX_SIZE,
+    WAL_HEADER_V1_VERSION, WalHeaderV1, WalHeaderV1Error, peek_version as peek_wal_header_version,
+};
 
 #[cfg(test)]
 mod wal_header_test;
+
+#[cfg(test)]
+mod wal_header_v1_test;
 
 #[cfg(test)]
 mod wal_entry_test;
