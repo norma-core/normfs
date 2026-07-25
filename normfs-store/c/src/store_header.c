@@ -252,6 +252,8 @@ normfs_store_header_v1_encode(const struct normfs_store_header_v1 *header,
 
 	if (out_len < NORMFS_STORE_HEADER_VERSION_SIZE) return r;
 	normfs_uintn_le64_write(out, NORMFS_STORE_HEADER_V1);
+	/*@ assert out[0] == 1 && out[1] == 0 && out[2] == 0 && out[3] == 0 &&
+	             out[4] == 0 && out[5] == 0 && out[6] == 0 && out[7] == 0; */
 
 	field = normfs_uintn_varint64_encode(header->compression,
 	    out + off_compression, out_len - off_compression);
@@ -260,6 +262,8 @@ normfs_store_header_v1_encode(const struct normfs_store_header_v1 *header,
 	/* compression < 128, so one byte spelling itself, and off_encryption == 9. */
 	/*@ assert normfs_uintn_varint64_size_logic(header->compression) == 1; */
 	/*@ assert off_encryption == 9; */
+	/*@ assert out[0] == 1 && out[1] == 0 && out[2] == 0 && out[3] == 0 &&
+	             out[4] == 0 && out[5] == 0 && out[6] == 0 && out[7] == 0; */
 	/*@ assert out[8] == header->compression; */
 
 	field = normfs_uintn_varint64_encode(header->encryption,
@@ -268,6 +272,9 @@ normfs_store_header_v1_encode(const struct normfs_store_header_v1 *header,
 	off_entries_before = off_encryption + field.written;
 	/*@ assert normfs_uintn_varint64_size_logic(header->encryption) == 1; */
 	/*@ assert off_entries_before == 10; */
+	/*@ assert out[0] == 1 && out[1] == 0 && out[2] == 0 && out[3] == 0 &&
+	             out[4] == 0 && out[5] == 0 && out[6] == 0 && out[7] == 0; */
+	/*@ assert out[8] == header->compression; */
 	/*@ assert out[9] == header->encryption; */
 
 	field = normfs_uintn_varint64_encode(header->num_entries_before,
@@ -279,6 +286,10 @@ normfs_store_header_v1_encode(const struct normfs_store_header_v1 *header,
 	/*@ assert normfs_uintn_varint64_len(out + 10) ==
 	             normfs_uintn_varint64_size_logic(header->num_entries_before); */
 	/*@ assert off_entries == 10 + normfs_uintn_varint64_len(out + 10); */
+	/*@ assert out[0] == 1 && out[1] == 0 && out[2] == 0 && out[3] == 0 &&
+	             out[4] == 0 && out[5] == 0 && out[6] == 0 && out[7] == 0; */
+	/*@ assert out[8] == header->compression; */
+	/*@ assert out[9] == header->encryption; */
 	/*
 	 * The last byte of a canonical varint is below 128. That is what makes
 	 * normfs_uintn_varint64_len(out + 10) depend only on the bytes of this
@@ -302,12 +313,11 @@ normfs_store_header_v1_encode(const struct normfs_store_header_v1 *header,
 	             header->num_entries; */
 	/*@ assert normfs_uintn_varint64_len(out + off_entries) ==
 	             normfs_uintn_varint64_size_logic(header->num_entries); */
-	/* Restated after the final write: the bytes at out+10 were not touched. */
-	/*@ assert normfs_uintn_varint64_len(out + 10) ==
-	             normfs_uintn_varint64_size_logic(header->num_entries_before); */
-	/*@ assert normfs_uintn_varint64_value(out + 10) ==
-	             header->num_entries_before; */
 
+	/*@ assert out[0] == 1 && out[1] == 0 && out[2] == 0 && out[3] == 0 &&
+	             out[4] == 0 && out[5] == 0 && out[6] == 0 && out[7] == 0; */
+	/*@ assert out[8] == header->compression; */
+	/*@ assert out[9] == header->encryption; */
 	r.written = end;
 	r.status = NORMFS_STORE_HEADER_OK;
 	return r;
@@ -339,6 +349,19 @@ normfs_store_header_v1_encode(const struct normfs_store_header_v1 *header,
               (len >= NORMFS_STORE_HEADER_VERSION_SIZE &&
                normfs_uintn_le64_logic(buf) != NORMFS_STORE_HEADER_V1);
 
+    // completeness: a well formed V1 encoding always decodes. Without this the
+    // round trip cannot conclude that decode accepted what encode produced.
+    ensures (normfs_uintn_le64_logic(buf) == NORMFS_STORE_HEADER_V1 &&
+             normfs_store_header_valid_compression(buf[8]) &&
+             normfs_store_header_valid_encryption(buf[9]) &&
+             normfs_uintn_varint64_canonical(buf + 10) &&
+             normfs_uintn_varint64_canonical(
+               buf + 10 + normfs_uintn_varint64_len(buf + 10)) &&
+             10 + normfs_uintn_varint64_len(buf + 10) +
+               normfs_uintn_varint64_len(
+                 buf + 10 + normfs_uintn_varint64_len(buf + 10)) <= len) ==>
+              \result.status == NORMFS_STORE_HEADER_OK;
+
     ensures \result.status == NORMFS_STORE_HEADER_OK ==>
               normfs_store_header_valid_compression(\result.header.compression) &&
               normfs_store_header_valid_encryption(\result.header.encryption);
@@ -354,15 +377,15 @@ normfs_store_header_v1_encode(const struct normfs_store_header_v1 *header,
                 normfs_uintn_varint64_value(buf + 8) &&
               \result.header.encryption ==
                 normfs_uintn_varint64_value(buf +
-                  normfs_store_header_off_encryption(buf)) &&
+                  normfs_store_header_off_encryption(&buf[0])) &&
               \result.header.num_entries_before ==
                 normfs_uintn_varint64_value(buf +
-                  normfs_store_header_off_entries_before(buf)) &&
+                  normfs_store_header_off_entries_before(&buf[0])) &&
               \result.header.num_entries ==
                 normfs_uintn_varint64_value(buf +
-                  normfs_store_header_off_entries(buf));
+                  normfs_store_header_off_entries(&buf[0]));
     ensures \result.status == NORMFS_STORE_HEADER_OK ==>
-              \result.consumed == normfs_store_header_end(buf);
+              \result.consumed == normfs_store_header_end(&buf[0]);
 */
 struct normfs_store_header_decode_result
 normfs_store_header_v1_decode(const uint8_t *buf, size_t len)
@@ -486,6 +509,24 @@ normfs_store_header_v1_roundtrip_holds(
 	/*@ assert enc.written == 10 + normfs_uintn_varint64_len(&buf[10]) +
 	             normfs_uintn_varint64_len(
 	               &buf[10 + normfs_uintn_varint64_len(&buf[10])]); */
+	/*@ assert normfs_uintn_varint64_canonical(&buf[10]); */
+	/*@ assert normfs_uintn_varint64_canonical(
+	             &buf[10 + normfs_uintn_varint64_len(&buf[10])]); */
+
+	/*
+	 * The decoder states what it consumed in terms of the layout it reads
+	 * back, so tie that to what the encoder wrote: both type codes are one
+	 * byte, which fixes the read-side offsets at 9 and 10.
+	 */
+	/*@ assert normfs_uintn_varint64_len(&buf[8]) == 1; */
+	/*@ assert normfs_uintn_varint64_len(&buf[9]) == 1; */
+	/*@ assert normfs_store_header_off_encryption(&buf[0]) == 9; */
+	/*@ assert normfs_store_header_off_entries_before(&buf[0]) == 10; */
+	/*@ assert normfs_store_header_off_entries(&buf[0]) ==
+	             10 + normfs_uintn_varint64_len(&buf[10]); */
+	/*@ assert normfs_store_header_end(&buf[0]) == enc.written; */
+	/*@ assert normfs_uintn_varint64_value(&buf[8]) == header->compression; */
+	/*@ assert normfs_uintn_varint64_value(&buf[9]) == header->encryption; */
 
 	dec = normfs_store_header_v1_decode(buf, enc.written);
 
