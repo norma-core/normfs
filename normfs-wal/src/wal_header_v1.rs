@@ -403,3 +403,22 @@ impl AnyWalHeader {
         }
     }
 }
+
+/// Projects either version onto the three fields that entry parsing needs.
+///
+/// The entry layout does not depend on the header version, only on the two
+/// field widths and the running entry count, and both versions carry all
+/// three. Readers dispatch on the version once and then work with this view,
+/// so nothing downstream of the header has to know which version it came from.
+impl From<&AnyWalHeader> for WalHeader {
+    fn from(header: &AnyWalHeader) -> Self {
+        match header {
+            AnyWalHeader::V0(v0) => v0.clone(),
+            AnyWalHeader::V1(v1) => WalHeader {
+                data_size_bytes: v1.data_size_bytes,
+                id_size_bytes: v1.id_size_bytes,
+                num_entries_before: UintN::from(v1.num_entries_before),
+            },
+        }
+    }
+}

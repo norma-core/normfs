@@ -13,6 +13,7 @@ use uuid::Uuid;
 use crate::WalFile;
 use crate::header::{CompressionType, EncryptionType, FileAuthentication, StoreHeader};
 use crate::ranges::RangeStore;
+use crate::store_header_v1::StoreHeaderV1;
 use normfs_wal::{WalContent, WalStore};
 
 pub struct StoreWriteWorker {
@@ -245,15 +246,21 @@ impl StoreWriteWorker {
         let compression = wal_file.compression_type;
         let encryption = wal_file.encryption_type;
 
+        // New store files are written as V1. Readers dispatch on the version
+        // word, so files already on disk keep being read as V0.
         let header = StoreHeader::new(
             compression,
             encryption,
             wal_data.entries_before.clone(),
             wal_data.num_entries.clone(),
         );
+        let header_v1 = StoreHeaderV1::from_v0(&header)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
         let mut header_bytes = BytesMut::new();
-        header.write_to_bytes(&mut header_bytes);
+        header_v1
+            .write_to_bytes(&mut header_bytes)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
         let header_signature = self.crypto_ctx.sign(&header_bytes);
         let content_signature = self.crypto_ctx.sign(data);

@@ -4,7 +4,8 @@ use normfs_types::QueueId;
 use uintn::UintN;
 
 use crate::StoreError;
-use crate::header::{CompressionType, FileAuthentication, StoreHeader};
+use crate::header::{CompressionType, FileAuthentication};
+use crate::store_header_v1::AnyStoreHeader;
 
 pub fn extract_wal_header(
     store_file_bytes: &[u8],
@@ -16,7 +17,7 @@ pub fn extract_wal_header(
     let (file_auth, auth_size) = FileAuthentication::from_bytes(store_file_bytes)?;
 
     let content_after_auth = &store_file_bytes[auth_size..];
-    let (store_header, header_size) = StoreHeader::from_bytes(content_after_auth)?;
+    let (store_header, header_size) = AnyStoreHeader::from_bytes(content_after_auth)?;
 
     if verify_signatures {
         let header_bytes = &content_after_auth[..header_size];
@@ -50,7 +51,7 @@ pub fn extract_wal_header(
 
     // Handle decompression if needed
     let wal_content_bytes = if store_header.is_compressed() {
-        match store_header.compression {
+        match store_header.compression() {
             CompressionType::Gzip => {
                 crate::compression::zstd_decompress(wal_content_bytes.as_ref())?
             }

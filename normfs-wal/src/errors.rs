@@ -1,11 +1,13 @@
 use crate::wal_entry::WalEntryError;
 use crate::wal_header::WalHeaderError;
+use crate::wal_header_v1::AnyWalHeaderError;
 use uintn::UintN;
 
 #[derive(Debug)]
 pub enum WalError {
     IoError(std::io::Error),
     WalHeaderError(WalHeaderError),
+    AnyWalHeaderError(AnyWalHeaderError),
     WalEntryError(WalEntryError),
     PathError(uintn::paths::PathError),
     SendError,
@@ -19,6 +21,7 @@ impl std::fmt::Display for WalError {
         match self {
             WalError::IoError(e) => write!(f, "IO error: {}", e),
             WalError::WalHeaderError(e) => write!(f, "WAL header error: {}", e),
+            WalError::AnyWalHeaderError(e) => write!(f, "WAL header error: {}", e),
             WalError::WalEntryError(e) => write!(f, "WAL entry error: {}", e),
             WalError::PathError(e) => write!(f, "Path error: {}", e),
             WalError::SendError => write!(f, "Failed to send WAL entry"),
@@ -34,6 +37,7 @@ impl std::error::Error for WalError {
         match self {
             WalError::IoError(e) => Some(e),
             WalError::WalHeaderError(e) => Some(e),
+            WalError::AnyWalHeaderError(e) => Some(e),
             WalError::WalEntryError(e) => Some(e),
             WalError::PathError(e) => Some(e),
             _ => None,
@@ -44,6 +48,18 @@ impl std::error::Error for WalError {
 impl From<WalHeaderError> for WalError {
     fn from(e: WalHeaderError) -> Self {
         WalError::WalHeaderError(e)
+    }
+}
+
+impl From<AnyWalHeaderError> for WalError {
+    fn from(e: AnyWalHeaderError) -> Self {
+        WalError::AnyWalHeaderError(e)
+    }
+}
+
+impl From<crate::wal_header_v1::WalHeaderV1Error> for WalError {
+    fn from(e: crate::wal_header_v1::WalHeaderV1Error) -> Self {
+        WalError::AnyWalHeaderError(AnyWalHeaderError::V1(e))
     }
 }
 

@@ -2,9 +2,7 @@ use bytes::BytesMut;
 use std::os::raw::c_int;
 use uintn::{UintN, varint};
 
-use super::header::{
-    StoreHeader, StoreHeaderError, compression_type_from_u64, encryption_type_from_u64,
-};
+use super::header::{StoreHeader, StoreHeaderError};
 use normfs_types::{CompressionType, EncryptionType};
 
 pub const STORE_HEADER_V0_VERSION: u64 = 0;
@@ -23,6 +21,8 @@ const NORMFS_STORE_HEADER_ERR_OVERFLOW: c_int = 2;
 const NORMFS_STORE_HEADER_ERR_NON_CANONICAL: c_int = 3;
 const NORMFS_STORE_HEADER_ERR_NO_SPACE: c_int = 4;
 const NORMFS_STORE_HEADER_ERR_UNSUPPORTED_VERSION: c_int = 5;
+const NORMFS_STORE_HEADER_ERR_INVALID_COMPRESSION: c_int = 6;
+const NORMFS_STORE_HEADER_ERR_INVALID_ENCRYPTION: c_int = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StoreHeaderV1Error {
@@ -135,6 +135,50 @@ fn map_status(status: c_int, version: u64) -> Result<(), StoreHeaderV1Error> {
     }
 }
 
+/// Same as [`map_status`], but for the statuses that name a rejected field, so
+/// the error can carry the offending code back.
+fn map_field_status(
+    status: c_int,
+    version: u64,
+    header: &CStoreHeaderV1,
+) -> Result<(), StoreHeaderV1Error> {
+    match status {
+        NORMFS_STORE_HEADER_ERR_INVALID_COMPRESSION => Err(
+            StoreHeaderV1Error::UnsupportedCompression(header.compression),
+        ),
+        NORMFS_STORE_HEADER_ERR_INVALID_ENCRYPTION => Err(
+            StoreHeaderV1Error::UnsupportedEncryption(header.encryption),
+        ),
+        other => map_status(other, version),
+    }
+}
+
+/// Maps a compression code that the C decoder has already accepted.
+///
+/// This is not a second validation pass. `normfs_store_header_v1_validate`
+/// proves `0 <= compression <= NORMFS_STORE_COMPRESSION_MAX`, and both
+/// `normfs_store_header_v1_encode` and `_decode` return `OK` only when it
+/// holds, so the mapping is total on every value that reaches here.
+fn compression_from_c(value: u64) -> CompressionType {
+    match value {
+        0 => CompressionType::None,
+        1 => CompressionType::Gzip,
+        2 => CompressionType::Xz,
+        3 => CompressionType::Zstd,
+        _ => unreachable!("C decoder returned OK with compression {}", value),
+    }
+}
+
+/// Maps an encryption code that the C decoder has already accepted. See
+/// [`compression_from_c`] for why no error case is needed.
+fn encryption_from_c(value: u64) -> EncryptionType {
+    match value {
+        0 => EncryptionType::None,
+        1 => EncryptionType::Aes,
+        _ => unreachable!("C decoder returned OK with encryption {}", value),
+    }
+}
+
 /// Reads the version word of a header without consuming the rest of it.
 ///
 /// Both versions carry the version as a `u64` little-endian word at offset 0,
@@ -208,7 +252,7 @@ impl StoreHeaderV1 {
         let mut buf = [0u8; STORE_HEADER_V1_MAX_SIZE];
 
         let result = unsafe { normfs_store_header_v1_encode(&header, buf.as_mut_ptr(), buf.len()) };
-        map_status(result.status, STORE_HEADER_V1_VERSION)?;
+        map_field_status(result.status, STORE_HEADER_V1_VERSION, &header)?;
 
         dest.extend_from_slice(&buf[..result.written]);
         Ok(result.written)
@@ -216,17 +260,12 @@ impl StoreHeaderV1 {
 
     pub fn from_bytes(data: &[u8]) -> Result<(Self, usize), StoreHeaderV1Error> {
         let result = unsafe { normfs_store_header_v1_decode(data.as_ptr(), data.len()) };
-        map_status(result.status, result.version)?;
-
-        let compression = compression_type_from_u64(result.header.compression)
-            .map_err(|_| StoreHeaderV1Error::UnsupportedCompression(result.header.compression))?;
-        let encryption = encryption_type_from_u64(result.header.encryption)
-            .map_err(|_| StoreHeaderV1Error::UnsupportedEncryption(result.header.encryption))?;
+        map_field_status(result.status, result.version, &result.header)?;
 
         Ok((
             Self {
-                compression,
-                encryption,
+                compression: compression_from_c(result.header.compression),
+                encryption: encryption_from_c(result.header.encryption),
                 num_entries_before: result.header.num_entries_before,
                 num_entries: result.header.num_entries,
             },
@@ -330,5 +369,13 @@ impl AnyStoreHeader {
             AnyStoreHeader::V0(header) => header.num_entries.clone(),
             AnyStoreHeader::V1(header) => UintN::from(header.num_entries),
         }
+    }
+
+    pub fn is_encrypted(&self) -> bool {
+        self.encryption() != EncryptionType::None
+    }
+
+    pub fn is_compressed(&self) -> bool {
+        self.compression() != CompressionType::None
     }
 }

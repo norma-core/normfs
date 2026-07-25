@@ -1,6 +1,6 @@
 use normfs_crypto::CryptoContext;
 use normfs_types::QueueId;
-use normfs_wal::{WalError, WalFile, WalHeaderError, WalStore};
+use normfs_wal::{AnyWalHeaderError, WalError, WalFile, WalStore};
 use std::path::PathBuf;
 use std::{path::Path, sync::Arc};
 use tokio::fs;
@@ -31,12 +31,13 @@ mod signature_test;
 pub enum StoreError {
     Io(std::io::Error),
     Header(header::StoreHeaderError),
+    AnyHeader(store_header_v1::AnyStoreHeaderError),
     Decrypt,
     Wal(WalError),
     UintN(UintNError),
     Range(RangeStoreError),
     Path(paths::PathError),
-    WalHeaderError(WalHeaderError),
+    WalHeaderError(AnyWalHeaderError),
     FileNotFound,
     SignatureVerificationFailed,
 }
@@ -46,6 +47,7 @@ impl std::fmt::Display for StoreError {
         match self {
             StoreError::Io(e) => write!(f, "IO error: {}", e),
             StoreError::Header(e) => write!(f, "Store header error: {}", e),
+            StoreError::AnyHeader(e) => write!(f, "Store header error: {}", e),
             StoreError::Decrypt => write!(f, "Decryption error"),
             StoreError::Wal(e) => write!(f, "WAL error: {}", e),
             StoreError::UintN(e) => write!(f, "UintN error: {}", e),
@@ -63,6 +65,7 @@ impl std::error::Error for StoreError {
         match self {
             StoreError::Io(e) => Some(e),
             StoreError::Header(e) => Some(e),
+            StoreError::AnyHeader(e) => Some(e),
             StoreError::Wal(e) => Some(e),
             StoreError::UintN(e) => Some(e),
             StoreError::Range(e) => Some(e),
@@ -76,6 +79,12 @@ impl std::error::Error for StoreError {
 impl From<std::io::Error> for StoreError {
     fn from(e: std::io::Error) -> Self {
         StoreError::Io(e)
+    }
+}
+
+impl From<store_header_v1::AnyStoreHeaderError> for StoreError {
+    fn from(e: store_header_v1::AnyStoreHeaderError) -> Self {
+        StoreError::AnyHeader(e)
     }
 }
 
@@ -109,8 +118,8 @@ impl From<paths::PathError> for StoreError {
     }
 }
 
-impl From<WalHeaderError> for StoreError {
-    fn from(e: WalHeaderError) -> Self {
+impl From<AnyWalHeaderError> for StoreError {
+    fn from(e: AnyWalHeaderError) -> Self {
         StoreError::WalHeaderError(e)
     }
 }
@@ -456,7 +465,8 @@ impl PersistStore {
         let (file_auth, auth_size) = header::FileAuthentication::from_bytes(&content)?;
 
         let content_after_auth = &content[auth_size..];
-        let (store_header, header_size) = header::StoreHeader::from_bytes(content_after_auth)?;
+        let (store_header, header_size) =
+            store_header_v1::AnyStoreHeader::from_bytes(content_after_auth)?;
 
         if verify_signatures {
             let header_bytes = &content_after_auth[..header_size];
@@ -497,7 +507,7 @@ impl PersistStore {
 
         // Handle decompression if needed
         let wal_bytes = if store_header.is_compressed() {
-            match store_header.compression {
+            match store_header.compression() {
                 header::CompressionType::Gzip => {
                     bytes::Bytes::from(compression::zstd_decompress(wal_content_bytes.as_ref())?)
                 }

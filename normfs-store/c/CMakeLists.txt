@@ -31,10 +31,12 @@ if(FRAMAC)
     set(NORMFS_WP_FCTS
         normfs_uintn_le64_read
         normfs_uintn_le64_write
+        normfs_store_header_v1_validate
         normfs_store_header_v1_size
         normfs_store_header_v1_encode
         normfs_store_header_v1_decode
-        normfs_store_header_peek_version)
+        normfs_store_header_peek_version
+        normfs_store_header_v1_roundtrip_holds)
     string(REPLACE ";" "," NORMFS_WP_FCTS_ARG "${NORMFS_WP_FCTS}")
 
     # The store header's quantified byte clauses are heavy; a longer timeout
@@ -43,8 +45,15 @@ if(FRAMAC)
         set(NPROC 4)
     endif()
 
+    # The machine model is a build variable on purpose: a bound that carries
+    # on 64-bit can fail to carry at 32 bits, which is the target for embedded
+    # deployments. Proving against one model only would hide that class of bug.
+    set(NORMFS_MACHDEP "gcc_x86_64" CACHE STRING
+        "Frama-C machine model (gcc_x86_64, gcc_x86_32, ...)")
+
     add_custom_target(verify-store-header
         COMMAND ${FRAMAC}
+            -machdep ${NORMFS_MACHDEP}
             -wp -wp-rte -wp-timeout 240
             -wp-prover alt-ergo,z3
             -wp-par ${NPROC}

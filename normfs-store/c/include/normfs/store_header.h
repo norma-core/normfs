@@ -19,12 +19,20 @@
 
 /*
  * version(8) + compression + encryption + num_entries_before + num_entries.
- * The compression and encryption values are not range checked here: mapping
- * them onto the supported type sets belongs to the Rust side, so the proven
- * bound allows a full width varint for each.
+ * The compression and encryption values are range checked in C, so each is a
+ * single varint byte in every accepted header; the bound still allows a full
+ * width varint for each so that the buffer size is independent of the check.
  */
 #define NORMFS_STORE_HEADER_V1_MAX_SIZE 48
 #define NORMFS_STORE_HEADER_V1_MIN_SIZE 12
+
+/*
+ * Supported type codes. These are the on-disk encoding of the Rust
+ * CompressionType and EncryptionType enums; the mapping is checked here so
+ * that Rust does not repeat the decision.
+ */
+#define NORMFS_STORE_COMPRESSION_MAX 3 /* None, Gzip, Xz, Zstd */
+#define NORMFS_STORE_ENCRYPTION_MAX 1  /* None, Aes */
 
 /* Codes 0 .. 4 mirror enum normfs_uintn_varint_status. */
 enum normfs_store_header_status {
@@ -33,7 +41,9 @@ enum normfs_store_header_status {
 	NORMFS_STORE_HEADER_ERR_OVERFLOW = 2,
 	NORMFS_STORE_HEADER_ERR_NON_CANONICAL = 3,
 	NORMFS_STORE_HEADER_ERR_NO_SPACE = 4,
-	NORMFS_STORE_HEADER_ERR_UNSUPPORTED_VERSION = 5
+	NORMFS_STORE_HEADER_ERR_UNSUPPORTED_VERSION = 5,
+	NORMFS_STORE_HEADER_ERR_INVALID_COMPRESSION = 6,
+	NORMFS_STORE_HEADER_ERR_INVALID_ENCRYPTION = 7
 };
 
 struct normfs_store_header_v1 {
@@ -109,6 +119,8 @@ struct normfs_store_header_version_result {
     }
 */
 
+int normfs_store_header_v1_validate(const struct normfs_store_header_v1 *header);
+
 size_t normfs_store_header_v1_size(const struct normfs_store_header_v1 *header);
 
 struct normfs_store_header_encode_result
@@ -121,5 +133,15 @@ normfs_store_header_v1_decode(const uint8_t *buf, size_t len);
 /* Reads the version word without consuming the rest of the header. */
 struct normfs_store_header_version_result
 normfs_store_header_peek_version(const uint8_t *buf, size_t len);
+
+/*
+ * Returns 1 exactly when the header carries supported compression and
+ * encryption codes. The point is the proof, not the runtime value: Frama-C
+ * establishes that for every such header decoding its encoding recovers it
+ * byte for byte, i.e. decode(encode(h)) == h. This mirrors
+ * normfs_wal_header_v1_roundtrip_holds.
+ */
+int normfs_store_header_v1_roundtrip_holds(
+    const struct normfs_store_header_v1 *header);
 
 #endif /* NORMFS_STORE_HEADER_H */

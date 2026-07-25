@@ -1,4 +1,5 @@
-use crate::header::{FileAuthentication, StoreHeader, StoreHeaderError};
+use crate::store_header_v1::{AnyStoreHeader, AnyStoreHeaderError};
+use crate::header::{FileAuthentication, StoreHeaderError};
 use normfs_crypto::CryptoContext;
 use normfs_types::QueueId;
 use std::collections::HashMap;
@@ -19,6 +20,7 @@ pub struct RangeStore {
 pub enum RangeStoreError {
     Io(tokio::io::Error),
     Header(StoreHeaderError),
+    AnyHeader(AnyStoreHeaderError),
     Path(paths::PathError),
     UintN(UintNError),
     FileNotFound,
@@ -30,6 +32,7 @@ impl std::fmt::Display for RangeStoreError {
         match self {
             RangeStoreError::Io(e) => write!(f, "IO error: {}", e),
             RangeStoreError::Header(e) => write!(f, "Header error: {}", e),
+            RangeStoreError::AnyHeader(e) => write!(f, "Header error: {}", e),
             RangeStoreError::Path(e) => write!(f, "Path error: {}", e),
             RangeStoreError::UintN(e) => write!(f, "UintN error: {}", e),
             RangeStoreError::FileNotFound => write!(f, "File not found"),
@@ -45,11 +48,18 @@ impl std::error::Error for RangeStoreError {
         match self {
             RangeStoreError::Io(e) => Some(e),
             RangeStoreError::Header(e) => Some(e),
+            RangeStoreError::AnyHeader(e) => Some(e),
             RangeStoreError::Path(e) => Some(e),
             RangeStoreError::UintN(e) => Some(e),
             RangeStoreError::FileNotFound => None,
             RangeStoreError::SignatureVerificationFailed => None,
         }
+    }
+}
+
+impl From<AnyStoreHeaderError> for RangeStoreError {
+    fn from(e: AnyStoreHeaderError) -> Self {
+        RangeStoreError::AnyHeader(e)
     }
 }
 
@@ -128,7 +138,7 @@ impl RangeStore {
         let (file_auth, auth_size) = FileAuthentication::from_bytes(&buffer)?;
 
         let content_after_auth = &buffer[auth_size..];
-        let (header, header_size) = StoreHeader::from_bytes(content_after_auth)?;
+        let (header, header_size) = AnyStoreHeader::from_bytes(content_after_auth)?;
 
         if self.verify_signatures {
             let header_bytes = &content_after_auth[..header_size];
@@ -139,16 +149,16 @@ impl RangeStore {
 
         log::debug!(target: "normfs-store",
             "Read header for queue: {}, file_id: {:?}, entries_before: {:?}, num_entries: {:?}",
-            queue_id, file_id, header.num_entries_before, header.num_entries);
+            queue_id, file_id, header.num_entries_before(), header.num_entries());
 
-        if header.num_entries.is_zero() {
+        if header.num_entries().is_zero() {
             log::debug!(target: "normfs-store",
                 "Empty file (zero entries) for queue: {}, file_id: {:?}", queue_id, file_id);
             return Ok(None);
         }
 
-        let first_id = header.num_entries_before;
-        let num_entries_minus_one = header.num_entries.sub(&UintN::one())?;
+        let first_id = header.num_entries_before();
+        let num_entries_minus_one = header.num_entries().sub(&UintN::one())?;
         let last_id = first_id.add(&num_entries_minus_one);
 
         let range = (first_id.clone(), last_id.clone());

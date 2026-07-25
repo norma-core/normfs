@@ -10,8 +10,38 @@
         normfs_uintn_varint64_size_logic(encryption) +
         normfs_uintn_varint64_size_logic(entries_before) +
         normfs_uintn_varint64_size_logic(entries);
+
+      predicate normfs_store_header_valid_compression(integer c) =
+        0 <= c <= NORMFS_STORE_COMPRESSION_MAX;
+
+      predicate normfs_store_header_valid_encryption(integer e) =
+        0 <= e <= NORMFS_STORE_ENCRYPTION_MAX;
     }
 */
+
+/*@ requires \valid_read(header);
+    assigns \nothing;
+    ensures \result == NORMFS_STORE_HEADER_OK ||
+            \result == NORMFS_STORE_HEADER_ERR_INVALID_COMPRESSION ||
+            \result == NORMFS_STORE_HEADER_ERR_INVALID_ENCRYPTION;
+    ensures \result == NORMFS_STORE_HEADER_OK <==>
+              (normfs_store_header_valid_compression(header->compression) &&
+               normfs_store_header_valid_encryption(header->encryption));
+    ensures \result == NORMFS_STORE_HEADER_ERR_INVALID_COMPRESSION <==>
+              !normfs_store_header_valid_compression(header->compression);
+    ensures \result == NORMFS_STORE_HEADER_ERR_INVALID_ENCRYPTION <==>
+              (normfs_store_header_valid_compression(header->compression) &&
+               !normfs_store_header_valid_encryption(header->encryption));
+*/
+int
+normfs_store_header_v1_validate(const struct normfs_store_header_v1 *header)
+{
+	if (header->compression > (uint64_t)NORMFS_STORE_COMPRESSION_MAX)
+		return NORMFS_STORE_HEADER_ERR_INVALID_COMPRESSION;
+	if (header->encryption > (uint64_t)NORMFS_STORE_ENCRYPTION_MAX)
+		return NORMFS_STORE_HEADER_ERR_INVALID_ENCRYPTION;
+	return NORMFS_STORE_HEADER_OK;
+}
 
 /*@ requires \valid_read(header);
     assigns \nothing;
@@ -36,8 +66,13 @@ normfs_store_header_v1_size(const struct normfs_store_header_v1 *header)
     requires out_len == 0 || \valid(out + (0 .. out_len - 1));
     assigns out[0 .. out_len - 1];
     ensures \result.status == NORMFS_STORE_HEADER_OK ||
-            \result.status == NORMFS_STORE_HEADER_ERR_NO_SPACE;
+            \result.status == NORMFS_STORE_HEADER_ERR_NO_SPACE ||
+            \result.status == NORMFS_STORE_HEADER_ERR_INVALID_COMPRESSION ||
+            \result.status == NORMFS_STORE_HEADER_ERR_INVALID_ENCRYPTION;
     ensures \result.status != NORMFS_STORE_HEADER_OK ==> \result.written == 0;
+    ensures \result.status == NORMFS_STORE_HEADER_OK ==>
+              normfs_store_header_valid_compression(header->compression) &&
+              normfs_store_header_valid_encryption(header->encryption);
     ensures \result.status == NORMFS_STORE_HEADER_OK ==>
               \result.written ==
                 normfs_store_header_v1_size_logic(header->compression,
@@ -93,6 +128,13 @@ normfs_store_header_v1_encode(const struct normfs_store_header_v1 *header,
 	size_t off_entries_before;
 	size_t off_entries;
 	size_t end;
+	int valid;
+
+	valid = normfs_store_header_v1_validate(header);
+	if (valid != NORMFS_STORE_HEADER_OK) {
+		r.status = valid;
+		return r;
+	}
 
 	if (out_len < NORMFS_STORE_HEADER_VERSION_SIZE) return r;
 	normfs_uintn_le64_write(out, NORMFS_STORE_HEADER_V1);
@@ -161,9 +203,13 @@ normfs_store_header_v1_encode(const struct normfs_store_header_v1 *header,
             \result.status == NORMFS_STORE_HEADER_ERR_TRUNCATED ||
             \result.status == NORMFS_STORE_HEADER_ERR_OVERFLOW ||
             \result.status == NORMFS_STORE_HEADER_ERR_NON_CANONICAL ||
-            \result.status == NORMFS_STORE_HEADER_ERR_UNSUPPORTED_VERSION;
-    ensures \result.status != NORMFS_STORE_HEADER_OK ==>
-              \result.consumed == 0 &&
+            \result.status == NORMFS_STORE_HEADER_ERR_UNSUPPORTED_VERSION ||
+            \result.status == NORMFS_STORE_HEADER_ERR_INVALID_COMPRESSION ||
+            \result.status == NORMFS_STORE_HEADER_ERR_INVALID_ENCRYPTION;
+    ensures \result.status != NORMFS_STORE_HEADER_OK ==> \result.consumed == 0;
+    ensures (\result.status != NORMFS_STORE_HEADER_OK &&
+             \result.status != NORMFS_STORE_HEADER_ERR_INVALID_COMPRESSION &&
+             \result.status != NORMFS_STORE_HEADER_ERR_INVALID_ENCRYPTION) ==>
               \result.header.compression == 0 &&
               \result.header.encryption == 0 &&
               \result.header.num_entries_before == 0 &&
@@ -177,6 +223,9 @@ normfs_store_header_v1_encode(const struct normfs_store_header_v1 *header,
               (len >= NORMFS_STORE_HEADER_VERSION_SIZE &&
                normfs_uintn_le64_logic(buf) != NORMFS_STORE_HEADER_V1);
 
+    ensures \result.status == NORMFS_STORE_HEADER_OK ==>
+              normfs_store_header_valid_compression(\result.header.compression) &&
+              normfs_store_header_valid_encryption(\result.header.encryption);
     ensures \result.status == NORMFS_STORE_HEADER_OK ==>
               normfs_uintn_le64_logic(buf) == NORMFS_STORE_HEADER_V1 &&
               NORMFS_STORE_HEADER_V1_MIN_SIZE <= \result.consumed <=
@@ -211,6 +260,7 @@ normfs_store_header_v1_decode(const uint8_t *buf, size_t len)
 	struct normfs_uintn_varint64_decode_result field;
 	struct normfs_store_header_v1 header = {0u, 0u, 0u, 0u};
 	size_t offset;
+	int valid;
 
 	if (len < NORMFS_STORE_HEADER_VERSION_SIZE) return r;
 
@@ -253,10 +303,84 @@ normfs_store_header_v1_decode(const uint8_t *buf, size_t len)
 	header.num_entries = field.value;
 	offset += field.consumed;
 
+	valid = normfs_store_header_v1_validate(&header);
+	if (valid != NORMFS_STORE_HEADER_OK) {
+		r.header = header;
+		r.status = valid;
+		return r;
+	}
+
 	r.header = header;
 	r.consumed = offset;
 	r.status = NORMFS_STORE_HEADER_OK;
 	return r;
+}
+
+/*
+ * Round trip: for any header carrying supported compression and encryption
+ * codes, decoding its encoding recovers the header exactly and consumes
+ * exactly what was written. The proof is the body: WP discharges the asserts,
+ * so \result == 1 is not a runtime check but a theorem about every valid
+ * header. Same shape as normfs_wal_header_v1_roundtrip_holds.
+ */
+/*@ requires \valid_read(header);
+    assigns \nothing;
+    ensures \result == 1 <==>
+              (normfs_store_header_valid_compression(header->compression) &&
+               normfs_store_header_valid_encryption(header->encryption));
+*/
+int
+normfs_store_header_v1_roundtrip_holds(
+    const struct normfs_store_header_v1 *header)
+{
+	uint8_t buf[NORMFS_STORE_HEADER_V1_MAX_SIZE];
+	struct normfs_store_header_encode_result enc;
+	struct normfs_store_header_decode_result dec;
+	int ok;
+
+	enc = normfs_store_header_v1_encode(header, buf, sizeof(buf));
+	if (enc.status != NORMFS_STORE_HEADER_OK) return 0;
+
+	/*
+	 * The encoding is a valid V1 header, so the decoder must accept it.
+	 * Both type codes are below 128, so each occupies exactly one byte and
+	 * the two varints that follow start at fixed offsets 10 and beyond.
+	 */
+	/*@ assert normfs_uintn_le64_logic(&buf[0]) == NORMFS_STORE_HEADER_V1; */
+
+	/* Both codes are below 128, so each is a one byte varint spelling itself. */
+	/*@ assert normfs_uintn_varint64_size_logic(header->compression) == 1; */
+	/*@ assert normfs_uintn_varint64_size_logic(header->encryption) == 1; */
+	/*@ assert normfs_uintn_varint64_byte(header->compression, 0) ==
+	             header->compression; */
+	/*@ assert normfs_uintn_varint64_byte(header->encryption, 0) ==
+	             header->encryption; */
+	/*@ assert buf[8] == header->compression; */
+	/*@ assert normfs_store_header_voff_encryption(header->compression) == 9; */
+	/*@ assert buf[9] == header->encryption; */
+	/*@ assert normfs_store_header_voff_entries_before(header->compression,
+	                                                   header->encryption) == 10; */
+	/*@ assert normfs_uintn_varint64_value(&buf[10]) ==
+	             header->num_entries_before; */
+	/*@ assert normfs_uintn_varint64_len(&buf[10]) ==
+	             normfs_uintn_varint64_size_logic(header->num_entries_before); */
+	/*@ assert normfs_uintn_varint64_value(
+	               &buf[10 + normfs_uintn_varint64_len(&buf[10])]) ==
+	             header->num_entries; */
+	/*@ assert enc.written == 10 + normfs_uintn_varint64_len(&buf[10]) +
+	             normfs_uintn_varint64_len(
+	               &buf[10 + normfs_uintn_varint64_len(&buf[10])]); */
+
+	dec = normfs_store_header_v1_decode(buf, enc.written);
+
+	/* Bitwise so every field is compared with no short-circuit branch. */
+	ok = (dec.status == NORMFS_STORE_HEADER_OK);
+	ok &= (dec.consumed == enc.written);
+	ok &= (dec.header.compression == header->compression);
+	ok &= (dec.header.encryption == header->encryption);
+	ok &= (dec.header.num_entries_before == header->num_entries_before);
+	ok &= (dec.header.num_entries == header->num_entries);
+	return ok;
 }
 
 /*@ requires len == 0 || \valid_read(buf + (0 .. len - 1));

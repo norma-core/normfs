@@ -4,6 +4,7 @@ use std::time::Duration;
 use crate::ack_file_writer::{AckFileWriter, AckFileWriterSettings};
 use crate::wal_entry::WalEntryHeader;
 use crate::wal_header::WalHeader;
+use crate::wal_header_v1::WalHeaderV1;
 use crate::writer_buffer::OrderedBuffer;
 use crate::{WalError, WalFile, WalSettings};
 use bytes::{Bytes, BytesMut};
@@ -329,8 +330,10 @@ async fn new_file_writer(
 ) -> Result<AckFileWriter, WalError> {
     let file_path = file_id.to_file_path(queue_path.to_str().unwrap(), "wal");
 
+    // New files are written as V1. Readers dispatch on the version word, so
+    // files already on disk keep being read as V0.
     let mut header_buf = BytesMut::new();
-    header.write_to_bytes(&mut header_buf);
+    WalHeaderV1::from_v0(header)?.write_to_bytes(&mut header_buf)?;
 
     let writer = AckFileWriter::new(
         file_path,

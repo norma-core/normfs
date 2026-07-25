@@ -10,6 +10,7 @@ use xxhash_rust::xxh64;
 use super::errors::WalError;
 use super::wal_entry::WalEntryHeader;
 use super::wal_header::{WalHeader, WalHeaderError};
+use super::wal_header_v1::{AnyWalHeader, AnyWalHeaderError, WalHeaderV1Error};
 
 pub async fn read_wal_header(base_path: &Path, file_id: &UintN) -> Result<WalHeader, WalError> {
     let file_path = file_id.to_file_path(base_path.to_str().unwrap(), "wal");
@@ -31,9 +32,10 @@ pub async fn read_wal_header(base_path: &Path, file_id: &UintN) -> Result<WalHea
 
     let mut reader = BufReader::new(file.take(128));
 
-    let (wal_header, _) = match WalHeader::from_reader(&mut reader).await {
+    let (any_header, _) = match AnyWalHeader::from_reader(&mut reader).await {
         Ok(v) => v,
-        Err(WalHeaderError::SliceTooShort) => {
+        Err(AnyWalHeaderError::V0(WalHeaderError::SliceTooShort))
+        | Err(AnyWalHeaderError::V1(WalHeaderV1Error::Truncated)) => {
             log::warn!(
                 "WAL reader: file {} has incomplete header",
                 file_path.display()
@@ -42,6 +44,7 @@ pub async fn read_wal_header(base_path: &Path, file_id: &UintN) -> Result<WalHea
         }
         Err(e) => return Err(e.into()),
     };
+    let wal_header = WalHeader::from(&any_header);
 
     log::debug!(
         "WAL reader: successfully read header from file {}, entries_before: {}",
@@ -75,13 +78,15 @@ pub async fn get_wal_range(
 
     let mut reader = BufReader::new(file);
 
-    let (wal_header, _) = match WalHeader::from_reader(&mut reader).await {
+    let (any_header, _) = match AnyWalHeader::from_reader(&mut reader).await {
         Ok(v) => v,
-        Err(WalHeaderError::SliceTooShort) => {
+        Err(AnyWalHeaderError::V0(WalHeaderError::SliceTooShort))
+        | Err(AnyWalHeaderError::V1(WalHeaderV1Error::Truncated)) => {
             return Err(WalError::WalEmpty(file_id.clone()));
         }
         Err(e) => return Err(e.into()),
     };
+    let wal_header = WalHeader::from(&any_header);
 
     let mut first_id: Option<UintN> = None;
     let mut last_id: Option<UintN> = None;
@@ -144,9 +149,9 @@ pub async fn get_wal_range(
     Ok((wal_header, range))
 }
 
-pub fn get_wal_header(content: &Bytes) -> Result<WalHeader, WalHeaderError> {
-    let (header, _) = WalHeader::from_bytes(content)?;
-    Ok(header)
+pub fn get_wal_header(content: &Bytes) -> Result<WalHeader, AnyWalHeaderError> {
+    let (header, _) = AnyWalHeader::from_bytes(content)?;
+    Ok(WalHeader::from(&header))
 }
 
 pub struct WalContent {
@@ -176,7 +181,8 @@ pub async fn get_wal_content(base_path: &Path, file_id: &UintN) -> Result<WalCon
         ));
     }
 
-    let (wal_header, header_size) = WalHeader::from_bytes(&content)?;
+    let (any_header, header_size) = AnyWalHeader::from_bytes(&content)?;
+    let wal_header = WalHeader::from(&any_header);
 
     let mut num_entries: u64 = 0;
     let mut cursor = header_size;
@@ -301,7 +307,8 @@ pub async fn read_wal_file_range(
     }
 
     let mut reader = BufReader::new(file);
-    let (wal_header, _) = WalHeader::from_reader(&mut reader).await?;
+    let (any_header, _) = AnyWalHeader::from_reader(&mut reader).await?;
+    let wal_header = WalHeader::from(&any_header);
 
     let mut last_read_id: Option<UintN> = None;
     let mut last_processed_id: Option<UintN> = None;
@@ -474,9 +481,10 @@ pub async fn read_wal_bytes_range(
         });
     }
 
-    let (wal_header, header_size) = match WalHeader::from_bytes(content) {
+    let (any_header, header_size) = match AnyWalHeader::from_bytes(content) {
         Ok(v) => v,
-        Err(WalHeaderError::SliceTooShort) => {
+        Err(AnyWalHeaderError::V0(WalHeaderError::SliceTooShort))
+        | Err(AnyWalHeaderError::V1(WalHeaderV1Error::Truncated)) => {
             log::debug!(
                 "WAL reader: content has incomplete header for bytes range read, from {} to {:?} step {}",
                 from_id,
@@ -490,6 +498,7 @@ pub async fn read_wal_bytes_range(
         }
         Err(e) => return Err(e.into()),
     };
+    let wal_header = WalHeader::from(&any_header);
 
     let mut cursor = header_size;
     let mut last_read_id: Option<UintN> = None;
