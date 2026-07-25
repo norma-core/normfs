@@ -90,29 +90,143 @@ normfs_store_header_v1_size(const struct normfs_store_header_v1 *header)
               out[0] == 1 && out[1] == 0 && out[2] == 0 && out[3] == 0 &&
               out[4] == 0 && out[5] == 0 && out[6] == 0 && out[7] == 0;
 
+    // Both type codes are validated below 128, so each is a single varint byte
+    // spelling itself and everything after it sits at a constant offset. Stated
+    // as plain bytes rather than quantified over widths, the way the WAL header
+    // states its two size fields.
     ensures \result.status == NORMFS_STORE_HEADER_OK ==>
-              \forall integer k;
-                0 <= k < normfs_uintn_varint64_size_logic(header->compression) ==>
-                  out[8 + k] ==
-                    normfs_uintn_varint64_byte(header->compression, k);
-    ensures \result.status == NORMFS_STORE_HEADER_OK ==>
-              \forall integer k;
-                0 <= k < normfs_uintn_varint64_size_logic(header->encryption) ==>
-                  out[normfs_store_header_voff_encryption(header->compression) + k] ==
-                    normfs_uintn_varint64_byte(header->encryption, k);
-    ensures \result.status == NORMFS_STORE_HEADER_OK ==>
-              \forall integer k;
-                0 <= k <
-                  normfs_uintn_varint64_size_logic(header->num_entries_before) ==>
-                  out[normfs_store_header_voff_entries_before(header->compression,
-                        header->encryption) + k] ==
-                    normfs_uintn_varint64_byte(header->num_entries_before, k);
-    ensures \result.status == NORMFS_STORE_HEADER_OK ==>
-              \forall integer k;
-                0 <= k < normfs_uintn_varint64_size_logic(header->num_entries) ==>
-                  out[normfs_store_header_voff_entries(header->compression,
-                        header->encryption, header->num_entries_before) + k] ==
-                    normfs_uintn_varint64_byte(header->num_entries, k);
+              out[8] == header->compression &&
+              out[9] == header->encryption;
+
+    // num_entries_before, canonical varint, one clause per encoded width, and
+    // num_entries read off the offset that width fixes. Enumerating the widths
+    // is what the varint encoder's own contract does, and what lets the byte
+    // level facts survive the write that follows them.
+    ensures \result.status == NORMFS_STORE_HEADER_OK &&
+            header->num_entries_before < 0x80 ==>
+              out[10] == header->num_entries_before &&
+              normfs_uintn_varint64_value(out + 11) == header->num_entries &&
+              normfs_uintn_varint64_len(out + 11) ==
+                normfs_uintn_varint64_size_logic(header->num_entries) &&
+              \result.written == 11 +
+                normfs_uintn_varint64_size_logic(header->num_entries);
+    ensures \result.status == NORMFS_STORE_HEADER_OK &&
+            0x80 <= header->num_entries_before < 0x4000 ==>
+              out[10] == 128 + header->num_entries_before % 128 &&
+              out[11] == header->num_entries_before / 0x80 &&
+              normfs_uintn_varint64_value(out + 12) == header->num_entries &&
+              normfs_uintn_varint64_len(out + 12) ==
+                normfs_uintn_varint64_size_logic(header->num_entries) &&
+              \result.written == 12 +
+                normfs_uintn_varint64_size_logic(header->num_entries);
+    ensures \result.status == NORMFS_STORE_HEADER_OK &&
+            0x4000 <= header->num_entries_before < 0x200000 ==>
+              out[10] == 128 + header->num_entries_before % 128 &&
+              out[11] == 128 + (header->num_entries_before / 0x80) % 128 &&
+              out[12] == header->num_entries_before / 0x4000 &&
+              normfs_uintn_varint64_value(out + 13) == header->num_entries &&
+              normfs_uintn_varint64_len(out + 13) ==
+                normfs_uintn_varint64_size_logic(header->num_entries) &&
+              \result.written == 13 +
+                normfs_uintn_varint64_size_logic(header->num_entries);
+    ensures \result.status == NORMFS_STORE_HEADER_OK &&
+            0x200000 <= header->num_entries_before < 0x10000000 ==>
+              out[10] == 128 + header->num_entries_before % 128 &&
+              out[11] == 128 + (header->num_entries_before / 0x80) % 128 &&
+              out[12] == 128 + (header->num_entries_before / 0x4000) % 128 &&
+              out[13] == header->num_entries_before / 0x200000 &&
+              normfs_uintn_varint64_value(out + 14) == header->num_entries &&
+              normfs_uintn_varint64_len(out + 14) ==
+                normfs_uintn_varint64_size_logic(header->num_entries) &&
+              \result.written == 14 +
+                normfs_uintn_varint64_size_logic(header->num_entries);
+    ensures \result.status == NORMFS_STORE_HEADER_OK &&
+            0x10000000 <= header->num_entries_before < 0x800000000 ==>
+              out[10] == 128 + header->num_entries_before % 128 &&
+              out[11] == 128 + (header->num_entries_before / 0x80) % 128 &&
+              out[12] == 128 + (header->num_entries_before / 0x4000) % 128 &&
+              out[13] == 128 + (header->num_entries_before / 0x200000) % 128 &&
+              out[14] == header->num_entries_before / 0x10000000 &&
+              normfs_uintn_varint64_value(out + 15) == header->num_entries &&
+              normfs_uintn_varint64_len(out + 15) ==
+                normfs_uintn_varint64_size_logic(header->num_entries) &&
+              \result.written == 15 +
+                normfs_uintn_varint64_size_logic(header->num_entries);
+    ensures \result.status == NORMFS_STORE_HEADER_OK &&
+            0x800000000 <= header->num_entries_before < 0x40000000000 ==>
+              out[10] == 128 + header->num_entries_before % 128 &&
+              out[11] == 128 + (header->num_entries_before / 0x80) % 128 &&
+              out[12] == 128 + (header->num_entries_before / 0x4000) % 128 &&
+              out[13] == 128 + (header->num_entries_before / 0x200000) % 128 &&
+              out[14] == 128 + (header->num_entries_before / 0x10000000) % 128 &&
+              out[15] == header->num_entries_before / 0x800000000 &&
+              normfs_uintn_varint64_value(out + 16) == header->num_entries &&
+              normfs_uintn_varint64_len(out + 16) ==
+                normfs_uintn_varint64_size_logic(header->num_entries) &&
+              \result.written == 16 +
+                normfs_uintn_varint64_size_logic(header->num_entries);
+    ensures \result.status == NORMFS_STORE_HEADER_OK &&
+            0x40000000000 <= header->num_entries_before < 0x2000000000000 ==>
+              out[10] == 128 + header->num_entries_before % 128 &&
+              out[11] == 128 + (header->num_entries_before / 0x80) % 128 &&
+              out[12] == 128 + (header->num_entries_before / 0x4000) % 128 &&
+              out[13] == 128 + (header->num_entries_before / 0x200000) % 128 &&
+              out[14] == 128 + (header->num_entries_before / 0x10000000) % 128 &&
+              out[15] == 128 + (header->num_entries_before / 0x800000000) % 128 &&
+              out[16] == header->num_entries_before / 0x40000000000 &&
+              normfs_uintn_varint64_value(out + 17) == header->num_entries &&
+              normfs_uintn_varint64_len(out + 17) ==
+                normfs_uintn_varint64_size_logic(header->num_entries) &&
+              \result.written == 17 +
+                normfs_uintn_varint64_size_logic(header->num_entries);
+    ensures \result.status == NORMFS_STORE_HEADER_OK &&
+            0x2000000000000 <= header->num_entries_before < 0x100000000000000 ==>
+              out[10] == 128 + header->num_entries_before % 128 &&
+              out[11] == 128 + (header->num_entries_before / 0x80) % 128 &&
+              out[12] == 128 + (header->num_entries_before / 0x4000) % 128 &&
+              out[13] == 128 + (header->num_entries_before / 0x200000) % 128 &&
+              out[14] == 128 + (header->num_entries_before / 0x10000000) % 128 &&
+              out[15] == 128 + (header->num_entries_before / 0x800000000) % 128 &&
+              out[16] == 128 + (header->num_entries_before / 0x40000000000) % 128 &&
+              out[17] == header->num_entries_before / 0x2000000000000 &&
+              normfs_uintn_varint64_value(out + 18) == header->num_entries &&
+              normfs_uintn_varint64_len(out + 18) ==
+                normfs_uintn_varint64_size_logic(header->num_entries) &&
+              \result.written == 18 +
+                normfs_uintn_varint64_size_logic(header->num_entries);
+    ensures \result.status == NORMFS_STORE_HEADER_OK &&
+            0x100000000000000 <= header->num_entries_before < 0x8000000000000000 ==>
+              out[10] == 128 + header->num_entries_before % 128 &&
+              out[11] == 128 + (header->num_entries_before / 0x80) % 128 &&
+              out[12] == 128 + (header->num_entries_before / 0x4000) % 128 &&
+              out[13] == 128 + (header->num_entries_before / 0x200000) % 128 &&
+              out[14] == 128 + (header->num_entries_before / 0x10000000) % 128 &&
+              out[15] == 128 + (header->num_entries_before / 0x800000000) % 128 &&
+              out[16] == 128 + (header->num_entries_before / 0x40000000000) % 128 &&
+              out[17] == 128 + (header->num_entries_before / 0x2000000000000) % 128 &&
+              out[18] == header->num_entries_before / 0x100000000000000 &&
+              normfs_uintn_varint64_value(out + 19) == header->num_entries &&
+              normfs_uintn_varint64_len(out + 19) ==
+                normfs_uintn_varint64_size_logic(header->num_entries) &&
+              \result.written == 19 +
+                normfs_uintn_varint64_size_logic(header->num_entries);
+    ensures \result.status == NORMFS_STORE_HEADER_OK &&
+            0x8000000000000000 <= header->num_entries_before ==>
+              out[10] == 128 + header->num_entries_before % 128 &&
+              out[11] == 128 + (header->num_entries_before / 0x80) % 128 &&
+              out[12] == 128 + (header->num_entries_before / 0x4000) % 128 &&
+              out[13] == 128 + (header->num_entries_before / 0x200000) % 128 &&
+              out[14] == 128 + (header->num_entries_before / 0x10000000) % 128 &&
+              out[15] == 128 + (header->num_entries_before / 0x800000000) % 128 &&
+              out[16] == 128 + (header->num_entries_before / 0x40000000000) % 128 &&
+              out[17] == 128 + (header->num_entries_before / 0x2000000000000) % 128 &&
+              out[18] == 128 + (header->num_entries_before / 0x100000000000000) % 128 &&
+              out[19] == header->num_entries_before / 0x8000000000000000 &&
+              normfs_uintn_varint64_value(out + 20) == header->num_entries &&
+              normfs_uintn_varint64_len(out + 20) ==
+                normfs_uintn_varint64_size_logic(header->num_entries) &&
+              \result.written == 20 +
+                normfs_uintn_varint64_size_logic(header->num_entries);
 */
 struct normfs_store_header_encode_result
 normfs_store_header_v1_encode(const struct normfs_store_header_v1 *header,
@@ -143,38 +257,35 @@ normfs_store_header_v1_encode(const struct normfs_store_header_v1 *header,
 	    out + off_compression, out_len - off_compression);
 	if (field.status != NORMFS_UINTN_VARINT_OK) return r;
 	off_encryption = off_compression + field.written;
-	/*@ assert off_encryption ==
-	             normfs_store_header_voff_encryption(header->compression); */
-	/*@ assert \forall integer k;
-	             0 <= k < normfs_uintn_varint64_size_logic(header->compression) ==>
-	               out[off_compression + k] ==
-	                 normfs_uintn_varint64_byte(header->compression, k); */
+	/* compression < 128, so one byte spelling itself, and off_encryption == 9. */
+	/*@ assert normfs_uintn_varint64_size_logic(header->compression) == 1; */
+	/*@ assert off_encryption == 9; */
+	/*@ assert out[8] == header->compression; */
 
 	field = normfs_uintn_varint64_encode(header->encryption,
 	    out + off_encryption, out_len - off_encryption);
 	if (field.status != NORMFS_UINTN_VARINT_OK) return r;
 	off_entries_before = off_encryption + field.written;
-	/*@ assert off_entries_before ==
-	             normfs_store_header_voff_entries_before(header->compression,
-	                                                     header->encryption); */
-	/*@ assert \forall integer k;
-	             0 <= k < normfs_uintn_varint64_size_logic(header->encryption) ==>
-	               out[off_encryption + k] ==
-	                 normfs_uintn_varint64_byte(header->encryption, k); */
+	/*@ assert normfs_uintn_varint64_size_logic(header->encryption) == 1; */
+	/*@ assert off_entries_before == 10; */
+	/*@ assert out[9] == header->encryption; */
 
 	field = normfs_uintn_varint64_encode(header->num_entries_before,
 	    out + off_entries_before, out_len - off_entries_before);
 	if (field.status != NORMFS_UINTN_VARINT_OK) return r;
 	off_entries = off_entries_before + field.written;
-	/*@ assert off_entries ==
-	             normfs_store_header_voff_entries(header->compression,
-	                                              header->encryption,
-	                                              header->num_entries_before); */
-	/*@ assert \forall integer k;
-	             0 <= k <
-	               normfs_uintn_varint64_size_logic(header->num_entries_before) ==>
-	               out[off_entries_before + k] ==
-	                 normfs_uintn_varint64_byte(header->num_entries_before, k); */
+	/*@ assert normfs_uintn_varint64_value(out + 10) ==
+	             header->num_entries_before; */
+	/*@ assert normfs_uintn_varint64_len(out + 10) ==
+	             normfs_uintn_varint64_size_logic(header->num_entries_before); */
+	/*@ assert off_entries == 10 + normfs_uintn_varint64_len(out + 10); */
+	/*
+	 * The last byte of a canonical varint is below 128. That is what makes
+	 * normfs_uintn_varint64_len(out + 10) depend only on the bytes of this
+	 * field, so the write that follows cannot change it.
+	 */
+	/*@ assert out[off_entries - 1] < 128; */
+	/*@ assert normfs_uintn_varint64_canonical(out + 10); */
 
 	field = normfs_uintn_varint64_encode(header->num_entries,
 	    out + off_entries, out_len - off_entries);
@@ -187,10 +298,15 @@ normfs_store_header_v1_encode(const struct normfs_store_header_v1 *header,
 	                                               header->num_entries); */
 	/*@ assert NORMFS_STORE_HEADER_V1_MIN_SIZE <= end <=
 	             NORMFS_STORE_HEADER_V1_MAX_SIZE; */
-	/*@ assert \forall integer k;
-	             0 <= k < normfs_uintn_varint64_size_logic(header->num_entries) ==>
-	               out[off_entries + k] ==
-	                 normfs_uintn_varint64_byte(header->num_entries, k); */
+	/*@ assert normfs_uintn_varint64_value(out + off_entries) ==
+	             header->num_entries; */
+	/*@ assert normfs_uintn_varint64_len(out + off_entries) ==
+	             normfs_uintn_varint64_size_logic(header->num_entries); */
+	/* Restated after the final write: the bytes at out+10 were not touched. */
+	/*@ assert normfs_uintn_varint64_len(out + 10) ==
+	             normfs_uintn_varint64_size_logic(header->num_entries_before); */
+	/*@ assert normfs_uintn_varint64_value(out + 10) ==
+	             header->num_entries_before; */
 
 	r.written = end;
 	r.status = NORMFS_STORE_HEADER_OK;
