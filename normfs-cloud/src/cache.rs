@@ -1,11 +1,16 @@
 use crate::client::S3Client;
 use crate::errors::CloudError;
-use normfs_store::store_header_v1::AnyStoreHeader;
+use normfs_store::parser::parse_store_header;
 use normfs_types::QueueId;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use uintn::UintN;
+
+/// FileAuthentication is 152 bytes and the store header follows it. V1 tops out
+/// at 48 bytes; V0 carries two length-prefixed UintN counts, so the slack is
+/// there to cover it without a second round trip.
+const HEADER_PREFIX_LEN: u64 = 408;
 
 pub struct RangeCache {
     ranges: RwLock<HashMap<String, (UintN, UintN)>>,
@@ -38,12 +43,15 @@ impl RangeCache {
             key
         );
 
-        // Read just the header portion of the file (first 128 bytes should be enough)
+        // A store file is FileAuthentication (152 bytes) + StoreHeader + content,
+        // so the prefix has to cover both blocks, not just the header.
         log::debug!(
-            "Attempting to read header from S3 key: {} (0-127 bytes)",
-            key
+            "Attempting to read header from S3 key: {} (0-{} bytes)",
+            key,
+            HEADER_PREFIX_LEN - 1
         );
-        let header_bytes = match client.get_object_range(&key, 0, Some(127)).await {
+        let header_bytes = match client.get_object_range(&key, 0, Some(HEADER_PREFIX_LEN - 1)).await
+        {
             Ok(Some(bytes)) => bytes,
             Ok(None) => {
                 log::debug!(
@@ -74,7 +82,7 @@ impl RangeCache {
             file_id
         );
 
-        let (header, _) = match AnyStoreHeader::from_bytes(&header_bytes) {
+        let (header, _) = match parse_store_header(&header_bytes) {
             Ok(result) => result,
             Err(e) => {
                 log::error!(

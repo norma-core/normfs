@@ -253,3 +253,27 @@ fn test_store_header_v1_u64_bounds() {
         Err(StoreHeaderV1Error::ValueTooLarge)
     );
 }
+
+#[test]
+fn store_header_is_read_after_the_authentication_block() {
+    use crate::header::FileAuthentication;
+    use crate::parser::parse_store_header;
+
+    let header = StoreHeaderV1::new(CompressionType::None, EncryptionType::None, 7, 3);
+
+    let mut file_bytes = BytesMut::new();
+    FileAuthentication::new([42u8; 64], [99u8; 64]).write_to_bytes(&mut file_bytes);
+    header.write_to_bytes(&mut file_bytes).unwrap();
+
+    let (parsed, content_offset) = parse_store_header(&file_bytes).unwrap();
+    assert_eq!(AnyStoreHeader::V1(header), parsed);
+    assert_eq!(file_bytes.len(), content_offset);
+
+    // Reading from byte 0 lands in the signature block. Both blocks open with a
+    // u64 version whose V0 is 0, so this misparses rather than rejecting the
+    // version, which is what made the cloud range cache read the wrong bytes.
+    assert!(!matches!(
+        AnyStoreHeader::from_bytes(&file_bytes),
+        Ok((AnyStoreHeader::V1(h), _)) if h == header
+    ));
+}

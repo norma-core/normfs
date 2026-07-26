@@ -7,6 +7,20 @@ use crate::StoreError;
 use crate::header::{CompressionType, FileAuthentication};
 use crate::store_header_v1::AnyStoreHeader;
 
+/// Reads the store header of a store file, which starts after the
+/// FileAuthentication block rather than at byte 0. Returns the header and the
+/// offset where the content begins.
+///
+/// Both blocks open with a u64 version and V0 is 0 for each, so handing the
+/// file's first bytes straight to `AnyStoreHeader::from_bytes` does not fail
+/// on the version — it reads the signature block as a V0 header.
+pub fn parse_store_header(store_file_bytes: &[u8]) -> Result<(AnyStoreHeader, usize), StoreError> {
+    let (_, auth_size) = FileAuthentication::from_bytes(store_file_bytes)?;
+    let (store_header, header_size) = AnyStoreHeader::from_bytes(&store_file_bytes[auth_size..])?;
+
+    Ok((store_header, auth_size + header_size))
+}
+
 pub fn extract_wal_header(
     store_file_bytes: &[u8],
     crypto_ctx: &CryptoContext,
