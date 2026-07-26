@@ -42,6 +42,7 @@ if(FRAMAC)
 
     add_custom_target(verify-wal-header
         COMMAND ${FRAMAC}
+            -machdep gcc_x86_64
             -wp -wp-rte -wp-timeout 120
             -wp-prover alt-ergo,z3
             -wp-par ${NPROC}

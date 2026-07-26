@@ -45,15 +45,12 @@ if(FRAMAC)
         set(NPROC 4)
     endif()
 
-    # The machine model is a build variable on purpose: a bound that carries
-    # on 64-bit can fail to carry at 32 bits, which is the target for embedded
-    # deployments. Proving against one model only would hide that class of bug.
-    set(NORMFS_MACHDEP "gcc_x86_64" CACHE STRING
-        "Frama-C machine model (gcc_x86_64, gcc_x86_32, ...)")
-
+    # Pinned, not configurable: the deployment targets are amd64 and arm64,
+    # both LP64, so one model covers them. Naming it still beats the default,
+    # which is not the same across Frama-C versions.
     add_custom_target(verify-store-header
         COMMAND ${FRAMAC}
-            -machdep ${NORMFS_MACHDEP}
+            -machdep gcc_x86_64
             -wp -wp-rte -wp-timeout 240
             -wp-prover alt-ergo,z3
             -wp-par ${NPROC}

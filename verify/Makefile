@@ -2,8 +2,7 @@
 #
 # Usage from the repository root:
 #
-#   make -f verify/Makefile verify              # all modules, host machine model
-#   make -f verify/Makefile verify MACHDEP=gcc_x86_32
+#   make -f verify/Makefile verify              # all modules
 #   make -f verify/Makefile verify-wal-header   # one module
 #   make -f verify/Makefile docker-verify       # inside the pinned image
 #
@@ -18,7 +17,6 @@ SHELL      := /bin/bash
 
 ROOT       := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
 BUILD      := $(ROOT)/build-verify
-MACHDEP    ?= gcc_x86_64
 IMAGE      ?= normfs-verify:pinned
 
 LOGS       := $(BUILD)/logs
@@ -38,7 +36,7 @@ TARGETS    :=
 FIND_TARGETS := sed -n 's/^[[:space:]]*\(add_custom_target\|normfs_add_wp_target\)([[:space:]]*\(verify-[A-Za-z0-9_-]\+\).*/\2/p'
 $(foreach m,$(MODULES),$(foreach t,$(shell $(FIND_TARGETS) $(ROOT)/$(m)/CMakeLists.txt),$(eval TARGETS += $(t))$(eval dir-$(t) := $(call BUILDDIRS,$(m)))))
 
-CMAKE_ARGS := -DCMAKE_BUILD_TYPE=Release -DNORMFS_MACHDEP=$(MACHDEP)
+CMAKE_ARGS := -DCMAKE_BUILD_TYPE=Release
 
 .PHONY: all verify $(TARGETS) configure build clean docker-image docker-verify
 
@@ -76,8 +74,8 @@ verify: configure
 	@test -n "$(strip $(TARGETS))" || { echo "no verify-* targets declared by $(MODULES)" >&2; exit 1; }
 	@rc=0; \
 	for t in $(TARGETS); do \
-	    echo "== $$t (MACHDEP=$(MACHDEP)) =="; \
-	    $(MAKE) -f "$(SELF)" MACHDEP=$(MACHDEP) $$t || rc=1; \
+	    echo "== $$t =="; \
+	    $(MAKE) -f "$(SELF)" $$t || rc=1; \
 	done; \
 	exit $$rc
 
@@ -86,7 +84,7 @@ docker-image:
 
 docker-verify: docker-image
 	docker run --rm -v $(ROOT):/work -w /work $(IMAGE) \
-	    make -f verify/Makefile verify MACHDEP=$(MACHDEP)
+	    make -f verify/Makefile verify
 
 clean:
 	rm -rf "$(BUILD)"

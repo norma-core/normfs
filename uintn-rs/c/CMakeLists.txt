@@ -41,6 +41,7 @@ if(FRAMAC)
 
     add_custom_target(verify-varint
         COMMAND ${FRAMAC}
+            -machdep gcc_x86_64
             -wp -wp-rte -wp-timeout 60
             -wp-prover alt-ergo,z3
             -wp-par ${NPROC}
