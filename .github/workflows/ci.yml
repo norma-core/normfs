@@ -1,7 +1,8 @@
 name: ci
 
-# Scope is the varint proofs; a branch adding a module adds its verify-* target
-# to verify/Makefile and is picked up without editing this file.
+# Scope follows the tree: verify/Makefile discovers every C module and every
+# verify-* target it declares, so a branch adding a module is covered without
+# editing this file or that one.
 on:
   push:
     branches: [main, dev]
@@ -34,8 +35,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # The runner's gcc, not the pinned image: this checks portability.
-      - name: Build every C module
-        run: make -f verify/Makefile build
+      # test implies build. What WP cannot reach — compiler intrinsics above
+      # all — is covered by these tests and nothing else, so they must run.
+      - name: Build and test every C module
+        run: make -f verify/Makefile test
 
   image:
     name: toolchain image
