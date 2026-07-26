@@ -455,6 +455,278 @@ normfs_store_header_v1_decode(const uint8_t *buf, size_t len)
 	return r;
 }
 
+/*@ requires \valid_read(p + (0 .. 7));
+    requires 0x2000000000000 <= v < 0x100000000000000;
+    requires p[0] == 128 + v % 128;
+    requires p[1] == 128 + (v / 128ull) % 128;
+    requires p[2] == 128 + (v / 16384ull) % 128;
+    requires p[3] == 128 + (v / 2097152ull) % 128;
+    requires p[4] == 128 + (v / 268435456ull) % 128;
+    requires p[5] == 128 + (v / 34359738368ull) % 128;
+    requires p[6] == 128 + (v / 4398046511104ull) % 128;
+    requires p[7] == v / 562949953421312ull;
+    assigns \nothing;
+    ensures normfs_uintn_varint64_value(p) == v;
+*/
+static void
+normfs_store_header_reconstruct8(uint64_t v, const uint8_t *p)
+{
+	(void)p;
+	uint64_t q1 = v / 128ull;
+	uint64_t q2 = q1 / 128ull;
+	uint64_t q3 = q2 / 128ull;
+	uint64_t q4 = q3 / 128ull;
+	uint64_t q5 = q4 / 128ull;
+	uint64_t q6 = q5 / 128ull;
+	uint64_t q7 = q6 / 128ull;
+	(void)q7;
+	/*@ assert v == v % 128 + 128 * q1; */
+	/*@ assert v == v % 128 +
+	             128ull * q1; */
+	/*@ assert q1 == q1 % 128 + 128 * q2; */
+	/*@ assert v == v % 128 +
+	             128ull * (q1 % 128) +
+	             16384ull * q2; */
+	/*@ assert q2 == q2 % 128 + 128 * q3; */
+	/*@ assert v == v % 128 +
+	             128ull * (q1 % 128) +
+	             16384ull * (q2 % 128) +
+	             2097152ull * q3; */
+	/*@ assert q3 == q3 % 128 + 128 * q4; */
+	/*@ assert v == v % 128 +
+	             128ull * (q1 % 128) +
+	             16384ull * (q2 % 128) +
+	             2097152ull * (q3 % 128) +
+	             268435456ull * q4; */
+	/*@ assert q4 == q4 % 128 + 128 * q5; */
+	/*@ assert v == v % 128 +
+	             128ull * (q1 % 128) +
+	             16384ull * (q2 % 128) +
+	             2097152ull * (q3 % 128) +
+	             268435456ull * (q4 % 128) +
+	             34359738368ull * q5; */
+	/*@ assert q5 == q5 % 128 + 128 * q6; */
+	/*@ assert v == v % 128 +
+	             128ull * (q1 % 128) +
+	             16384ull * (q2 % 128) +
+	             2097152ull * (q3 % 128) +
+	             268435456ull * (q4 % 128) +
+	             34359738368ull * (q5 % 128) +
+	             4398046511104ull * q6; */
+	/*@ assert q6 == q6 % 128 + 128 * q7; */
+	/*@ assert v == v % 128 +
+	             128ull * (q1 % 128) +
+	             16384ull * (q2 % 128) +
+	             2097152ull * (q3 % 128) +
+	             268435456ull * (q4 % 128) +
+	             34359738368ull * (q5 % 128) +
+	             4398046511104ull * (q6 % 128) +
+	             562949953421312ull * q7; */
+	/*
+	 * The requires above state each byte via v divided by its own power of
+	 * 128 (v / 16384ull, and so on); the chain above built the same digits
+	 * via repeated division by 128 (q2 = q1 / 128). The two are the same
+	 * number, but nothing states that in one step, so bridge them here
+	 * before asking for p[7] < 128 and the final identity.
+	 */
+	/*@ assert q1 == v / 128ull; */
+	/*@ assert q2 == v / 16384ull; */
+	/*@ assert q3 == v / 2097152ull; */
+	/*@ assert q4 == v / 268435456ull; */
+	/*@ assert q5 == v / 34359738368ull; */
+	/*@ assert q6 == v / 4398046511104ull; */
+	/*@ assert q7 == v / 562949953421312ull; */
+	/*@ assert p[7] < 128; */
+	/*@ assert normfs_uintn_varint64_value(p) == v; */
+}
+
+/*@ requires \valid_read(p + (0 .. 8));
+    requires 0x100000000000000 <= v < 0x8000000000000000;
+    requires p[0] == 128 + v % 128;
+    requires p[1] == 128 + (v / 128ull) % 128;
+    requires p[2] == 128 + (v / 16384ull) % 128;
+    requires p[3] == 128 + (v / 2097152ull) % 128;
+    requires p[4] == 128 + (v / 268435456ull) % 128;
+    requires p[5] == 128 + (v / 34359738368ull) % 128;
+    requires p[6] == 128 + (v / 4398046511104ull) % 128;
+    requires p[7] == 128 + (v / 562949953421312ull) % 128;
+    requires p[8] == v / 72057594037927936ull;
+    assigns \nothing;
+    ensures normfs_uintn_varint64_value(p) == v;
+*/
+static void
+normfs_store_header_reconstruct9(uint64_t v, const uint8_t *p)
+{
+	(void)p;
+	uint64_t q1 = v / 128ull;
+	uint64_t q2 = q1 / 128ull;
+	uint64_t q3 = q2 / 128ull;
+	uint64_t q4 = q3 / 128ull;
+	uint64_t q5 = q4 / 128ull;
+	uint64_t q6 = q5 / 128ull;
+	uint64_t q7 = q6 / 128ull;
+	uint64_t q8 = q7 / 128ull;
+	(void)q8;
+	/*@ assert v == v % 128 + 128 * q1; */
+	/*@ assert v == v % 128 +
+	             128ull * q1; */
+	/*@ assert q1 == q1 % 128 + 128 * q2; */
+	/*@ assert v == v % 128 +
+	             128ull * (q1 % 128) +
+	             16384ull * q2; */
+	/*@ assert q2 == q2 % 128 + 128 * q3; */
+	/*@ assert v == v % 128 +
+	             128ull * (q1 % 128) +
+	             16384ull * (q2 % 128) +
+	             2097152ull * q3; */
+	/*@ assert q3 == q3 % 128 + 128 * q4; */
+	/*@ assert v == v % 128 +
+	             128ull * (q1 % 128) +
+	             16384ull * (q2 % 128) +
+	             2097152ull * (q3 % 128) +
+	             268435456ull * q4; */
+	/*@ assert q4 == q4 % 128 + 128 * q5; */
+	/*@ assert v == v % 128 +
+	             128ull * (q1 % 128) +
+	             16384ull * (q2 % 128) +
+	             2097152ull * (q3 % 128) +
+	             268435456ull * (q4 % 128) +
+	             34359738368ull * q5; */
+	/*@ assert q5 == q5 % 128 + 128 * q6; */
+	/*@ assert v == v % 128 +
+	             128ull * (q1 % 128) +
+	             16384ull * (q2 % 128) +
+	             2097152ull * (q3 % 128) +
+	             268435456ull * (q4 % 128) +
+	             34359738368ull * (q5 % 128) +
+	             4398046511104ull * q6; */
+	/*@ assert q6 == q6 % 128 + 128 * q7; */
+	/*@ assert v == v % 128 +
+	             128ull * (q1 % 128) +
+	             16384ull * (q2 % 128) +
+	             2097152ull * (q3 % 128) +
+	             268435456ull * (q4 % 128) +
+	             34359738368ull * (q5 % 128) +
+	             4398046511104ull * (q6 % 128) +
+	             562949953421312ull * q7; */
+	/*@ assert q7 == q7 % 128 + 128 * q8; */
+	/*@ assert v == v % 128 +
+	             128ull * (q1 % 128) +
+	             16384ull * (q2 % 128) +
+	             2097152ull * (q3 % 128) +
+	             268435456ull * (q4 % 128) +
+	             34359738368ull * (q5 % 128) +
+	             4398046511104ull * (q6 % 128) +
+	             562949953421312ull * (q7 % 128) +
+	             72057594037927936ull * q8; */
+	/* Same bridging as reconstruct8. */
+	/*@ assert q1 == v / 128ull; */
+	/*@ assert q2 == v / 16384ull; */
+	/*@ assert q3 == v / 2097152ull; */
+	/*@ assert q4 == v / 268435456ull; */
+	/*@ assert q5 == v / 34359738368ull; */
+	/*@ assert q6 == v / 4398046511104ull; */
+	/*@ assert q7 == v / 562949953421312ull; */
+	/*@ assert q8 == v / 72057594037927936ull; */
+	/*@ assert p[8] < 128; */
+	/*@ assert normfs_uintn_varint64_value(p) == v; */
+}
+
+/*@ requires \valid_read(p + (0 .. 9));
+    requires 0x8000000000000000 <= v;
+    requires p[0] == 128 + v % 128;
+    requires p[1] == 128 + (v / 128ull) % 128;
+    requires p[2] == 128 + (v / 16384ull) % 128;
+    requires p[3] == 128 + (v / 2097152ull) % 128;
+    requires p[4] == 128 + (v / 268435456ull) % 128;
+    requires p[5] == 128 + (v / 34359738368ull) % 128;
+    requires p[6] == 128 + (v / 4398046511104ull) % 128;
+    requires p[7] == 128 + (v / 562949953421312ull) % 128;
+    requires p[8] == 128 + (v / 72057594037927936ull) % 128;
+    requires p[9] == v / 9223372036854775808ull;
+    assigns \nothing;
+    ensures normfs_uintn_varint64_value(p) == v;
+*/
+static void
+normfs_store_header_reconstruct10(uint64_t v, const uint8_t *p)
+{
+	(void)p;
+	uint64_t q1 = v / 128ull;
+	uint64_t q2 = q1 / 128ull;
+	uint64_t q3 = q2 / 128ull;
+	uint64_t q4 = q3 / 128ull;
+	uint64_t q5 = q4 / 128ull;
+	uint64_t q6 = q5 / 128ull;
+	uint64_t q7 = q6 / 128ull;
+	uint64_t q8 = q7 / 128ull;
+	uint64_t q9 = q8 / 128ull;
+	(void)q9;
+	/*@ assert v == v % 128 + 128 * q1; */
+	/*@ assert v == v % 128 +
+	             128ull * q1; */
+	/*@ assert q1 == q1 % 128 + 128 * q2; */
+	/*@ assert v == v % 128 +
+	             128ull * (q1 % 128) +
+	             16384ull * q2; */
+	/*@ assert q2 == q2 % 128 + 128 * q3; */
+	/*@ assert v == v % 128 +
+	             128ull * (q1 % 128) +
+	             16384ull * (q2 % 128) +
+	             2097152ull * q3; */
+	/*@ assert q3 == q3 % 128 + 128 * q4; */
+	/*@ assert v == v % 128 +
+	             128ull * (q1 % 128) +
+	             16384ull * (q2 % 128) +
+	             2097152ull * (q3 % 128) +
+	             268435456ull * q4; */
+	/*@ assert q4 == q4 % 128 + 128 * q5; */
+	/*@ assert v == v % 128 +
+	             128ull * (q1 % 128) +
+	             16384ull * (q2 % 128) +
+	             2097152ull * (q3 % 128) +
+	             268435456ull * (q4 % 128) +
+	             34359738368ull * q5; */
+	/*@ assert q5 == q5 % 128 + 128 * q6; */
+	/*@ assert v == v % 128 +
+	             128ull * (q1 % 128) +
+	             16384ull * (q2 % 128) +
+	             2097152ull * (q3 % 128) +
+	             268435456ull * (q4 % 128) +
+	             34359738368ull * (q5 % 128) +
+	             4398046511104ull * q6; */
+	/*@ assert q6 == q6 % 128 + 128 * q7; */
+	/*@ assert v == v % 128 +
+	             128ull * (q1 % 128) +
+	             16384ull * (q2 % 128) +
+	             2097152ull * (q3 % 128) +
+	             268435456ull * (q4 % 128) +
+	             34359738368ull * (q5 % 128) +
+	             4398046511104ull * (q6 % 128) +
+	             562949953421312ull * q7; */
+	/*@ assert q7 == q7 % 128 + 128 * q8; */
+	/*@ assert v == v % 128 +
+	             128ull * (q1 % 128) +
+	             16384ull * (q2 % 128) +
+	             2097152ull * (q3 % 128) +
+	             268435456ull * (q4 % 128) +
+	             34359738368ull * (q5 % 128) +
+	             4398046511104ull * (q6 % 128) +
+	             562949953421312ull * (q7 % 128) +
+	             72057594037927936ull * q8; */
+	/*@ assert q8 == q8 % 128 + 128 * q9; */
+	/*@ assert v == v % 128 +
+	             128ull * (q1 % 128) +
+	             16384ull * (q2 % 128) +
+	             2097152ull * (q3 % 128) +
+	             268435456ull * (q4 % 128) +
+	             34359738368ull * (q5 % 128) +
+	             4398046511104ull * (q6 % 128) +
+	             562949953421312ull * (q7 % 128) +
+	             72057594037927936ull * (q8 % 128) +
+	             9223372036854775808ull * q9; */
+	/*@ assert normfs_uintn_varint64_value(p) == v; */
+}
+
 /*
  * Round trip: for any header carrying supported compression and encryption
  * codes, decoding its encoding recovers the header exactly and consumes
@@ -499,8 +771,188 @@ normfs_store_header_v1_roundtrip_holds(
 	/*@ assert buf[9] == header->encryption; */
 	/*@ assert normfs_store_header_voff_entries_before(header->compression,
 	                                                   header->encryption) == 10; */
-	/*@ assert normfs_uintn_varint64_value(&buf[10]) ==
-	             header->num_entries_before; */
+	/*
+	 * value(&buf[10]) == num_entries_before is a base-128 digit
+	 * reconstruction. Flat, it asks WP to verify a single identity spanning
+	 * up to 10 terms in one shot, which neither prover discharges past 2
+	 * bytes wide. Case-split on the width and peel one digit at a time via
+	 * the Euclidean identity a == a%128 + 128*(a/128): each step is a
+	 * 2-term fact, trivial for both provers, and the chain composes to the
+	 * same conclusion.
+	 */
+	if (header->num_entries_before < 0x80) {
+		/*@ assert normfs_uintn_varint64_value(&buf[10]) ==
+		             header->num_entries_before; */
+	} else
+	if (0x80 <= header->num_entries_before && header->num_entries_before < 0x4000) {
+		uint64_t v = header->num_entries_before;
+		uint64_t q1 = v / 128ull;
+		(void)q1;
+		/*@ assert v == v % 128 + 128 * q1; */
+		/*@ assert v == v % 128 +
+		             128ull * q1; */
+		/*@ assert normfs_uintn_varint64_value(&buf[10]) ==
+		             header->num_entries_before; */
+	} else
+	if (0x4000 <= header->num_entries_before && header->num_entries_before < 0x200000) {
+		uint64_t v = header->num_entries_before;
+		uint64_t q1 = v / 128ull;
+		uint64_t q2 = q1 / 128ull;
+		(void)q2;
+		/*@ assert v == v % 128 + 128 * q1; */
+		/*@ assert v == v % 128 +
+		             128ull * q1; */
+		/*@ assert q1 == q1 % 128 + 128 * q2; */
+		/*@ assert v == v % 128 +
+		             128ull * (q1 % 128) +
+		             16384ull * q2; */
+		/*@ assert q2 == v / 16384ull; */
+		/*@ assert normfs_uintn_varint64_value(&buf[10]) ==
+		             header->num_entries_before; */
+	} else
+	if (0x200000 <= header->num_entries_before && header->num_entries_before < 0x10000000) {
+		uint64_t v = header->num_entries_before;
+		uint64_t q1 = v / 128ull;
+		uint64_t q2 = q1 / 128ull;
+		uint64_t q3 = q2 / 128ull;
+		(void)q3;
+		/*@ assert v == v % 128 + 128 * q1; */
+		/*@ assert v == v % 128 +
+		             128ull * q1; */
+		/*@ assert q1 == q1 % 128 + 128 * q2; */
+		/*@ assert v == v % 128 +
+		             128ull * (q1 % 128) +
+		             16384ull * q2; */
+		/*@ assert q2 == q2 % 128 + 128 * q3; */
+		/*@ assert v == v % 128 +
+		             128ull * (q1 % 128) +
+		             16384ull * (q2 % 128) +
+		             2097152ull * q3; */
+				/*@ assert q3 == v / 2097152ull; */
+		/*@ assert normfs_uintn_varint64_value(&buf[10]) ==
+		             header->num_entries_before; */
+	} else
+	if (0x10000000 <= header->num_entries_before && header->num_entries_before < 0x800000000) {
+		uint64_t v = header->num_entries_before;
+		uint64_t q1 = v / 128ull;
+		uint64_t q2 = q1 / 128ull;
+		uint64_t q3 = q2 / 128ull;
+		uint64_t q4 = q3 / 128ull;
+		(void)q4;
+		/*@ assert v == v % 128 + 128 * q1; */
+		/*@ assert v == v % 128 +
+		             128ull * q1; */
+		/*@ assert q1 == q1 % 128 + 128 * q2; */
+		/*@ assert v == v % 128 +
+		             128ull * (q1 % 128) +
+		             16384ull * q2; */
+		/*@ assert q2 == q2 % 128 + 128 * q3; */
+		/*@ assert v == v % 128 +
+		             128ull * (q1 % 128) +
+		             16384ull * (q2 % 128) +
+		             2097152ull * q3; */
+		/*@ assert q3 == q3 % 128 + 128 * q4; */
+		/*@ assert v == v % 128 +
+		             128ull * (q1 % 128) +
+		             16384ull * (q2 % 128) +
+		             2097152ull * (q3 % 128) +
+		             268435456ull * q4; */
+				/*@ assert q4 == v / 268435456ull; */
+		/*@ assert normfs_uintn_varint64_value(&buf[10]) ==
+		             header->num_entries_before; */
+	} else
+	if (0x800000000 <= header->num_entries_before && header->num_entries_before < 0x40000000000) {
+		uint64_t v = header->num_entries_before;
+		uint64_t q1 = v / 128ull;
+		uint64_t q2 = q1 / 128ull;
+		uint64_t q3 = q2 / 128ull;
+		uint64_t q4 = q3 / 128ull;
+		uint64_t q5 = q4 / 128ull;
+		(void)q5;
+		/*@ assert v == v % 128 + 128 * q1; */
+		/*@ assert v == v % 128 +
+		             128ull * q1; */
+		/*@ assert q1 == q1 % 128 + 128 * q2; */
+		/*@ assert v == v % 128 +
+		             128ull * (q1 % 128) +
+		             16384ull * q2; */
+		/*@ assert q2 == q2 % 128 + 128 * q3; */
+		/*@ assert v == v % 128 +
+		             128ull * (q1 % 128) +
+		             16384ull * (q2 % 128) +
+		             2097152ull * q3; */
+		/*@ assert q3 == q3 % 128 + 128 * q4; */
+		/*@ assert v == v % 128 +
+		             128ull * (q1 % 128) +
+		             16384ull * (q2 % 128) +
+		             2097152ull * (q3 % 128) +
+		             268435456ull * q4; */
+		/*@ assert q4 == q4 % 128 + 128 * q5; */
+		/*@ assert v == v % 128 +
+		             128ull * (q1 % 128) +
+		             16384ull * (q2 % 128) +
+		             2097152ull * (q3 % 128) +
+		             268435456ull * (q4 % 128) +
+		             34359738368ull * q5; */
+				/*@ assert q5 == v / 34359738368ull; */
+		/*@ assert normfs_uintn_varint64_value(&buf[10]) ==
+		             header->num_entries_before; */
+	} else
+	if (0x40000000000 <= header->num_entries_before && header->num_entries_before < 0x2000000000000) {
+		uint64_t v = header->num_entries_before;
+		uint64_t q1 = v / 128ull;
+		uint64_t q2 = q1 / 128ull;
+		uint64_t q3 = q2 / 128ull;
+		uint64_t q4 = q3 / 128ull;
+		uint64_t q5 = q4 / 128ull;
+		uint64_t q6 = q5 / 128ull;
+		(void)q6;
+		/*@ assert v == v % 128 + 128 * q1; */
+		/*@ assert v == v % 128 +
+		             128ull * q1; */
+		/*@ assert q1 == q1 % 128 + 128 * q2; */
+		/*@ assert v == v % 128 +
+		             128ull * (q1 % 128) +
+		             16384ull * q2; */
+		/*@ assert q2 == q2 % 128 + 128 * q3; */
+		/*@ assert v == v % 128 +
+		             128ull * (q1 % 128) +
+		             16384ull * (q2 % 128) +
+		             2097152ull * q3; */
+		/*@ assert q3 == q3 % 128 + 128 * q4; */
+		/*@ assert v == v % 128 +
+		             128ull * (q1 % 128) +
+		             16384ull * (q2 % 128) +
+		             2097152ull * (q3 % 128) +
+		             268435456ull * q4; */
+		/*@ assert q4 == q4 % 128 + 128 * q5; */
+		/*@ assert v == v % 128 +
+		             128ull * (q1 % 128) +
+		             16384ull * (q2 % 128) +
+		             2097152ull * (q3 % 128) +
+		             268435456ull * (q4 % 128) +
+		             34359738368ull * q5; */
+		/*@ assert q5 == q5 % 128 + 128 * q6; */
+		/*@ assert v == v % 128 +
+		             128ull * (q1 % 128) +
+		             16384ull * (q2 % 128) +
+		             2097152ull * (q3 % 128) +
+		             268435456ull * (q4 % 128) +
+		             34359738368ull * (q5 % 128) +
+		             4398046511104ull * q6; */
+				/*@ assert q6 == v / 4398046511104ull; */
+		/*@ assert normfs_uintn_varint64_value(&buf[10]) ==
+		             header->num_entries_before; */
+	} else
+	if (0x2000000000000 <= header->num_entries_before && header->num_entries_before < 0x100000000000000) {
+		normfs_store_header_reconstruct8(header->num_entries_before, &buf[10]);
+	} else
+	if (0x100000000000000 <= header->num_entries_before && header->num_entries_before < 0x8000000000000000) {
+		normfs_store_header_reconstruct9(header->num_entries_before, &buf[10]);
+	} else {
+		normfs_store_header_reconstruct10(header->num_entries_before, &buf[10]);
+	}
+
 	/*@ assert normfs_uintn_varint64_len(&buf[10]) ==
 	             normfs_uintn_varint64_size_logic(header->num_entries_before); */
 	/*@ assert normfs_uintn_varint64_value(
@@ -537,6 +989,18 @@ normfs_store_header_v1_roundtrip_holds(
 	ok &= (dec.header.encryption == header->encryption);
 	ok &= (dec.header.num_entries_before == header->num_entries_before);
 	ok &= (dec.header.num_entries == header->num_entries);
+	/*
+	 * WAL's roundtrip has one fewer field comparison than this one and
+	 * folds straight through; store's has six, and WP does not fold the
+	 * chain of bitwise &= that far on its own. State it declaratively.
+	 */
+	/*@ assert ok == 1 <==>
+	             (dec.status == NORMFS_STORE_HEADER_OK &&
+	              dec.consumed == enc.written &&
+	              dec.header.compression == header->compression &&
+	              dec.header.encryption == header->encryption &&
+	              dec.header.num_entries_before == header->num_entries_before &&
+	              dec.header.num_entries == header->num_entries); */
 	return ok;
 }
 

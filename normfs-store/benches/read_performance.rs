@@ -2,6 +2,7 @@ use bytes::{Bytes, BytesMut};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use normfs_crypto::CryptoContext;
 use normfs_store::header::{CompressionType, EncryptionType, FileAuthentication, StoreHeader};
+use normfs_store::store_header_v1::AnyStoreHeader;
 use normfs_types::QueueIdResolver;
 use std::sync::Arc;
 use std::time::Duration;
@@ -133,7 +134,7 @@ fn benchmark_extract(
 
     // Parse StoreHeader
     let content_after_auth = &store_bytes[auth_size..];
-    let (store_header, header_size) = StoreHeader::from_bytes(content_after_auth)?;
+    let (store_header, header_size) = AnyStoreHeader::from_bytes(content_after_auth)?;
 
     // Verify signatures if enabled
     if config.verify_signatures {
