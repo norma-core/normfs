@@ -73,6 +73,17 @@ normfs_store_header_v1_size(const struct normfs_store_header_v1 *header)
     ensures \result.status == NORMFS_STORE_HEADER_OK ==>
               normfs_store_header_valid_compression(header->compression) &&
               normfs_store_header_valid_encryption(header->encryption);
+    // completeness: a valid header always encodes into a full size buffer.
+    // The converse of the clause above, and the direction the round trip
+    // theorem needs: without it nothing rules out NO_SPACE for a valid header
+    // even when the buffer is known to be big enough. Stated against
+    // MAX_SIZE rather than the exact size_logic sum, because the bound only
+    // has to be sufficient and a constant keeps the arithmetic in reach:
+    // the widest possible encoding is 8 + 1 + 1 + 10 + 10 == 30 bytes.
+    ensures (normfs_store_header_valid_compression(header->compression) &&
+             normfs_store_header_valid_encryption(header->encryption) &&
+             out_len >= NORMFS_STORE_HEADER_V1_MAX_SIZE) ==>
+              \result.status == NORMFS_STORE_HEADER_OK;
     ensures \result.status == NORMFS_STORE_HEADER_OK ==>
               \result.written ==
                 normfs_store_header_v1_size_logic(header->compression,
@@ -257,6 +268,16 @@ normfs_store_header_v1_encode(const struct normfs_store_header_v1 *header,
 
 	field = normfs_uintn_varint64_encode(header->compression,
 	    out + off_compression, out_len - off_compression);
+	/*
+	 * validate already returned OK above, so both codes are in range here.
+	 * Each guarded assert lets WP see that the early return below is only
+	 * reachable when out_len is under MAX_SIZE, which is what discharges
+	 * the completeness clause on those paths.
+	 */
+	/*@ assert out_len >= NORMFS_STORE_HEADER_V1_MAX_SIZE ==>
+	             normfs_uintn_varint64_size_logic(header->compression) == 1; */
+	/*@ assert out_len >= NORMFS_STORE_HEADER_V1_MAX_SIZE ==>
+	             field.status == NORMFS_UINTN_VARINT_OK; */
 	if (field.status != NORMFS_UINTN_VARINT_OK) return r;
 	off_encryption = off_compression + field.written;
 	/* compression < 128, so one byte spelling itself, and off_encryption == 9. */
@@ -268,6 +289,10 @@ normfs_store_header_v1_encode(const struct normfs_store_header_v1 *header,
 
 	field = normfs_uintn_varint64_encode(header->encryption,
 	    out + off_encryption, out_len - off_encryption);
+	/*@ assert out_len >= NORMFS_STORE_HEADER_V1_MAX_SIZE ==>
+	             normfs_uintn_varint64_size_logic(header->encryption) == 1; */
+	/*@ assert out_len >= NORMFS_STORE_HEADER_V1_MAX_SIZE ==>
+	             field.status == NORMFS_UINTN_VARINT_OK; */
 	if (field.status != NORMFS_UINTN_VARINT_OK) return r;
 	off_entries_before = off_encryption + field.written;
 	/*@ assert normfs_uintn_varint64_size_logic(header->encryption) == 1; */
@@ -279,6 +304,10 @@ normfs_store_header_v1_encode(const struct normfs_store_header_v1 *header,
 
 	field = normfs_uintn_varint64_encode(header->num_entries_before,
 	    out + off_entries_before, out_len - off_entries_before);
+	/*@ assert normfs_uintn_varint64_size_logic(header->num_entries_before)
+	             <= 10; */
+	/*@ assert out_len >= NORMFS_STORE_HEADER_V1_MAX_SIZE ==>
+	             field.status == NORMFS_UINTN_VARINT_OK; */
 	if (field.status != NORMFS_UINTN_VARINT_OK) return r;
 	off_entries = off_entries_before + field.written;
 	/*@ assert normfs_uintn_varint64_value(out + 10) ==
@@ -298,8 +327,13 @@ normfs_store_header_v1_encode(const struct normfs_store_header_v1 *header,
 	/*@ assert out[off_entries - 1] < 128; */
 	/*@ assert normfs_uintn_varint64_canonical(out + 10); */
 
+	/* off_entries == 10 + size_logic(num_entries_before) <= 20. */
+	/*@ assert off_entries <= 20; */
 	field = normfs_uintn_varint64_encode(header->num_entries,
 	    out + off_entries, out_len - off_entries);
+	/*@ assert normfs_uintn_varint64_size_logic(header->num_entries) <= 10; */
+	/*@ assert out_len >= NORMFS_STORE_HEADER_V1_MAX_SIZE ==>
+	             field.status == NORMFS_UINTN_VARINT_OK; */
 	if (field.status != NORMFS_UINTN_VARINT_OK) return r;
 	end = off_entries + field.written;
 	/*@ assert end ==
@@ -747,10 +781,18 @@ normfs_store_header_v1_roundtrip_holds(
 	uint8_t buf[NORMFS_STORE_HEADER_V1_MAX_SIZE];
 	struct normfs_store_header_encode_result enc;
 	struct normfs_store_header_decode_result dec;
-	int ok;
 
 	enc = normfs_store_header_v1_encode(header, buf, sizeof(buf));
 	if (enc.status != NORMFS_STORE_HEADER_OK) return 0;
+
+	/*
+	 * encode's own contract ties an OK status to a valid header. Stated
+	 * explicitly here rather than left implicit: the ensures below is a
+	 * biconditional, and both directions need this fact available by name,
+	 * not just derivable from encode's postcondition on request.
+	 */
+	/*@ assert normfs_store_header_valid_compression(header->compression) &&
+	             normfs_store_header_valid_encryption(header->encryption); */
 
 	/*
 	 * The encoding is a valid V1 header, so the decoder must accept it.
@@ -983,7 +1025,7 @@ normfs_store_header_v1_roundtrip_holds(
 	dec = normfs_store_header_v1_decode(buf, enc.written);
 
 	/* Bitwise so every field is compared with no short-circuit branch. */
-	ok = (dec.status == NORMFS_STORE_HEADER_OK);
+	int ok = (dec.status == NORMFS_STORE_HEADER_OK);
 	ok &= (dec.consumed == enc.written);
 	ok &= (dec.header.compression == header->compression);
 	ok &= (dec.header.encryption == header->encryption);
@@ -1001,6 +1043,20 @@ normfs_store_header_v1_roundtrip_holds(
 	              dec.header.encryption == header->encryption &&
 	              dec.header.num_entries_before == header->num_entries_before &&
 	              dec.header.num_entries == header->num_entries); */
+	/*
+	 * enc.status == OK was already established by the early return above,
+	 * and encode's own contract ties that status to a valid header, so the
+	 * ensures's premise already holds here unconditionally. State the
+	 * conclusion directly rather than leaving WP to combine that fact with
+	 * the six-term equivalence above on its own.
+	 */
+	/*@ assert dec.status == NORMFS_STORE_HEADER_OK; */
+	/*@ assert dec.consumed == enc.written; */
+	/*@ assert dec.header.compression == header->compression; */
+	/*@ assert dec.header.encryption == header->encryption; */
+	/*@ assert dec.header.num_entries_before == header->num_entries_before; */
+	/*@ assert dec.header.num_entries == header->num_entries; */
+	/*@ assert ok == 1; */
 	return ok;
 }
 
