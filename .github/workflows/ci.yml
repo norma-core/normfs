@@ -1,7 +1,8 @@
 name: ci
 
-# Scope is the varint proofs; a branch adding a module adds its verify-* target
-# to verify/Makefile and is picked up without editing this file.
+# Scope follows the tree: verify/Makefile discovers every C module and the
+# verify-* targets it declares, so a branch adding a module is covered without
+# editing this file or that one.
 on:
   push:
     branches: [main, dev]

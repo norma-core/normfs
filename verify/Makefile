@@ -30,10 +30,13 @@ SELF       := $(lastword $(MAKEFILE_LIST))
 MODULES    := $(patsubst $(ROOT)/%/CMakeLists.txt,%,$(wildcard $(ROOT)/*/c/CMakeLists.txt))
 BUILDDIRS   = $(subst /,_,$(1))
 
-TARGETS    := verify-varint verify-wal-header verify-store-header
-dir-verify-varint       := uintn-rs_c
-dir-verify-wal-header   := normfs-wal_c
-dir-verify-store-header := normfs-store_c
+# Targets are discovered the same way, from the verify-* a module declares, so
+# the module's CMakeLists stays the only place naming them. A list here is a
+# second registry, and the failure when it falls behind is silent: no target
+# means no log means nothing for check-proved.sh to rule on.
+TARGETS    :=
+FIND_TARGETS := sed -n 's/^[[:space:]]*\(add_custom_target\|normfs_add_wp_target\)([[:space:]]*\(verify-[A-Za-z0-9_-]\+\).*/\2/p'
+$(foreach m,$(MODULES),$(foreach t,$(shell $(FIND_TARGETS) $(ROOT)/$(m)/CMakeLists.txt),$(eval TARGETS += $(t))$(eval dir-$(t) := $(call BUILDDIRS,$(m)))))
 
 CMAKE_ARGS := -DCMAKE_BUILD_TYPE=Release -DNORMFS_MACHDEP=$(MACHDEP)
 
@@ -58,16 +61,19 @@ build: configure
 
 # frama-c exits 0 whether or not it discharges every goal, so each target tees
 # its output and has check-proved.sh rule on it instead. One rule, so adding a
-# module means adding a CMakeLists and a dir- line, not a fourth copy of this.
+# module means adding a CMakeLists, not a fourth copy of this.
+ifneq ($(strip $(TARGETS)),)
 $(TARGETS): verify-%: configure
 	@mkdir -p "$(LOGS)"
 	cmake --build "$(BUILD)/$(dir-verify-$*)" --target verify-$* \
 	    2>&1 | tee "$(LOGS)/verify-$*.log"
 	@"$(CHECK)" "$(LOGS)/verify-$*.log"
+endif
 
 # Runs every module and fails if any one fails, but runs them all first so a
 # single broken module does not hide the state of the others.
 verify: configure
+	@test -n "$(strip $(TARGETS))" || { echo "no verify-* targets declared by $(MODULES)" >&2; exit 1; }
 	@rc=0; \
 	for t in $(TARGETS); do \
 	    echo "== $$t (MACHDEP=$(MACHDEP)) =="; \
