@@ -51,6 +51,7 @@ if(FRAMAC)
     add_custom_target(verify-store-header
         COMMAND ${FRAMAC}
             -machdep gcc_x86_64
+            -wp-report-json ${CMAKE_CURRENT_BINARY_DIR}/verify-store-header.json
             -wp -wp-rte -wp-timeout 240
             -wp-prover alt-ergo,z3
             -wp-par ${NPROC}

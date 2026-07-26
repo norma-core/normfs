@@ -38,7 +38,7 @@ $(foreach m,$(MODULES),$(foreach t,$(shell $(FIND_TARGETS) $(ROOT)/$(m)/CMakeLis
 
 CMAKE_ARGS := -DCMAKE_BUILD_TYPE=Release
 
-.PHONY: all verify $(TARGETS) configure build clean docker-image docker-verify
+.PHONY: all verify $(TARGETS) configure build test clean docker-image docker-verify
 
 all: verify
 
@@ -57,15 +57,27 @@ build: configure
 	    cmake --build "$(BUILD)/$$(echo $$m | tr / _)" || exit 1; \
 	done
 
-# frama-c exits 0 whether or not it discharges every goal, so each target tees
-# its output and has check-proved.sh rule on it instead. One rule, so adding a
-# module means adding a CMakeLists, not a fourth copy of this.
+# The proofs cannot check their own gate: a report check-proved.sh wrongly
+# accepts is indistinguishable from one it rightly accepts. Needs no frama-c,
+# so it runs on the plain build job.
+test: build
+	@"$(ROOT)/verify/check-proved-test.sh"
+
+# frama-c exits 0 whether or not it discharges every goal, so each target rules
+# on its JSON report instead, which carries a verdict per goal. The log is kept
+# for summarize.sh and for reading afterwards. One rule, so adding a module
+# means adding a CMakeLists, not a fourth copy of this.
+#
+# The report is removed first: WP reads an existing one back to keep step
+# ranges stable across runs, so a run that dies before writing would otherwise
+# leave the previous verdicts in place to be checked a second time.
 ifneq ($(strip $(TARGETS)),)
 $(TARGETS): verify-%: configure
 	@mkdir -p "$(LOGS)"
+	@rm -f "$(BUILD)/$(dir-verify-$*)/verify-$*.json"
 	cmake --build "$(BUILD)/$(dir-verify-$*)" --target verify-$* \
 	    2>&1 | tee "$(LOGS)/verify-$*.log"
-	@"$(CHECK)" "$(LOGS)/verify-$*.log"
+	@"$(CHECK)" "$(BUILD)/$(dir-verify-$*)/verify-$*.json"
 endif
 
 # Runs every module and fails if any one fails, but runs them all first so a

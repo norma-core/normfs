@@ -30,13 +30,15 @@ jobs:
       - run: cargo test --workspace
 
   build:
-    name: build C (c99, -Werror)
+    name: build + test C (c99, -Werror)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       # The runner's gcc, not the pinned image: this checks portability.
-      - name: Build every C module
-        run: make -f verify/Makefile build
+      # test implies build, and covers what the proof job cannot check itself:
+      # that check-proved.sh still rejects a report with an open goal.
+      - name: Build and test every C module
+        run: make -f verify/Makefile test
 
   image:
     name: toolchain image
