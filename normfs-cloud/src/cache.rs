@@ -1,6 +1,6 @@
 use crate::client::S3Client;
 use crate::errors::CloudError;
-use normfs_store::header::StoreHeader;
+use normfs_store::store_header_v1::AnyStoreHeader;
 use normfs_types::QueueId;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -74,7 +74,7 @@ impl RangeCache {
             file_id
         );
 
-        let (header, _) = match StoreHeader::from_bytes(&header_bytes) {
+        let (header, _) = match AnyStoreHeader::from_bytes(&header_bytes) {
             Ok(result) => result,
             Err(e) => {
                 log::error!(
@@ -91,11 +91,11 @@ impl RangeCache {
             "Read header for queue: {}, file_id: {:?}, entries_before: {:?}, num_entries: {:?}",
             queue_id,
             file_id,
-            header.num_entries_before,
-            header.num_entries
+            header.num_entries_before(),
+            header.num_entries()
         );
 
-        if header.num_entries.is_zero() {
+        if header.num_entries().is_zero() {
             log::debug!(
                 "Empty file (zero entries) for queue: {}, file_id: {:?}",
                 queue_id,
@@ -104,9 +104,9 @@ impl RangeCache {
             return Ok(None);
         }
 
-        let first_id = header.num_entries_before;
+        let first_id = header.num_entries_before();
         let num_entries_minus_one = header
-            .num_entries
+            .num_entries()
             .sub(&UintN::one())
             .map_err(CloudError::UintN)?;
         let last_id = first_id.add(&num_entries_minus_one);
