@@ -19,10 +19,8 @@ async fn read_last_id(fs: &NormFS, queue: &str) -> Option<UintN> {
         )
         .await
     {
-        // Bounded because a read that finds nothing at the tail subscribes for
-        // future entries instead, and the subscription holds a sender: recv()
-        // would then neither yield an entry nor see the channel close, so the
-        // test hangs until the job is killed rather than failing.
+        // A read that finds nothing at the tail subscribes instead, and the
+        // subscription holds a sender, so recv() would never return.
         Ok(_) => tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
             .await
             .ok()
@@ -2677,17 +2675,13 @@ async fn test_read_empty_queue_absolute() {
 /// Test scenario: latest WAL file holds a header but no entries, with a gap
 /// Expected: a tail read walks back past it to the file that has them
 ///
-/// The zero-byte version of this is covered above. Header-only took a
-/// different path: get_entries_before parses the header fine, so the backward
-/// search stopped on a file with nothing in it, the tail read found no entry
-/// and subscribed for future ones, and the caller waited on a channel that
-/// would never produce or close.
+/// The zero-byte version is covered above; header-only took a different path.
 #[tokio::test]
 async fn test_recovery_header_only_latest_file_tail_read() {
     let temp_dir = TempDir::new().unwrap();
     let path = temp_dir.path().to_path_buf();
 
-    // Session 1: ten entries, ids 0-9, all in file 1.
+    // Session 1: ids 0-9, all in file 1.
     let instance_id = {
         let settings = NormFsSettings::default();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
@@ -2712,8 +2706,7 @@ async fn test_recovery_header_only_latest_file_tail_read() {
     let file_3 = UintN::from(3u64).to_file_path(wal_path.to_str().unwrap(), "wal");
     tokio::fs::write(&file_3, b"").await.unwrap();
 
-    // Session 2: recovery reuses the empty file 3, so it comes back carrying a
-    // header and no entries. That is the state this is about.
+    // Recovery reuses the empty file 3, so it comes back header-only.
     {
         let settings = NormFsSettings::default();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
@@ -2728,8 +2721,6 @@ async fn test_recovery_header_only_latest_file_tail_read() {
         "file 3 should carry a header by now, or this tests the zero-byte path again"
     );
 
-    // Session 3: the tail read has to reach back past the header-only file 3
-    // and the missing file 2.
     {
         let settings = NormFsSettings::default();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();

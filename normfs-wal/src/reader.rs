@@ -149,15 +149,11 @@ pub async fn get_wal_range(
     Ok((wal_header, range))
 }
 
-/// Whether the file holds at least one readable entry.
+/// Whether the file holds at least one readable entry, hash checked the way
+/// get_wal_range checks: a lone corrupt entry yields nothing to a reader.
 ///
-/// Separate from get_wal_range because a backward search only needs to know if
-/// a file is worth stopping on, and get_wal_range scans to the last entry —
-/// across a 128MB file, per candidate. This stops at the first one.
-///
-/// "Readable" is the same standard get_wal_range applies, hash included: a file
-/// whose only entry is corrupt yields nothing to a reader, so for this purpose
-/// it is as empty as a header-only one.
+/// Separate from get_wal_range, which scans to the last entry — across a 128MB
+/// file, per candidate of a backward search. This stops at the first.
 pub async fn has_entries(base_path: &Path, file_id: &UintN) -> Result<bool, WalError> {
     let file_path = file_id.to_file_path(base_path.to_str().unwrap(), "wal");
 

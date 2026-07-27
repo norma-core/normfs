@@ -127,8 +127,7 @@ impl WalStore {
     }
 
     /// Whether the file holds at least one readable entry. Missing, zero-byte
-    /// and header-only files all answer false — to a reader they are the same
-    /// thing, and only get_file_end drew that equivalence before.
+    /// and header-only all answer false — to a reader they are the same thing.
     pub async fn file_has_entries(
         &self,
         queue_id: &QueueId,
