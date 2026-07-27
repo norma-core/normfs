@@ -211,21 +211,15 @@ async fn test_writer_with_header() {
     assert_eq!(ack, (queue_id, entry_id));
 }
 
-// Recovery treats a 0-byte file as an unused generation, so a file that is
-// briefly empty between truncate(true) and the header landing gets skipped
-// while it is in use.
-//
-// Hitting that window is a matter of chance on any one call, which is what
-// made this an intermittent recovery-test failure rather than a reproducible
-// one. Opening the writers at once is what makes it dependable here.
+// A file left briefly at 0 bytes reads as an unused generation, so recovery
+// skips it while it is in use.
 #[tokio::test]
 async fn header_is_on_disk_before_new_returns() {
     let dir = tempdir().unwrap();
     let header = Bytes::from_static(b"header-bytes-standing-in-for-a-wal-header");
 
-    // Opened concurrently, the way a restart with many queues opens them: that
-    // keeps every blocking-pool thread busy, which is what makes a deferred
-    // header write the common case here instead of a rare one.
+    // At once, not in sequence: a busy blocking pool is what turns a deferred
+    // header write from rare into reliable.
     let mut opening = Vec::new();
     for i in 0..256 {
         let file_path = dir.path().join(format!("gen{i}.wal"));

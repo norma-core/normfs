@@ -68,10 +68,9 @@ impl AckFileWriter {
 
         let initial_size = header.len() as u64;
         file.write_all(&header).await?;
-        // truncate(true) takes effect at once but a tokio File completes its
-        // writes in the background, leaving the file briefly at 0 bytes — which
-        // is how recovery spells "unused generation". Flush so that no reader
-        // can see it that way once new() has returned.
+        // truncate(true) takes effect at once but a tokio File writes in the
+        // background, and a 0-byte file is how recovery spells "unused
+        // generation".
         file.flush().await?;
 
         let path = path.as_ref().to_path_buf();
@@ -208,9 +207,8 @@ async fn flush_buffer(
                 tokio::time::sleep(RETRY_DELAY).await;
             }
         } else {
-            // write_all only hands the data to the background worker, and the
-            // ack below claims the entry is written, so it has to have landed
-            // first. sync_all covers that and more; flush is the floor.
+            // The ack below claims the entry is written, so it has to land
+            // even when fsync is off.
             let settled = if fsync {
                 file_guard.sync_all().await
             } else {
