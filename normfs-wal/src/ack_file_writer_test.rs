@@ -213,7 +213,7 @@ async fn test_writer_with_header() {
 
 // A file left briefly at 0 bytes reads as an unused generation, so recovery
 // skips it while it is in use.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn header_is_on_disk_before_new_returns() {
     let dir = tempdir().unwrap();
     let header = Bytes::from_static(b"header-bytes-standing-in-for-a-wal-header");
@@ -234,7 +234,8 @@ async fn header_is_on_disk_before_new_returns() {
                 max_file_size: 10 * 1024,
                 // Long enough that the periodic flush cannot be what rescues this.
                 write_interval: Duration::from_secs(30),
-                fsync: true,
+                // Both settings have to make the header observable.
+                fsync: i % 2 == 0,
             };
 
             let writer = AckFileWriter::new(&file_path, settings, ack_sender, header.clone())
@@ -264,6 +265,65 @@ async fn header_is_on_disk_before_new_returns() {
         "{} of 256 readers saw a file that was not the {}-byte header (first few: {:?})",
         short.len(),
         header.len(),
+        &short[..short.len().min(5)]
+    );
+}
+
+// An ack says the entry is written, so the bytes have to be readable by then
+// even on the fsync = false path.
+#[tokio::test(flavor = "multi_thread")]
+async fn ack_without_fsync_means_entry_is_readable() {
+    let dir = tempdir().unwrap();
+    let data = Bytes::from_static(b"entry-bytes-that-the-ack-claims-are-written");
+
+    let mut writing = Vec::new();
+    for i in 0..64 {
+        let file_path = dir.path().join(format!("gen{i}.wal"));
+        let data = data.clone();
+        writing.push(tokio::spawn(async move {
+            let (ack_sender, mut ack_receiver) = mpsc::unbounded_channel();
+            let settings = AckFileWriterSettings {
+                max_buffer_size: 1024,
+                max_file_size: 10 * 1024,
+                write_interval: Duration::from_millis(10),
+                fsync: false,
+            };
+
+            let writer = AckFileWriter::new(&file_path, settings, ack_sender, Bytes::new())
+                .await
+                .unwrap();
+
+            let resolver = QueueIdResolver::new("test_instance");
+            writer
+                .write(resolver.resolve("queue_1"), UintN::from(1u64), data)
+                .await;
+
+            timeout(Duration::from_secs(5), ack_receiver.recv())
+                .await
+                .unwrap()
+                .unwrap();
+
+            let seen = fs::read(&file_path).unwrap();
+
+            drop(writer);
+
+            (i, seen.len())
+        }));
+    }
+
+    let mut short = Vec::new();
+    for handle in writing {
+        let (i, len) = handle.await.unwrap();
+        if len != data.len() {
+            short.push((i, len));
+        }
+    }
+
+    assert!(
+        short.is_empty(),
+        "{} of 64 acked entries were not readable as {} bytes (first few: {:?})",
+        short.len(),
+        data.len(),
         &short[..short.len().min(5)]
     );
 }
