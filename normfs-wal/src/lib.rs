@@ -126,6 +126,24 @@ impl WalStore {
         }
     }
 
+    /// Whether the file holds at least one readable entry. Missing, zero-byte
+    /// and header-only files all answer false — to a reader they are the same
+    /// thing, and only get_file_end drew that equivalence before.
+    pub async fn file_has_entries(
+        &self,
+        queue_id: &QueueId,
+        file_id: &UintN,
+    ) -> Result<bool, WalError> {
+        let queue_path = queue_id.to_wal_dir(&self.root);
+
+        match reader::has_entries(&queue_path, file_id).await {
+            Ok(found) => Ok(found),
+            Err(WalError::WalEmpty(_)) => Ok(false),
+            Err(WalError::WalNotFound) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     pub async fn get_queue_start(&self, queue_id: &QueueId) -> Result<Option<UintN>, WalError> {
         let first_file_id = self.get_first_file_id(queue_id).await?;
         if let Some(firts_file_id) = first_file_id {

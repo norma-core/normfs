@@ -57,10 +57,17 @@ async fn find_valid_file_backward(
         if let Some((start, end)) = store.get_file_range(queue, &search_id).await? {
             return Ok(Some((search_id, start, Some(end))));
         }
-        // Check WAL
-        match wal.get_entries_before(queue, &search_id).await {
-            Ok(start) => return Ok(Some((search_id, start, None))),
-            Err(WalError::WalNotFound | WalError::WalEmpty(_)) => {
+        // Check WAL. The question is whether the file has entries, not whether
+        // it parses: get_entries_before reads the header, so a header-only file
+        // answered Ok and stopped the search on a file with nothing to read.
+        // The caller then found no entry at the tail and subscribed, waiting
+        // for entries that were sitting in an earlier file all along.
+        match wal.file_has_entries(queue, &search_id).await {
+            Ok(true) => match wal.get_entries_before(queue, &search_id).await {
+                Ok(start) => return Ok(Some((search_id, start, None))),
+                Err(e) => return Err(LookupError::Wal(e)),
+            },
+            Ok(false) => {
                 if search_id <= *min_file_id {
                     return Ok(None);
                 }

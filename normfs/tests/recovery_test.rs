@@ -2673,3 +2673,77 @@ async fn test_read_empty_queue_absolute() {
 
     fs.close().await.unwrap();
 }
+
+/// Test scenario: latest WAL file holds a header but no entries, with a gap
+/// Expected: a tail read walks back past it to the file that has them
+///
+/// The zero-byte version of this is covered above. Header-only took a
+/// different path: get_entries_before parses the header fine, so the backward
+/// search stopped on a file with nothing in it, the tail read found no entry
+/// and subscribed for future ones, and the caller waited on a channel that
+/// would never produce or close.
+#[tokio::test]
+async fn test_recovery_header_only_latest_file_tail_read() {
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().to_path_buf();
+
+    // Session 1: ten entries, ids 0-9, all in file 1.
+    let instance_id = {
+        let settings = NormFsSettings::default();
+        let fs = NormFS::new(path.clone(), settings).await.unwrap();
+        let instance_id = fs.get_instance_id().to_string();
+
+        let queue_id = fs.resolve("test-queue");
+        fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
+
+        for i in 0..10 {
+            fs.enqueue(&queue_id, Bytes::from(format!("entry-{}", i)))
+                .unwrap();
+        }
+
+        fs.close().await.unwrap();
+        instance_id
+    };
+
+    // A zero-byte file 3, leaving file 2 missing entirely.
+    let resolver = QueueIdResolver::new(&instance_id);
+    let queue_id = resolver.resolve("test-queue");
+    let wal_path = get_queue_wal_path(&path, &queue_id);
+    let file_3 = UintN::from(3u64).to_file_path(wal_path.to_str().unwrap(), "wal");
+    tokio::fs::write(&file_3, b"").await.unwrap();
+
+    // Session 2: recovery reuses the empty file 3, so it comes back carrying a
+    // header and no entries. That is the state this is about.
+    {
+        let settings = NormFsSettings::default();
+        let fs = NormFS::new(path.clone(), settings).await.unwrap();
+
+        let queue_id = fs.resolve("test-queue");
+        fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
+        fs.close().await.unwrap();
+    }
+
+    assert!(
+        !tokio::fs::read(&file_3).await.unwrap().is_empty(),
+        "file 3 should carry a header by now, or this tests the zero-byte path again"
+    );
+
+    // Session 3: the tail read has to reach back past the header-only file 3
+    // and the missing file 2.
+    {
+        let settings = NormFsSettings::default();
+        let fs = NormFS::new(path.clone(), settings).await.unwrap();
+
+        let queue_id = fs.resolve("test-queue");
+        fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
+
+        let last_id = read_last_id(&fs, "test-queue").await;
+        assert_eq!(
+            last_id,
+            Some(UintN::from(9u64)),
+            "tail read should find entry 9 behind the header-only file"
+        );
+
+        fs.close().await.unwrap();
+    }
+}
