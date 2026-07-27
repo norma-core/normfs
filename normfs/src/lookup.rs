@@ -57,34 +57,19 @@ async fn find_valid_file_backward(
         if let Some((start, end)) = store.get_file_range(queue, &search_id).await? {
             return Ok(Some((search_id, start, Some(end))));
         }
-        // Whether the file has entries, not whether its header parses:
-        // get_entries_before reads only the header, so a header-only file
-        // stopped the search on a file with nothing to read.
-        //
-        // These open the file separately, so the writer can rotate or truncate
-        // it in between. A file that goes missing or empty across the two is
-        // walked past like one that never had entries — erroring there is what
-        // made the read fail outright the first time this was tried.
-        let start = match wal.file_has_entries(queue, &search_id).await {
-            Ok(true) => match wal.get_entries_before(queue, &search_id).await {
-                Ok(start) => Some(start),
-                Err(WalError::WalNotFound | WalError::WalEmpty(_)) => None,
-                Err(e) => return Err(LookupError::Wal(e)),
-            },
-            Ok(false) => None,
+        // Check WAL
+        match wal.get_entries_before(queue, &search_id).await {
+            Ok(start) => return Ok(Some((search_id, start, None))),
+            Err(WalError::WalNotFound | WalError::WalEmpty(_)) => {
+                if search_id <= *min_file_id {
+                    return Ok(None);
+                }
+                search_id = search_id
+                    .decrement()
+                    .map_err(|_| LookupError::Wal(WalError::WalNotFound))?;
+            }
             Err(e) => return Err(LookupError::Wal(e)),
-        };
-
-        if let Some(start) = start {
-            return Ok(Some((search_id, start, None)));
         }
-
-        if search_id <= *min_file_id {
-            return Ok(None);
-        }
-        search_id = search_id
-            .decrement()
-            .map_err(|_| LookupError::Wal(WalError::WalNotFound))?;
     }
 }
 

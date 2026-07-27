@@ -149,54 +149,6 @@ pub async fn get_wal_range(
     Ok((wal_header, range))
 }
 
-/// Whether the file holds at least one readable entry, hash checked the way
-/// get_wal_range checks: a lone corrupt entry yields nothing to a reader.
-///
-/// Separate from get_wal_range, which scans to the last entry — across a 128MB
-/// file, per candidate of a backward search. This stops at the first.
-pub async fn has_entries(base_path: &Path, file_id: &UintN) -> Result<bool, WalError> {
-    let file_path = file_id.to_file_path(base_path.to_str().unwrap(), "wal");
-
-    let file = match fs::File::open(&file_path).await {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(WalError::WalNotFound);
-        }
-        Err(e) => return Err(e.into()),
-    };
-
-    if file.metadata().await?.len() == 0 {
-        return Err(WalError::WalEmpty(file_id.clone()));
-    }
-
-    let mut reader = BufReader::new(file);
-
-    let (any_header, _) = match AnyWalHeader::from_reader(&mut reader).await {
-        Ok(v) => v,
-        Err(AnyWalHeaderError::V0(WalHeaderError::SliceTooShort))
-        | Err(AnyWalHeaderError::V1(WalHeaderV1Error::Truncated)) => {
-            return Err(WalError::WalEmpty(file_id.clone()));
-        }
-        Err(e) => return Err(e.into()),
-    };
-    let wal_header = WalHeader::from(&any_header);
-
-    let Ok(entry_header) = WalEntryHeader::from_reader(&mut reader, &wal_header).await else {
-        return Ok(false);
-    };
-
-    let Ok(record_size) = entry_header.record_size.to_u64() else {
-        return Ok(false);
-    };
-
-    let mut record_buffer = vec![0; record_size as usize];
-    if record_size > 0 && reader.read_exact(&mut record_buffer).await.is_err() {
-        return Ok(false);
-    }
-
-    Ok(xxh64::xxh64(&record_buffer, 0) == entry_header.xxhash)
-}
-
 pub fn get_wal_header(content: &Bytes) -> Result<WalHeader, AnyWalHeaderError> {
     let (header, _) = AnyWalHeader::from_bytes(content)?;
     Ok(WalHeader::from(&header))
