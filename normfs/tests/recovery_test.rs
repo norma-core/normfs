@@ -19,7 +19,15 @@ async fn read_last_id(fs: &NormFS, queue: &str) -> Option<UintN> {
         )
         .await
     {
-        Ok(_) => rx.recv().await.map(|entry| entry.id),
+        // Bounded because a read that finds nothing at the tail subscribes for
+        // future entries instead, and the subscription holds a sender: recv()
+        // would then neither yield an entry nor see the channel close, so the
+        // test hangs until the job is killed rather than failing.
+        Ok(_) => tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
+            .await
+            .ok()
+            .flatten()
+            .map(|entry| entry.id),
         Err(_) => None,
     }
 }

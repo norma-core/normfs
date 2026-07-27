@@ -20,6 +20,10 @@ jobs:
   rust:
     name: cargo test --workspace
     runs-on: ubuntu-latest
+    # A test that waits on a channel nothing will ever send to does not fail,
+    # it sits there — and without this the runner sat for 41 minutes on the
+    # 6 hour default before anyone stopped it. The suite takes ~2 minutes.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
