@@ -57,15 +57,10 @@ async fn find_valid_file_backward(
         if let Some((start, end)) = store.get_file_range(queue, &search_id).await? {
             return Ok(Some((search_id, start, Some(end))));
         }
-        // Whether the file has entries, not whether its header parses:
-        // get_entries_before reads only the header, so a header-only file
-        // stopped the search on a file with nothing to read.
-        match wal.file_has_entries(queue, &search_id).await {
-            Ok(true) => match wal.get_entries_before(queue, &search_id).await {
-                Ok(start) => return Ok(Some((search_id, start, None))),
-                Err(e) => return Err(LookupError::Wal(e)),
-            },
-            Ok(false) => {
+        // Check WAL
+        match wal.get_entries_before(queue, &search_id).await {
+            Ok(start) => return Ok(Some((search_id, start, None))),
+            Err(WalError::WalNotFound | WalError::WalEmpty(_)) => {
                 if search_id <= *min_file_id {
                     return Ok(None);
                 }
