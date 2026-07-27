@@ -210,3 +210,66 @@ async fn test_writer_with_header() {
     let ack = ack_receiver.recv().await.unwrap();
     assert_eq!(ack, (queue_id, entry_id));
 }
+
+// Recovery treats a 0-byte file as an unused generation, so a file that is
+// briefly empty between truncate(true) and the header landing gets skipped
+// while it is in use.
+//
+// Hitting that window is a matter of chance on any one call, which is what
+// made this an intermittent recovery-test failure rather than a reproducible
+// one. Opening the writers at once is what makes it dependable here.
+#[tokio::test]
+async fn header_is_on_disk_before_new_returns() {
+    let dir = tempdir().unwrap();
+    let header = Bytes::from_static(b"header-bytes-standing-in-for-a-wal-header");
+
+    // Opened concurrently, the way a restart with many queues opens them: that
+    // keeps every blocking-pool thread busy, which is what makes a deferred
+    // header write the common case here instead of a rare one.
+    let mut opening = Vec::new();
+    for i in 0..256 {
+        let file_path = dir.path().join(format!("gen{i}.wal"));
+        // Recovery reuses an existing empty file, so that is the case to cover.
+        fs::write(&file_path, b"").unwrap();
+
+        let header = header.clone();
+        opening.push(tokio::spawn(async move {
+            let (ack_sender, _ack_receiver) = mpsc::unbounded_channel();
+            let settings = AckFileWriterSettings {
+                max_buffer_size: 1024,
+                max_file_size: 10 * 1024,
+                // Long enough that the periodic flush cannot be what rescues this.
+                write_interval: Duration::from_secs(30),
+                fsync: true,
+            };
+
+            let writer = AckFileWriter::new(&file_path, settings, ack_sender, header.clone())
+                .await
+                .unwrap();
+
+            let seen = fs::read(&file_path).unwrap();
+
+            // Dropped only after the read, so a pass cannot come from the
+            // writer being torn down and flushing on its way out.
+            drop(writer);
+
+            (i, seen.len())
+        }));
+    }
+
+    let mut short = Vec::new();
+    for handle in opening {
+        let (i, len) = handle.await.unwrap();
+        if len != header.len() {
+            short.push((i, len));
+        }
+    }
+
+    assert!(
+        short.is_empty(),
+        "{} of 256 readers saw a file that was not the {}-byte header (first few: {:?})",
+        short.len(),
+        header.len(),
+        &short[..short.len().min(5)]
+    );
+}
