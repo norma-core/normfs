@@ -7,23 +7,14 @@
 /*
  * ChaCha20, RFC 8439.
  *
- * Only the block function is here. The key derivation draws 44 bytes, so a
- * streaming keystream API would be surface nothing calls; the general
- * signature exists so the RFC 8439 section 2.3.2 vector runs against the code
- * that ships rather than a twin.
+ * Only the block function: the key derivation draws 44 bytes, so a streaming
+ * keystream API would be surface nothing calls. The general signature exists so
+ * the RFC 8439 vector runs against the code that ships rather than a twin.
  *
- * Proved: memory safety and termination, the assigns footprint, the state
- * initialisation, the little endian word loads and stores -- written with *, /
- * and % so they prove what the bytes mean and are host endian independent by
- * construction -- and the final add-and-store.
- *
- * Echoed: the quarter round. Its ACSL is the same expression tree as the C, so
- * the goals close by congruence and say nothing about the expression being
- * ChaCha20. tests/test_chacha20.c is what says it, and it catches a wrong
- * index with probability 1: one wrong word changes all 64 output bytes.
- *
- * As in sha256.h the logic is typed uint32_t rather than integer, because with
- * integer typing the provers cannot relate a land result to an lxor argument.
+ * The quarter round is echoed rather than proved, as in sha256.h, and
+ * tests/test_chacha20.c is what says the expression is ChaCha20 -- it catches a
+ * wrong index with probability 1, since one wrong word changes all 64 output
+ * bytes. The state setup and the little endian words are proved outright.
  */
 
 #define NORMFS_CHACHA20_KEY 32
@@ -31,8 +22,8 @@
 #define NORMFS_CHACHA20_BLOCK 64
 #define NORMFS_CHACHA20_ROUNDS 20
 
-/* "expand 32-byte k", little endian. test_chacha20.c derives them from the
- * string; the contracts fix how they are used, not what they are. */
+/* "expand 32-byte k", little endian; test_chacha20.c derives them from the
+ * string. */
 extern const uint32_t normfs_chacha20_sigma[4];
 
 /*@ axiomatic NormfsChaCha20 {

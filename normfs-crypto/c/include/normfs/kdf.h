@@ -11,8 +11,8 @@
 /*
  * HKDF-SHA256 (RFC 5869) and the per-file key derivation built on it.
  *
- * There is encrypted data on disk behind every byte of this, so the
- * composition is fixed rather than parameterised:
+ * There is encrypted data on disk behind every byte, so the composition is
+ * fixed rather than parameterised:
  *
  *   prk       = HMAC-SHA256(key = 32 zero bytes, msg = seed)   Extract, salt None
  *   rng_seed  = HMAC-SHA256(key = prk, msg = info || 0x01)     Expand, L = 32
@@ -20,8 +20,8 @@
  *   aes_key   = ks[0  .. 32)
  *   gcm_nonce = ks[32 .. 44)
  *
- * The key is drawn before the nonce because the Rust this replaces drew them
- * in that order from one ChaCha20Rng, and the two draws were contiguous.
+ * The key is drawn before the nonce because the Rust this replaces drew them in
+ * that order from one ChaCha20Rng.
  *
  * info is built by the caller and passed whole. Its tail is UintN's
  * value_to_bytes, whose width the enum variant chooses -- U8(42) and U16(42)
@@ -34,10 +34,9 @@
 #define NORMFS_KDF_PRK 32
 
 /*
- * Generous on purpose. The bound exists only so info_len + 1 + a block
- * provably cannot wrap size_t; it is not a policy. A tight limit would newly
- * reject a queue path that works today, which is the one thing this change
- * must not do.
+ * Generous on purpose: the bound exists so info_len + 1 + a block provably
+ * cannot wrap size_t, not as policy. A tight limit would newly reject a queue
+ * path that works today.
  */
 #define NORMFS_KDF_INFO_MAX ((size_t)0x100000)
 
@@ -47,11 +46,9 @@ enum normfs_kdf_status {
 	NORMFS_KDF_ERR_INFO_TOO_LONG = 2
 };
 
-/*
- * HKDF-Extract. salt_len == 0 is the RFC's "salt not provided", which is a
- * block of zero bytes rather than an absent key -- the distinction the Rust
- * Hkdf::new(None, ...) made, and the one that decides every key on disk.
- */
+/* salt_len == 0 is the RFC's "salt not provided": a block of zero bytes rather
+ * than an absent key, which is the distinction that decides every key on
+ * disk. */
 /*@ requires salt_len == 0 || \valid_read(salt + (0 .. salt_len - 1));
     requires ikm_len == 0 || \valid_read(ikm + (0 .. ikm_len - 1));
     requires \valid(prk + (0 .. NORMFS_KDF_PRK - 1));
@@ -69,15 +66,14 @@ void normfs_hkdf_sha256_extract(const uint8_t *salt, size_t salt_len,
     const uint8_t *ikm, size_t ikm_len, uint8_t *prk);
 
 /*
- * HKDF-Expand restricted to L <= 32, one T(1) block. The multi-block loop is
- * deliberately absent: the only caller draws 32 bytes, and its absence is a
- * proof obligation removed rather than a feature missing.
+ * Restricted to L <= 32, one T(1) block: the only caller draws 32 bytes, and
+ * the missing multi-block loop is a proof obligation removed rather than a
+ * feature missing.
  *
- * The L bound is a precondition rather than a runtime check because a function
- * that accepts any okm_len has an unbounded assigns region, and WP cannot
- * place an unbounded region when the destination is a caller's pointer -- the
- * goals stop converging rather than fail. Bounding it here costs the caller
- * nothing: every call site passes a compile-time constant.
+ * The bound is a precondition rather than a runtime check because a function
+ * accepting any okm_len has an unbounded assigns region, and WP cannot place
+ * one when the destination is a caller's pointer -- the goals stop converging
+ * rather than fail. Every call site passes a constant, so it costs nothing.
  */
 /*@ requires \valid_read(prk + (0 .. NORMFS_KDF_PRK - 1));
     requires info_len == 0 || \valid_read(info + (0 .. info_len - 1));
@@ -97,13 +93,9 @@ int normfs_hkdf_sha256_expand(const uint8_t *prk, const uint8_t *info,
     size_t info_len, uint8_t *okm, size_t okm_len);
 
 /*
- * The whole derivation in one call, so the hot path crosses the FFI once per
- * encrypt or decrypt rather than four times.
- *
- * The lengths are cross checks against Rust side constants that have drifted,
- * not a way to ask for fewer bytes. Every intermediate -- prk, rng_seed and
- * the keystream block -- is wiped before return through normfs_seed_zero,
- * whose fallback chain is already the arbiter for the root secret.
+ * One call, so the hot path crosses the FFI once per encrypt or decrypt. The
+ * lengths are cross checks against Rust side constants that have drifted, not a
+ * way to ask for fewer bytes.
  */
 /*@ requires seed_len == 0 || \valid_read(seed + (0 .. seed_len - 1));
     requires info_len == 0 || \valid_read(info + (0 .. info_len - 1));

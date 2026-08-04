@@ -1,7 +1,7 @@
 /*
- * RFC 8439. The quarter round in src/chacha20.c is echoed rather than proved,
- * so these vectors are what says the expression is ChaCha20. They catch a
- * wrong index with probability 1: one wrong word changes all 64 output bytes.
+ * RFC 8439. The quarter round is echoed rather than proved, so these vectors are
+ * what says the expression is ChaCha20; they catch a wrong index with
+ * probability 1, since one wrong word changes all 64 output bytes.
  */
 #include <stdio.h>
 #include <string.h>
@@ -29,7 +29,6 @@ hex_eq(const uint8_t *got, size_t len, const char *want)
 	return strcmp(buf, want) == 0;
 }
 
-/* RFC 8439 section 2.3.2. */
 static int
 test_rfc8439_block(void)
 {
@@ -53,8 +52,8 @@ test_rfc8439_block(void)
 	return 0;
 }
 
-/* RFC 8439 appendix A.1 test vector 1: all-zero key and nonce, counter 0.
- * This is exactly the shape the key derivation uses. */
+/* Appendix A.1: all-zero key and nonce, which is the shape the key derivation
+ * uses. */
 static int
 test_rfc8439_zero(void)
 {
@@ -71,7 +70,7 @@ test_rfc8439_zero(void)
 	    "76b8e0ada0f13d90405d6ae55386bd28bdd219b8a08ded1aa836efcc8b770dc7"
 	    "da41597c5157488d7724e03fb8d84a376a43b8f41518a11cc387b669b2ee6586"));
 
-	/* Appendix A.1 vector 2: same key and nonce, counter 1. */
+	/* Counter 1. */
 	normfs_chacha20_block(key, nonce, 1u, out);
 	CHECK(hex_eq(out, sizeof(out),
 	    "9f07e7be5551387a98ba977c732d080dcb0f29a048e3656912c6533e32ee7aed"
@@ -79,7 +78,6 @@ test_rfc8439_zero(void)
 	return 0;
 }
 
-/* The sigma words are "expand 32-byte k" read little endian. */
 static int
 test_sigma_from_string(void)
 {

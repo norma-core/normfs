@@ -1,10 +1,8 @@
 /*
- * What WP cannot reach for src/sha256.c: the round transform and the sigma
- * functions are echoed by contracts with the same expression tree as the C, so
- * the proof says nothing about the expression being SHA-256, and the K and H0
- * tables are extern arrays whose values no contract pins. These vectors are
- * what says it -- the same job test_crc32c.c does by re-deriving the CRC32C
- * table from its polynomial.
+ * What WP cannot reach: the round transform is echoed by a contract with the
+ * same expression tree as the C, and K and H0 are extern arrays no contract
+ * pins. These vectors are what says it is SHA-256 -- the job test_crc32c.c does
+ * by re-deriving the CRC32C table from its polynomial.
  */
 #include <math.h>
 #include <stdio.h>
@@ -44,9 +42,7 @@ digest_eq(const char *msg, size_t len, const char *want)
 	return hex_eq(out, want);
 }
 
-/* FIPS 180-4 appendix B and the SHAVS short-message cases. The lengths are
- * chosen so both padding branches fire (tail % 64 below and at/above 56) and
- * the block boundary is crossed twice. */
+/* FIPS 180-4 appendix B. */
 static int
 test_fips_vectors(void)
 {
@@ -64,7 +60,7 @@ test_fips_vectors(void)
 	return 0;
 }
 
-/* Exactly the lengths where the padding decision changes. */
+/* The lengths where the padding decision changes. */
 static int
 test_padding_boundaries(void)
 {
@@ -92,8 +88,8 @@ test_padding_boundaries(void)
 	return 0;
 }
 
-/* One million 'a', driven through absorb rather than one buffer, so the
- * multi-block path and the 64-bit length field are both exercised. */
+/* Driven through absorb rather than one buffer, so the multi-block path and the
+ * 64-bit length field are both exercised. */
 static int
 test_million_a(void)
 {
@@ -115,11 +111,8 @@ test_million_a(void)
 	return 0;
 }
 
-/*
- * absorb + finish must agree with the one-shot at every split point. This is
- * what catches a buffer-boundary bug, and is the analogue of test_crc32c.c's
- * length and alignment sweep.
- */
+/* absorb + finish must agree with the one-shot at every split point; this is
+ * what catches a buffer-boundary bug. */
 static int
 test_absorb_finish_equivalence(void)
 {
@@ -151,10 +144,9 @@ test_absorb_finish_equivalence(void)
 }
 
 /*
- * K and H0 are the fractional parts of the cube and square roots of the first
- * 64 and 8 primes. double carries 52 bits after the point and only 32 are
- * needed, so the margin is ample; a constant that were mistyped would miss by
- * far more than the rounding.
+ * K and H0 are the fractional parts of the cube and square roots of the first 64
+ * and 8 primes. double carries 52 bits after the point where 32 are needed, so
+ * a mistyped constant misses by far more than the rounding.
  */
 static int
 test_constants_from_primes(void)

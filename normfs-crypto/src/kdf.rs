@@ -27,11 +27,9 @@ unsafe extern "C" {
 
 #[derive(Debug)]
 pub enum KdfError {
-    /// A length disagreed with the C layer's own constant.
     InvalidArg,
-    /// The info string exceeded NORMFS_KDF_INFO_MAX. Unreachable for any queue
-    /// path a caller can construct; the bound exists so the C arithmetic
-    /// provably cannot wrap.
+    /// Unreachable for any queue path a caller can construct: the bound exists
+    /// so the C arithmetic provably cannot wrap.
     InfoTooLong,
     /// A status this build does not know about, as in `SeedError`.
     UnknownStatus(c_int),
@@ -63,8 +61,8 @@ fn map_status(status: c_int) -> Result<(), KdfError> {
 /// HKDF-SHA256 over the seed, then ChaCha20 block 0 under the derived seed:
 /// the key is keystream `[0,32)` and the nonce `[32,44)`.
 ///
-/// `info` is built by the caller and passed whole. Its tail is `UintN`'s
-/// `value_to_bytes`, whose width the enum variant chooses, and reproducing that
+/// `info` is built by the caller because its tail is `UintN`'s
+/// `value_to_bytes`, whose width the enum variant chooses; reproducing that
 /// narrowing in C would be a second definition of an encoding already on disk.
 pub(crate) fn derive_file_key(
     seed: &[u8; crate::seed::SEED_SIZE],
@@ -73,8 +71,8 @@ pub(crate) fn derive_file_key(
     let mut key = Zeroizing::new([0u8; AES_KEY_SIZE]);
     let mut nonce = [0u8; GCM_NONCE_SIZE];
 
-    // SAFETY: seed and info are live for the call; info.as_ptr() may dangle
-    // when info is empty, which the C contract admits via its `info_len == 0 ||`
+    // SAFETY: seed and info are live for the call; info.as_ptr() may dangle when
+    // info is empty, which the C contract admits via its `info_len == 0 ||`
     // guard. key and nonce are distinct stack allocations, satisfying the
     // \separated preconditions the FFI cannot check.
     let status = unsafe {

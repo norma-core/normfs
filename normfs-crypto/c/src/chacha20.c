@@ -15,11 +15,9 @@ normfs_chacha20_rotl_fn(uint32_t x, unsigned int n)
 }
 
 /*
- * Written with *, / and % rather than shifts and ors, so what is proved is
- * what the bytes mean rather than that the C echoes the spec, and so it holds
- * on any host byte order. uintn/le.h has an le64 pair but no le32 on this
- * branch, and normfs-wal/c/src/wal_entry.c carries a local pair for the same
- * reason; consolidate if le32 ever lands there.
+ * Written with *, / and % so what is proved is what the bytes mean rather than
+ * that the C echoes the spec, and so it holds on any host byte order.
+ * uintn/le.h has no le32; wal_entry.c carries a local pair for the same reason.
  */
 /*@ requires \valid_read(p + (0 .. 3));
     assigns \nothing;
@@ -63,10 +61,9 @@ normfs_chacha20_le32_write(uint8_t *p, uint32_t value)
 }
 
 /*
- * Four values in and four out rather than the state array and four indices:
- * that form would put a pairwise separation precondition and four symbolic
- * offsets into every goal, where this one is constant folded away. Every call
- * site below passes literal indices. opt_level(3) inlines it.
+ * Four values in and out rather than the state array and four indices: that
+ * form would put a pairwise separation precondition and four symbolic offsets
+ * into every goal. Every call site passes literals; opt_level(3) inlines it.
  */
 struct normfs_chacha20_qr {
 	uint32_t a;
@@ -164,11 +161,8 @@ normfs_chacha20_block(const uint8_t *key, const uint8_t *nonce,
 	for (i = 0u; i < 16u; i++)
 		x[i] = st[i];
 
-	/*
-	 * Ten double rounds, not two hundred unrolled quarter rounds: smoke
-	 * test goals scale with statement count, and unrolling the outer loop
-	 * would multiply them for no proof value.
-	 */
+	/* Ten double rounds, not two hundred unrolled quarter rounds: smoke
+	 * test goals scale with statement count. */
 	/*@ loop invariant 0 <= i <= 10;
 	    loop assigns i, x[0 .. 15];
 	    loop variant 10 - i;

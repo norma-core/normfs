@@ -7,48 +7,28 @@
 /*
  * SHA-256, FIPS 180-4.
  *
- * What WP establishes and what it does not, because the goal count alone would
- * overclaim:
+ * The round transform and the sigma/ch/maj functions are echoed, not proved:
+ * the ACSL below is the same expression tree as the C, so the goals close by
+ * congruence and say nothing about the expression being SHA-256 -- the trade
+ * crc32c.c makes for its table. tests/test_sha256.c is what says it. The
+ * schedule's indices, the padding at every length, and the big endian words
+ * are proved outright.
  *
- *   Proved. Memory safety and termination on every input. The assigns
- *   footprint of every function. The message schedule's recurrence and its
- *   16/15/7/2 indices. The padding -- the 0x80, the zero run, the big endian
- *   bit length -- byte for byte at every message length rather than at the
- *   lengths a vector happens to cover. The block count. The big endian word
- *   loads and stores, which are written with *, / and % so they prove what the
- *   bytes mean rather than echoing the C, the way uintn/le.h does.
- *
- *   Echoed. The round transform and the sigma/ch/maj functions. The ACSL below
- *   is the same expression tree as the C, so the goals close by congruence
- *   rather than by bit level algebra -- the trade normfs-wal/c/src/crc32c.c
- *   makes for its table. That is not a claim that the expression is SHA-256.
- *
- *   Tested. That it is SHA-256. tests/test_sha256.c re-derives K and H0 from
- *   the primes and runs FIPS 180-4 at lengths that exercise both padding
- *   branches. The constants and the round are pinned there, not here.
- *
- * The logic functions are typed uint32_t rather than integer, and every body
- * carries an explicit cast. This is load bearing, not style: with integer
- * typed logic the provers cannot relate a land result to an lxor argument, and
- * even (x & y) ^ z fails to prove against a syntactically identical body.
- * crc32c.h gets away with integer because its one land is against a literal
- * mask.
+ * The logic is typed uint32_t rather than integer, with a cast on every body.
+ * That is load bearing: under integer typing the provers cannot relate a land
+ * result to an lxor argument, and even (x & y) ^ z fails against a
+ * syntactically identical body. crc32c.h gets away with integer because its
+ * one land is against a literal mask.
  */
 
 #define NORMFS_SHA256_BLOCK 64
 #define NORMFS_SHA256_DIGEST 32
 
-/*
- * The length field is the message length in bits, so this is the longest
- * message the format can express. No caller can reach it.
- */
+/* The length field counts bits, so this is the longest expressible message. */
 #define NORMFS_SHA256_MAX_INPUT ((uint64_t)0x1FFFFFFFFFFFFFFFu)
 
-/*
- * Exported so the ACSL can index them and so test_sha256.c can re-derive them
- * from the primes: the contracts fix how they are used, not what they are.
- * Same trade as normfs_crc32c_table.
- */
+/* Exported so the ACSL can index them and test_sha256.c can re-derive them
+ * from the primes: the contracts fix how they are used, not what they are. */
 extern const uint32_t normfs_sha256_k[64];
 extern const uint32_t normfs_sha256_h0[8];
 
@@ -59,8 +39,8 @@ extern const uint32_t normfs_sha256_h0[8];
       logic uint32_t normfs_sha256_and(uint32_t x, uint32_t y) =
         (uint32_t)(x & y);
 
-      // Complement free: every operand stays in range, so no goal here carries
-      // a truncation. The textbook (~x & z) form would put one in every round.
+      // Complement free so no goal carries a truncation; the textbook
+      // (~x & z) form would put one in every round.
       logic uint32_t normfs_sha256_ch(uint32_t x, uint32_t y, uint32_t z) =
         (uint32_t)(z ^ (x & (y ^ z)));
 
@@ -82,7 +62,7 @@ extern const uint32_t normfs_sha256_h0[8];
 
       // The casts nest the way C associates + left to right. A tidier
       // (uint32_t)(a + b + c + d) is equal but not syntactically equal, and
-      // the goal would then need modular arithmetic instead of congruence.
+      // congruence would give way to modular arithmetic.
       logic uint32_t normfs_sha256_t1(uint32_t e, uint32_t f, uint32_t g,
                                       uint32_t h, uint32_t k, uint32_t w) =
         (uint32_t)((uint32_t)((uint32_t)((uint32_t)(h +
@@ -119,12 +99,9 @@ extern const uint32_t normfs_sha256_h0[8];
     }
 */
 
-/*
- * The eight working words after t rounds, selected by j. The recursion is on t
- * alone: the j split is a conditional inside one body rather than eight mutually
- * recursive functions, so it is structurally decreasing and Frama-C takes it as
- * a definition rather than a set of axioms.
- */
+/* The eight working words after t rounds, selected by j. The recursion is on t
+ * alone so it stays structurally decreasing; the j split is a conditional
+ * inside one body rather than eight mutually recursive functions. */
 /*@ axiomatic NormfsSha256Round {
       logic uint32_t normfs_sha256_rst{L}(uint32_t *st, uint8_t *blk,
                                           integer t, integer j)
@@ -180,15 +157,11 @@ extern const uint32_t normfs_sha256_h0[8];
 void normfs_sha256_compress(uint32_t *st, const uint8_t *blk);
 
 /*
- * Absorbs the whole blocks of data and returns how many bytes it took, always
- * len - len % 64. The remainder stays the caller's.
- *
- * This is an absorb/finish API rather than init/update/final because a
- * streaming context's postcondition is "the digest of everything you passed to
- * update", and stating that in ACSL needs those bytes in memory -- which is
- * exactly what a streaming context does not keep. Splitting at the block
- * boundary lets every function below carry a real value contract. It costs the
- * caller one % 64.
+ * absorb/finish rather than init/update/final: a streaming context's
+ * postcondition is "the digest of everything you passed to update", and stating
+ * that in ACSL needs those bytes in memory, which is what a streaming context
+ * does not keep. Splitting at the block boundary lets every function below
+ * carry a real value contract, for one % 64 at the caller.
  */
 /*@ requires \valid(st + (0 .. 7));
     requires len == 0 || \valid_read(data + (0 .. len - 1));
@@ -201,13 +174,9 @@ void normfs_sha256_compress(uint32_t *st, const uint8_t *blk);
 size_t normfs_sha256_absorb(uint32_t *st, const uint8_t *data, size_t len);
 
 /*
- * Pads and emits the digest. tail_len may exceed one block because HMAC stages
- * a partial block followed by a second message and joins them here, so no
- * caller needs a running buffer.
- *
- * total_len is the length of the entire message including everything already
- * absorbed. It is a parameter rather than context state for the same reason
- * the API is absorb/finish.
+ * tail_len may exceed one block because HMAC stages a partial block followed by
+ * a second message and joins them here. total_len covers the whole message,
+ * absorbed part included.
  */
 /*@ requires \valid(st + (0 .. 7));
     requires tail_len <= 2 * NORMFS_SHA256_BLOCK;

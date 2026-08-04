@@ -1,9 +1,7 @@
 /*
- * RFC 5869 for HKDF-SHA256, plus the argument handling of
- * normfs_kdf_derive_file_key. What the composition is worth against the data
- * already on disk is settled on the Rust side, where the derivation this
- * replaces is kept as a differential oracle; this file pins the primitive
- * against the published vectors.
+ * RFC 5869, plus the argument handling of normfs_kdf_derive_file_key. Whether
+ * the composition matches the data already on disk is settled in kdf_test.rs,
+ * against the derivation this replaces; here it is only the published vectors.
  */
 #include <stdio.h>
 #include <string.h>
@@ -31,11 +29,8 @@ hex_eq(const uint8_t *got, size_t len, const char *want)
 	return strcmp(buf, want) == 0;
 }
 
-/*
- * RFC 5869 A.1-A.3. Only the first 32 bytes of OKM are compared: expand here
- * is restricted to one block, and for all three cases T(1) is exactly the
- * first 32 bytes of the published OKM.
- */
+/* Only the first 32 bytes of OKM are compared: expand is restricted to one
+ * block, and T(1) is exactly those bytes in all three cases. */
 static int
 test_rfc5869(void)
 {
@@ -61,7 +56,7 @@ test_rfc5869(void)
 	CHECK(hex_eq(okm, sizeof(okm),
 	    "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf"));
 
-	/* A.2: 80-byte inputs, so the HMAC key path and a multi-block message
+	/* A.2: 80-byte inputs, so the long-key path and a multi-block message
 	 * both run. */
 	for (i = 0u; i < 80u; i++) {
 		ikm[i] = (uint8_t)i;
@@ -76,8 +71,8 @@ test_rfc5869(void)
 	CHECK(hex_eq(okm, sizeof(okm),
 	    "b11e398dc80327a1c8e7f78c596a49344f012eda2d4efad8a050cc4c19afa97c"));
 
-	/* A.3: zero-length salt and info -- the "salt not provided" case, which
-	 * is the one the file key derivation uses. */
+	/* A.3: the "salt not provided" case, which the file key derivation
+	 * uses. */
 	memset(ikm, 0x0b, 22u);
 	normfs_hkdf_sha256_extract(NULL, 0u, ikm, 22u, prk);
 	CHECK(hex_eq(prk, sizeof(prk),
@@ -89,9 +84,8 @@ test_rfc5869(void)
 	return 0;
 }
 
-/* A zero-length salt must mean 32 zero bytes, not an absent key. Getting this
- * wrong would change every key on disk, and RFC 5869 A.3 above only covers it
- * indirectly. */
+/* Getting this wrong would change every key on disk, and A.3 above only covers
+ * it indirectly. */
 static int
 test_empty_salt_is_zero_block(void)
 {
@@ -145,7 +139,6 @@ test_derive_argument_checks(void)
 	return 0;
 }
 
-/* Distinct info must give distinct keys, and the same info the same key. */
 static int
 test_derive_is_a_function_of_info(void)
 {

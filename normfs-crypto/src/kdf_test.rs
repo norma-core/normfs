@@ -1,14 +1,13 @@
 //! The C key derivation against the Rust it replaces, byte for byte.
 //!
-//! The scheme is deterministic and there are encrypted files on disk behind it,
-//! so the question is not whether the C implements HKDF and ChaCha20 — the RFC
-//! vectors in `c/tests/` settle that — but whether it reproduces exactly what
-//! `rand_chacha`'s `ChaCha20Rng` produced. That is an argument about a crate's
-//! internals, and this makes it a checked fact instead.
+//! Whether the C implements HKDF and ChaCha20 is settled by the RFC vectors in
+//! `c/tests/`. What those cannot settle is whether it reproduces exactly what
+//! `rand_chacha`'s `ChaCha20Rng` produced, which is an argument about a crate's
+//! internals — and there are encrypted files on disk riding on it. This makes it
+//! a checked fact instead.
 //!
 //! The reference below is why `hkdf` is still a dev-dependency. Do not delete
-//! it when the port lands: it is the only thing standing between a refactor and
-//! silently undecryptable data.
+//! it: it is what stands between a refactor and silently undecryptable data.
 
 use hkdf::Hkdf;
 use rand_chacha::ChaCha20Rng;
@@ -18,9 +17,7 @@ use sha2::Sha256;
 use crate::kdf::{derive_file_key, AES_KEY_SIZE, GCM_NONCE_SIZE};
 use crate::seed::SEED_SIZE;
 
-/// The derivation exactly as `CryptoContext::derive_rng` performed it before
-/// this change: HKDF-SHA256 with an absent salt, then a ChaCha20Rng seeded from
-/// the 32-byte OKM, drawing the key first and the nonce second.
+/// `CryptoContext::derive_rng` exactly as it was before this change.
 fn derive_reference(
     seed: &[u8; SEED_SIZE],
     info: &[u8],
@@ -87,8 +84,7 @@ fn paths() -> Vec<String> {
     ]
 }
 
-/// `file_id.value_to_bytes()` is little-endian at a width the `UintN` variant
-/// chooses, so these are the byte-length transitions.
+/// The byte-length transitions of `UintN`'s variable width encoding.
 fn file_id_tails() -> Vec<Vec<u8>> {
     let mut v: Vec<Vec<u8>> = Vec::new();
     for n in [0u64, 1, 254, 255, 256, 65534, 65535, 65536, 0xFFFF_FFFF] {
@@ -112,9 +108,8 @@ fn c_matches_rust_across_the_corpus() {
     }
 }
 
-/// The same numeric file id at five widths must give five different keys. If
-/// this ever passes with fewer than five distinct keys, the width has been
-/// dropped somewhere and the corpus above would no longer notice.
+/// The same numeric file id at five widths must give five different keys. Were
+/// the width ever dropped, the corpus above would stop noticing.
 #[test]
 fn uintn_width_changes_the_key() {
     use uintn::UintN;
@@ -145,8 +140,7 @@ fn uintn_width_changes_the_key() {
     }
 }
 
-/// A seeded sweep over lengths the hand-written corpus misses, in the style of
-/// test_crc32c.c's length sweep.
+/// A seeded sweep over lengths the hand-written corpus misses.
 #[test]
 fn c_matches_rust_over_random_info() {
     let seed = [0x5Au8; SEED_SIZE];

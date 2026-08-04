@@ -1,8 +1,6 @@
 #include "normfs/sha256.h"
 
-/*
- * Proved by Frama-C WP (verify-sha256). Must not include a system header.
- */
+/* Proved by verify-sha256. Must not include a system header. */
 
 const uint32_t normfs_sha256_k[64] = {
 	0x428A2F98U, 0x71374491U, 0xB5C0FBCFU, 0xE9B5DBA5U,
@@ -48,12 +46,12 @@ normfs_sha256_ch_fn(uint32_t x, uint32_t y, uint32_t z)
 }
 
 /*
- * Three ands under two xors is the one expression in this file the provers do
- * not close in a single step; naming each and gives them one land per goal.
- * The FIPS form is kept rather than the cheaper (x & y) ^ (z & (x ^ y)),
- * because the two cannot be proved equal -- that would need the bit level
- * algebra this whole file is arranged to avoid -- and a header a reviewer can
- * diff against FIPS 180-4 by eye is worth more than three statements.
+ * The one expression here the provers do not close in a single step: three ands
+ * under two xors. Naming each and gives them one land per goal. The FIPS form
+ * is kept rather than the cheaper (x & y) ^ (z & (x ^ y)) because the two
+ * cannot be proved equal -- that needs the bit level algebra this file is
+ * arranged to avoid -- and a header a reviewer can diff against FIPS 180-4 is
+ * worth three statements.
  */
 /*@ assigns \nothing;
     ensures \result == normfs_sha256_maj(x, y, z);
@@ -133,9 +131,9 @@ normfs_sha256_t2_fn(uint32_t a, uint32_t b, uint32_t c)
 }
 
 /*
- * Written with *, / and % rather than shifts and ors, so what is proved is
- * what the bytes mean rather than that the C echoes the spec -- and so it is
- * host endian independent by construction. Never memcpy a uint32_t here.
+ * Written with *, / and % so what is proved is what the bytes mean rather than
+ * that the C echoes the spec, and so it holds on any host byte order. Never
+ * memcpy a uint32_t or cast uint8_t* to uint32_t* here.
  */
 /*@ requires \valid_read(p + (0 .. 3));
     assigns \nothing;
@@ -178,8 +176,8 @@ normfs_sha256_be32_write(uint8_t *p, uint32_t value)
 	p[3] = (uint8_t)b3;
 }
 
-/* The bit length, big endian. value * 8 rather than value << 3 keeps it
- * arithmetic; the precondition is what stops that multiply overflowing. */
+/* value * 8 rather than value << 3 keeps it arithmetic; the precondition is
+ * what stops the multiply overflowing. */
 /*@ requires \valid(p + (0 .. 7));
     requires value <= NORMFS_SHA256_MAX_INPUT;
     assigns p[0 .. 7];
@@ -341,7 +339,7 @@ normfs_sha256_finish(uint32_t *st, const uint8_t *tail, size_t tail_len,
     uint64_t total_len, uint8_t *out)
 {
 	/* tail (<= 128) + 0x80 + zero run + 8 length bytes, rounded up to a
-	 * block: three blocks is the most that can be needed. */
+	 * block. */
 	uint8_t pad[3 * NORMFS_SHA256_BLOCK];
 	size_t padded;
 	size_t i;

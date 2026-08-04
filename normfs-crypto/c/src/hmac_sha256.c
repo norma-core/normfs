@@ -4,11 +4,9 @@
 #define NORMFS_HMAC_OPAD 0x5Cu
 
 /*
- * K0: the key padded to a block with zeros, or its digest so padded when the
- * key is longer than a block. The two branches are separate loops rather than
- * one, because the hashed branch writes 32 bytes and the direct branch
- * key_len, and a single loop would need a conditional bound the invariant
- * cannot carry.
+ * The key padded to a block with zeros, or its digest so padded when the key is
+ * longer than a block. Two branches rather than one loop: the bounds differ, and
+ * a conditional bound is one the invariant cannot carry.
  */
 /*@ requires \valid(k0 + (0 .. NORMFS_HMAC_SHA256_BLOCK - 1));
     requires key_len == 0 || \valid_read(key + (0 .. key_len - 1));
@@ -69,8 +67,8 @@ normfs_hmac_sha256_k0(const uint8_t *key, size_t key_len, uint8_t *k0)
 		k0[i] = 0u;
 }
 
-/* 0x36 and 0x5C are xored into bytes already in range, so these goals carry no
- * truncation and close without the split maj needed. */
+/* The xor operands are already in range, so these goals carry no truncation and
+ * close without the split maj needed. */
 /*@ requires \valid(out + (0 .. NORMFS_HMAC_SHA256_BLOCK - 1));
     requires \valid_read(k0 + (0 .. NORMFS_HMAC_SHA256_BLOCK - 1));
     requires \separated(out + (0 .. NORMFS_HMAC_SHA256_BLOCK - 1),
@@ -102,7 +100,7 @@ normfs_hmac_sha256_2(const uint8_t *key, size_t key_len,
 	uint8_t k0[NORMFS_HMAC_SHA256_BLOCK];
 	uint8_t pad[NORMFS_HMAC_SHA256_BLOCK];
 	/* m1's remainder is under a block and m2 is at most one, so the join
-	 * never exceeds what normfs_sha256_finish accepts. */
+	 * stays within what normfs_sha256_finish accepts. */
 	uint8_t tail[2 * NORMFS_SHA256_BLOCK];
 	uint8_t inner[NORMFS_SHA256_DIGEST];
 	uint32_t st[8];

@@ -1,10 +1,9 @@
 /*
- * RFC 4231. src/hmac_sha256.c proves its key schedule and framing but says
- * nothing about what H(opad ‖ H(ipad ‖ m)) computes; these vectors are what
- * says the result is HMAC.
+ * RFC 4231. The C proves its key schedule and framing but says nothing about
+ * what H(opad ‖ H(ipad ‖ m)) computes; these vectors do.
  *
- * Cases 6 and 7 use a 131-byte key, which is the only thing that reaches the
- * hash-the-long-key branch -- without them it is live code no test covers.
+ * Cases 6 and 7 use a 131-byte key, the only thing that reaches the
+ * hash-the-long-key branch.
  */
 #include <stdio.h>
 #include <string.h>
@@ -92,8 +91,7 @@ test_rfc4231(void)
 	return 0;
 }
 
-/* The two-part message must agree with the one-part form at every split, which
- * is what HKDF-Expand relies on when it passes (info, counter byte). */
+/* HKDF-Expand relies on this when it passes (info, counter byte). */
 static int
 test_two_part_message(void)
 {
