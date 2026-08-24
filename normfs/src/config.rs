@@ -1,6 +1,18 @@
 use globset::{Glob, GlobMatcher};
 use normfs_types::{CompressionType, EncryptionType};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersistenceMode {
+    Durable,
+    MemoryOnly,
+}
+
+impl Default for PersistenceMode {
+    fn default() -> Self {
+        Self::Durable
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct QueueConfig {
     pub compression_type: CompressionType,

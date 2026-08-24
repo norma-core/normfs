@@ -1,5 +1,5 @@
 use clap::Parser;
-use normfs::{CloudSettings, NormFS, NormFsSettings};
+use normfs::{CloudSettings, NormFS, NormFsSettings, PersistenceMode};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -51,6 +51,10 @@ struct Args {
     #[arg(long, default_value = "34359738368")]
     max_queue_disk_size: u64,
 
+    /// Keep queue data in memory only and persist only latest queue pointers
+    #[arg(long)]
+    memory_only: bool,
+
     /// S3 bucket name for cloud offloading (optional)
     #[arg(long)]
     s3_bucket: Option<String>,
@@ -88,16 +92,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("TCP address: {}", args.addr);
     log::info!("Data directory: {:?}", args.data_dir);
     log::info!("Max queue disk size: {} bytes", args.max_queue_disk_size);
+    log::info!("Memory-only mode: {}", args.memory_only);
 
     std::fs::create_dir_all(&args.data_dir)?;
 
     let mut settings = NormFsSettings {
-        max_disk_usage_per_queue: Some(args.max_queue_disk_size),
+        max_disk_usage_per_queue: if args.memory_only {
+            None
+        } else {
+            Some(args.max_queue_disk_size)
+        },
+        persistence_mode: if args.memory_only {
+            PersistenceMode::MemoryOnly
+        } else {
+            PersistenceMode::Durable
+        },
         ..Default::default()
     };
 
     // Configure S3 cloud offloading if provided
-    if let Some(bucket) = &args.s3_bucket {
+    if args.memory_only && args.s3_bucket.is_some() {
+        log::warn!("Ignoring S3 settings in memory-only mode");
+    } else if let Some(bucket) = &args.s3_bucket {
         let region_str = args
             .s3_region
             .as_ref()

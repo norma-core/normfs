@@ -11,16 +11,16 @@ use uintn::UintN;
 /// Reader FSM that manages read operations across different storage backends
 #[derive(Clone)]
 pub struct ReaderFSM {
-    pub(crate) wal: Arc<WalStore>,
-    pub(crate) store: Arc<PersistStore>,
+    pub(crate) wal: Option<Arc<WalStore>>,
+    pub(crate) store: Option<Arc<PersistStore>>,
     pub(crate) mem: Arc<MemStore>,
     pub(crate) s3_downloader: Option<Arc<CloudDownloader>>,
 }
 
 impl ReaderFSM {
     pub fn new(
-        wal: Arc<WalStore>,
-        store: Arc<PersistStore>,
+        wal: Option<Arc<WalStore>>,
+        store: Option<Arc<PersistStore>>,
         mem: Arc<MemStore>,
         s3_downloader: Option<Arc<CloudDownloader>>,
     ) -> Self {
@@ -29,6 +29,14 @@ impl ReaderFSM {
             store,
             mem,
             s3_downloader,
+        }
+    }
+
+    fn storage_miss(&self, queue: &QueueId) -> ReaderState {
+        if self.mem.get_last_id(queue).is_none() {
+            ReaderState::Failed(Error::QueueNotFound)
+        } else {
+            ReaderState::Failed(Error::NotFound)
         }
     }
 
@@ -147,17 +155,21 @@ impl ReaderFSM {
             "Prefetching file: queue={}, file_id={}",
             queue, file_id);
 
+        let Some(store) = &self.store else {
+            return Ok(None);
+        };
+        let Some(wal) = &self.wal else {
+            return Ok(None);
+        };
+
         // Try Store first
-        match self.store.get_store_bytes(&queue, &file_id).await {
+        match store.get_store_bytes(&queue, &file_id).await {
             Ok(Some(store_bytes)) => {
                 log::trace!(target: "normfs-reader-fsm",
                     "Prefetch: got {} bytes from Store for file {}",
                     store_bytes.len(), file_id);
                 // Extract WAL bytes (decrypt/decompress) - no verification for local files
-                match self
-                    .store
-                    .extract_wal_bytes(&queue, &file_id, store_bytes, false)
-                {
+                match store.extract_wal_bytes(&queue, &file_id, store_bytes, false) {
                     Ok(wal_bytes) => {
                         log::debug!(target: "normfs-reader-fsm",
                             "Prefetch successful from Store: queue={}, file_id={}, wal_bytes={}",
@@ -187,7 +199,7 @@ impl ReaderFSM {
         }
 
         // Try WAL
-        match self.wal.get_wal_bytes(&queue, &file_id).await {
+        match wal.get_wal_bytes(&queue, &file_id).await {
             Ok(Some(wal_bytes)) => {
                 log::debug!(target: "normfs-reader-fsm",
                     "Prefetch successful from WAL: queue={}, file_id={}, wal_bytes={}",
@@ -215,10 +227,7 @@ impl ReaderFSM {
                         "Prefetch: got {} bytes from S3 for file {}",
                         store_bytes.len(), file_id);
                     // Extract WAL bytes (decrypt/decompress) - verify signatures for S3 files
-                    match self
-                        .store
-                        .extract_wal_bytes(&queue, &file_id, store_bytes, true)
-                    {
+                    match store.extract_wal_bytes(&queue, &file_id, store_bytes, true) {
                         Ok(wal_bytes) => {
                             log::debug!(target: "normfs-reader-fsm",
                                 "Prefetch successful from S3: queue={}, file_id={}, wal_bytes={}",
@@ -305,6 +314,10 @@ impl ReaderFSM {
             }
         }
 
+        if self.store.is_none() || self.wal.is_none() {
+            return Ok(self.storage_miss(&queue));
+        }
+
         // Not in memory or memory is empty, transition to file lookup
         Ok(ReaderState::LookupFile {
             queue,
@@ -342,6 +355,10 @@ impl ReaderFSM {
             let start_id = result.start_id.ok_or(Error::QueueNotFound)?;
             let end_id = Some(start_id.add(&UintN::from((limit - 1) * step)));
 
+            if self.store.is_none() || self.wal.is_none() {
+                return Ok(self.storage_miss(&queue));
+            }
+
             Ok(ReaderState::LookupFile {
                 queue,
                 start_id,
@@ -362,6 +379,10 @@ impl ReaderFSM {
             }
 
             let start_id = result.start_id.ok_or(Error::QueueNotFound)?;
+
+            if self.store.is_none() || self.wal.is_none() {
+                return Ok(self.storage_miss(&queue));
+            }
 
             Ok(ReaderState::LookupFile {
                 queue,
@@ -387,11 +408,18 @@ impl ReaderFSM {
         }
 
         // Look up which file contains start_id
+        let Some(store) = &self.store else {
+            return Ok(self.storage_miss(&queue));
+        };
+        let Some(wal) = &self.wal else {
+            return Ok(self.storage_miss(&queue));
+        };
+
         let file_id = match crate::lookup::find_file_with_s3(
             &queue,
             &start_id,
-            &self.store,
-            &self.wal,
+            store,
+            wal,
             self.s3_downloader.as_ref(),
         )
         .await
@@ -436,8 +464,12 @@ impl ReaderFSM {
             "Attempting to read from Store: queue={}, file_id={}, next_id={}, last_id={:?}",
             ctx.queue, ctx.file_id, ctx.next_id, ctx.last_id);
 
+        let Some(store) = &self.store else {
+            return Ok(ReaderState::ReadWal { ctx });
+        };
+
         // Get store file bytes
-        match self.store.get_store_bytes(&ctx.queue, &ctx.file_id).await {
+        match store.get_store_bytes(&ctx.queue, &ctx.file_id).await {
             Ok(Some(store_bytes)) => {
                 log::trace!(target: "normfs-reader-fsm",
                     "Read {} bytes from Store file: queue={}, file_id={}",
@@ -475,8 +507,15 @@ impl ReaderFSM {
             "Attempting to read from WAL: queue={}, file_id={}, next_id={}, last_id={:?}",
             ctx.queue, ctx.file_id, ctx.next_id, ctx.last_id);
 
+        let Some(wal) = &self.wal else {
+            if self.s3_downloader.is_some() {
+                return Ok(ReaderState::ReadS3 { ctx });
+            }
+            return Ok(ReaderState::Failed(Error::NotFound));
+        };
+
         // Get WAL bytes from WAL file
-        match self.wal.get_wal_bytes(&ctx.queue, &ctx.file_id).await {
+        match wal.get_wal_bytes(&ctx.queue, &ctx.file_id).await {
             Ok(Some(wal_bytes)) => {
                 log::trace!(target: "normfs-reader-fsm",
                     "Read {} bytes from WAL file: queue={}, file_id={}",
@@ -608,10 +647,10 @@ impl ReaderFSM {
         // Extract WAL bytes from store bytes (decrypt/decompress)
         // Verify signatures for S3 files, skip verification for local files
         let verify_signatures = matches!(data_source, DataSource::Cloud);
-        match self
-            .store
-            .extract_wal_bytes(&ctx.queue, &ctx.file_id, store_bytes, verify_signatures)
-        {
+        let Some(store) = &self.store else {
+            return Ok(ReaderState::Failed(Error::NotFound));
+        };
+        match store.extract_wal_bytes(&ctx.queue, &ctx.file_id, store_bytes, verify_signatures) {
             Ok(wal_bytes) => {
                 log::trace!(target: "normfs-reader-fsm",
                     "Extracted {} WAL bytes: queue={}, file_id={}",
@@ -680,8 +719,10 @@ impl ReaderFSM {
         };
 
         // Parse and send entries from WAL bytes
-        match self
-            .wal
+        let Some(wal) = &self.wal else {
+            return Ok(ReaderState::Failed(Error::NotFound));
+        };
+        match wal
             .read_wal_content_range(
                 &wal_bytes,
                 &ctx.next_id,

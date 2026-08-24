@@ -11,8 +11,8 @@ description = "Write-ahead log implementation for NormFS with crash recovery"
 [dependencies]
 log = "0.4"
 bytes = "1"
-uintn = { version = "0.2.0-beta.2", path = "../uintn-rs" }
-normfs-types = { version = "0.2.0-beta.2", path = "../normfs-types" }
+uintn = { version = "0.2.0-beta.3", path = "../uintn-rs" }
+normfs-types = { version = "0.2.0-beta.3", path = "../normfs-types" }
 tokio = { version = "1", features = ["full"] }
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 walkdir = "2"

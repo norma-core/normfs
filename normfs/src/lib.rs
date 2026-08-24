@@ -5,6 +5,7 @@ pub mod proto {
     include!("proto/normfs.rs");
 }
 mod config;
+mod memory_pointers;
 mod offload;
 pub(crate) mod reader_fsm;
 
@@ -18,6 +19,7 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 use std::{path::Path, sync::Arc};
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 
 pub use lookup::LookupError;
 pub use normfs_cloud::CloudSettings;
@@ -27,16 +29,18 @@ pub use normfs_wal::WalError;
 use offload::disk_monitor::DiskMonitor;
 pub use offload::disk_monitor::DiskMonitorConfig;
 
-pub use crate::config::{QueueConfig, QueueMode, QueueSettings};
+pub use crate::config::{PersistenceMode, QueueConfig, QueueMode, QueueSettings};
 
 pub use uintn::{Error as UintNError, UintN, UintNType};
 
 pub struct NormFS {
-    wal: Arc<WalStore>,
-    store: Arc<PersistStore>,
+    wal: Option<Arc<WalStore>>,
+    store: Option<Arc<PersistStore>>,
     mem: Arc<mem::MemStore>,
     disk_monitor: Option<Arc<DiskMonitor>>,
     _cloud_downloader: Option<Arc<CloudDownloader>>,
+    memory_pointers: Option<Arc<memory_pointers::MemoryPointers>>,
+    memory_pointer_task: Option<JoinHandle<()>>,
     crypto_ctx: Arc<CryptoContext>,
     settings: NormFsSettings,
     reader_fsm: reader_fsm::ReaderFSM,
@@ -119,6 +123,8 @@ pub struct NormFsSettings {
     pub max_disk_usage_per_queue: Option<u64>,
     pub cloud_settings: Option<CloudSettings>,
     pub queue_settings: QueueSettings,
+    pub persistence_mode: PersistenceMode,
+    pub memory_pointers_flush_interval: Duration,
 }
 
 impl Default for NormFsSettings {
@@ -130,6 +136,8 @@ impl Default for NormFsSettings {
             wal_settings: Default::default(),
             cloud_settings: None,
             queue_settings: Default::default(),
+            persistence_mode: PersistenceMode::Durable,
+            memory_pointers_flush_interval: Duration::from_secs(5),
         }
     }
 }
@@ -139,15 +147,10 @@ impl NormFS {
         path: P,
         settings: NormFsSettings,
     ) -> Result<Self, Error> {
-        log::debug!(target: "normfs", "Creating new NormFS at path: {:?}", path.as_ref());
+        let path = path.as_ref().to_path_buf();
+        log::debug!(target: "normfs", "Creating new NormFS at path: {:?}", path);
 
-        let (wal_entry_send, mut wal_entry_recv) = tokio::sync::mpsc::unbounded_channel();
-        let (wal_complete_send, wal_complete_recv): (
-            tokio::sync::mpsc::UnboundedSender<WalFile>,
-            tokio::sync::mpsc::UnboundedReceiver<WalFile>,
-        ) = tokio::sync::mpsc::unbounded_channel();
-
-        let crypto_ctx = Arc::new(CryptoContext::open(path.as_ref()).map_err(|e| {
+        let crypto_ctx = Arc::new(CryptoContext::open(&path).map_err(|e| {
             Error::Io(std::io::Error::other(format!(
                 "Failed to open crypto context: {}",
                 e
@@ -158,14 +161,50 @@ impl NormFS {
 
         let queue_resolver = normfs_types::QueueIdResolver::new(instance_id);
 
-        let wal = Arc::new(WalStore::new(
-            path.as_ref(),
-            wal_entry_send,
-            wal_complete_send,
-        ));
+        let mem = Arc::new(mem::MemStore::new(settings.max_memory_usage));
+
+        if settings.persistence_mode == PersistenceMode::MemoryOnly {
+            if settings.cloud_settings.is_some() {
+                log::warn!(target: "normfs", "Ignoring cloud settings in memory-only mode");
+            }
+            if settings.max_disk_usage_per_queue.is_some() {
+                log::warn!(target: "normfs", "Ignoring disk monitor settings in memory-only mode");
+            }
+
+            let memory_pointers =
+                Arc::new(memory_pointers::MemoryPointers::open(&path).map_err(Error::Io)?);
+            let memory_pointer_task =
+                Some(memory_pointers.spawn_flusher(settings.memory_pointers_flush_interval));
+            let reader_fsm = reader_fsm::ReaderFSM::new(None, None, mem.clone(), None);
+
+            log::info!(target: "normfs", "NormFS initialized in memory-only mode");
+
+            return Ok(Self {
+                wal: None,
+                store: None,
+                mem,
+                disk_monitor: None,
+                _cloud_downloader: None,
+                memory_pointers: Some(memory_pointers),
+                memory_pointer_task,
+                crypto_ctx,
+                settings: settings.clone(),
+                reader_fsm,
+                queue_resolver,
+                queue_init_locks: RwLock::new(HashMap::new()),
+            });
+        }
+
+        let (wal_entry_send, mut wal_entry_recv) = tokio::sync::mpsc::unbounded_channel();
+        let (wal_complete_send, wal_complete_recv): (
+            tokio::sync::mpsc::UnboundedSender<WalFile>,
+            tokio::sync::mpsc::UnboundedReceiver<WalFile>,
+        ) = tokio::sync::mpsc::unbounded_channel();
+
+        let wal = Arc::new(WalStore::new(&path, wal_entry_send, wal_complete_send));
 
         let mut store = PersistStore::new(
-            path.as_ref(),
+            &path,
             settings.store_cfg.clone(),
             crypto_ctx.clone(),
             wal.clone(),
@@ -174,8 +213,6 @@ impl NormFS {
         store.recover().await?;
 
         let store_done_rx = store.start_writers(wal_complete_recv).await;
-
-        let mem = Arc::new(mem::MemStore::new(settings.max_memory_usage));
 
         let mem_clone = mem.clone();
         tokio::spawn(async move {
@@ -232,8 +269,7 @@ impl NormFS {
         // Initialize disk monitor if enabled
         let disk_monitor = if settings.max_disk_usage_per_queue.is_some() {
             log::debug!(target: "normfs", "Disk monitor enabled, creating disk monitor instance");
-            match DiskMonitor::new(path.as_ref(), cloud_client.clone(), cloud_prefix.clone()).await
-            {
+            match DiskMonitor::new(&path, cloud_client.clone(), cloud_prefix.clone()).await {
                 Ok(monitor) => Some(Arc::new(monitor)),
                 Err(e) => {
                     log::error!(target: "normfs", "Failed to create disk monitor: {}", e);
@@ -276,18 +312,20 @@ impl NormFS {
 
         let store_arc = Arc::new(store);
         let reader_fsm = reader_fsm::ReaderFSM::new(
-            wal.clone(),
-            store_arc.clone(),
+            Some(wal.clone()),
+            Some(store_arc.clone()),
             mem.clone(),
             cloud_downloader.clone(),
         );
 
         Ok(Self {
-            wal,
-            store: store_arc,
+            wal: Some(wal),
+            store: Some(store_arc),
             mem,
             disk_monitor,
             _cloud_downloader: cloud_downloader,
+            memory_pointers: None,
+            memory_pointer_task: None,
             crypto_ctx,
             settings: settings.clone(),
             reader_fsm,
@@ -309,6 +347,10 @@ impl NormFS {
     /// If the path is absolute (starts with /), it will be used as-is
     pub fn resolve(&self, path: &str) -> QueueId {
         self.queue_resolver.resolve(path)
+    }
+
+    fn is_memory_only(&self) -> bool {
+        self.settings.persistence_mode == PersistenceMode::MemoryOnly
     }
 
     pub async fn ensure_queue_exists_for_read(&self, queue: &QueueId) -> Result<(), Error> {
@@ -354,7 +396,21 @@ impl NormFS {
         let _guard = queue_lock.lock().await;
 
         let queue_exists = self.mem.get_last_id(queue).is_some();
-        let has_writer = self.wal.has_writer(queue).await;
+        if self.is_memory_only() {
+            if queue_exists {
+                return Ok(());
+            }
+
+            log::info!(target: "normfs", "Auto-starting queue '{}' in memory-only write mode", queue);
+            return self.start_queue(queue, QueueMode { readonly: false }).await;
+        }
+
+        let has_writer = self
+            .wal
+            .as_ref()
+            .expect("WAL backend must be available in durable mode")
+            .has_writer(queue)
+            .await;
 
         if queue_exists && has_writer {
             return Ok(());
@@ -376,11 +432,18 @@ impl NormFS {
     /// Get the latest file ID across all sources (WAL, Store, S3).
     /// Returns the maximum file ID found, or None if no files exist in any source.
     async fn get_latest_file(&self, queue: &QueueId) -> Option<UintN> {
+        let wal = self
+            .wal
+            .as_ref()
+            .expect("WAL backend must be available in durable mode");
+        let store = self
+            .store
+            .as_ref()
+            .expect("Store backend must be available in durable mode");
+
         // Query WAL and Store only (S3 is too slow for recovery)
-        let (wal_file_id, store_file_id) = tokio::join!(
-            self.wal.find_last_file_id(queue),
-            self.store.find_last_file_id(queue)
-        );
+        let (wal_file_id, store_file_id) =
+            tokio::join!(wal.find_last_file_id(queue), store.find_last_file_id(queue));
 
         // Log results from each source individually
         match &wal_file_id {
@@ -440,10 +503,19 @@ impl NormFS {
     /// Queries WAL and Store in parallel and returns the maximum last entry ID found,
     /// or None if the file has no entries in any source.
     async fn get_file_end_all_sources(&self, queue: &QueueId, file_id: &UintN) -> Option<UintN> {
+        let wal = self
+            .wal
+            .as_ref()
+            .expect("WAL backend must be available in durable mode");
+        let store = self
+            .store
+            .as_ref()
+            .expect("Store backend must be available in durable mode");
+
         // Query WAL and Store only (S3 is too slow for recovery)
         let (wal_end, store_end) = tokio::join!(
-            self.wal.get_file_end(queue, file_id),
-            self.store.get_file_end(queue, file_id)
+            wal.get_file_end(queue, file_id),
+            store.get_file_end(queue, file_id)
         );
 
         // Log detailed results from each source
@@ -544,10 +616,19 @@ impl NormFS {
         queue: &QueueId,
         file_id: &UintN,
     ) -> Option<normfs_wal::WalHeader> {
+        let wal = self
+            .wal
+            .as_ref()
+            .expect("WAL backend must be available in durable mode");
+        let store = self
+            .store
+            .as_ref()
+            .expect("Store backend must be available in durable mode");
+
         // Query WAL and Store only (S3 is too slow for recovery)
         let (wal_header, store_header) = tokio::join!(
-            self.wal.get_file_header(queue, file_id),
-            self.store.get_file_header(queue, file_id)
+            wal.get_file_header(queue, file_id),
+            store.get_file_header(queue, file_id)
         );
 
         // Log individual source results
@@ -712,6 +793,16 @@ impl NormFS {
         log::info!(target: "normfs", "Starting queue: '{}' (readonly={})", queue, mode.readonly);
         log::info!(target: "normfs", "========================================");
 
+        if self.is_memory_only() {
+            let last_entry_id = self
+                .memory_pointers
+                .as_ref()
+                .and_then(|pointers| pointers.last_id(queue));
+            self.mem.start_queue(queue, last_entry_id.clone());
+            log::info!(target: "normfs", "Memory-only queue '{}' started, last_entry_id: {:?}", queue, last_entry_id);
+            return Ok(());
+        }
+
         // Use the new backward search logic to find the correct file and entry to continue from
         let (file_id, header, last_entry_id) = self.continue_queue(queue).await?;
 
@@ -732,6 +823,8 @@ impl NormFS {
             wal_settings.encryption_type = queue_config.encryption_type;
 
             self.wal
+                .as_ref()
+                .expect("WAL backend must be available in durable mode")
                 .start_writer(
                     queue,
                     &file_id,
@@ -741,7 +834,11 @@ impl NormFS {
                 )
                 .await?;
 
-            let wal = self.wal.clone();
+            let wal = self
+                .wal
+                .as_ref()
+                .expect("WAL backend must be available in durable mode")
+                .clone();
             let queue_clone = queue.clone();
             let file_id_clone = file_id.clone();
             let compression_type = wal_settings.compression_type;
@@ -792,7 +889,19 @@ impl NormFS {
         log::debug!(target: "normfs", "Enqueuing entry - Queue: '{}', Entry ID: {}, Data size: {} bytes",
             queue, entry_id, data.len());
 
-        self.wal.enqueue(queue, entry_id.clone(), data)?;
+        if self.is_memory_only() {
+            if let Some(pointers) = &self.memory_pointers {
+                pointers.mark(queue, &entry_id).map_err(Error::Io)?;
+            }
+            self.mem.ack(queue, &entry_id);
+            log::trace!(target: "normfs", "Memory-only entry enqueued successfully - Queue: '{}', Entry ID: {}", queue, entry_id);
+            return Ok(entry_id);
+        }
+
+        self.wal
+            .as_ref()
+            .expect("WAL backend must be available in durable mode")
+            .enqueue(queue, entry_id.clone(), data)?;
 
         log::trace!(target: "normfs", "Entry enqueued successfully - Queue: '{}', Entry ID: {}", queue, entry_id);
 
@@ -819,7 +928,21 @@ impl NormFS {
             .zip(data.iter().cloned())
             .collect();
 
-        self.wal.enqueue_batch(queue, wal_entries)?;
+        if self.is_memory_only() {
+            if let Some(last_id) = entry_ids.last() {
+                if let Some(pointers) = &self.memory_pointers {
+                    pointers.mark(queue, last_id).map_err(Error::Io)?;
+                }
+                self.mem.ack(queue, last_id);
+            }
+            log::trace!(target: "normfs", "Memory-only batch enqueued successfully - Queue: '{}', Count: {}", queue, entry_ids.len());
+            return Ok(entry_ids);
+        }
+
+        self.wal
+            .as_ref()
+            .expect("WAL backend must be available in durable mode")
+            .enqueue_batch(queue, wal_entries)?;
 
         log::trace!(target: "normfs", "Batch enqueued successfully - Queue: '{}', Count: {}", queue, entry_ids.len());
 
@@ -868,11 +991,23 @@ impl NormFS {
     pub async fn close(&self) -> Result<(), Error> {
         log::info!(target: "normfs", "Closing NormFS");
 
+        if let Some(pointers) = &self.memory_pointers {
+            pointers.flush_if_dirty().map_err(Error::Io)?;
+        }
+
+        if let Some(task) = &self.memory_pointer_task {
+            task.abort();
+        }
+
         // Close the store first to shut down writer workers
-        self.store.close().await;
+        if let Some(store) = &self.store {
+            store.close().await;
+        }
 
         // Then close the WAL
-        self.wal.close().await?;
+        if let Some(wal) = &self.wal {
+            wal.close().await?;
+        }
 
         log::info!(target: "normfs", "NormFS closed successfully");
         Ok(())
