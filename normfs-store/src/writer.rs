@@ -219,7 +219,12 @@ impl StoreWriteWorker {
         if wal_file.encryption_type != EncryptionType::None {
             let (nonce, ciphertext) = self
                 .crypto_ctx
-                .encrypt(&wal_file.queue_id, &wal_file.file_id, &data_to_process)
+                .encrypt(
+                    &wal_file.queue_id,
+                    &wal_file.file_id,
+                    wal_file.encryption_type,
+                    &data_to_process,
+                )
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
 
             let mut result = BytesMut::with_capacity(nonce.len() + ciphertext.len());

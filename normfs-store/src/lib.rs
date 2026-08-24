@@ -495,7 +495,13 @@ impl PersistStore {
             let ciphertext = encrypted_bytes.slice(12..);
 
             self.crypto_ctx
-                .decrypt(queue, file_id, &nonce, &ciphertext)
+                .decrypt(
+                    queue,
+                    file_id,
+                    store_header.encryption(),
+                    &nonce,
+                    &ciphertext,
+                )
                 .map_err(|e| {
                     log::error!(target: "normfs-store",
                         "Decryption failed for queue '{}': {:?}", queue, e);

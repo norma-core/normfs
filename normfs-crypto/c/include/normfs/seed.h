@@ -18,6 +18,14 @@
 #define NORMFS_SEED_FILE_NAME_LEN 12
 #define NORMFS_SEED_PATH_MAX 4096
 
+/*
+ * A ceiling on what one wipe may cover, not a policy: WP cannot place an
+ * unbounded assigns region when the destination is a caller's pointer, and
+ * without this bound a caller's own goals stop converging rather than fail.
+ * Every buffer wiped in this tree is a key, a digest or a keystream block.
+ */
+#define NORMFS_SEED_ZERO_MAX 4096
+
 enum normfs_seed_status {
 	NORMFS_SEED_OK = 0,
 	NORMFS_SEED_ERR_INVALID_ARG = 1,
@@ -67,6 +75,14 @@ normfs_seed_save(const char *data_dir, size_t data_dir_len,
 /* Every error is 0, mirroring Rust's Path::exists, which swallows them too. */
 int normfs_seed_exists(const char *data_dir, size_t data_dir_len);
 
+/* The contract lives here rather than on the definition because other proved
+ * units call it, and a spec-less declaration makes WP assume the callee
+ * assigns everything. */
+/*@ requires seed_len == 0 || \valid(seed + (0 .. seed_len - 1));
+    requires seed_len <= NORMFS_SEED_ZERO_MAX;
+    assigns seed[0 .. seed_len - 1];
+    ensures \forall integer k; 0 <= k < seed_len ==> seed[k] == 0;
+*/
 void normfs_seed_zero(uint8_t *seed, size_t seed_len);
 
 #endif /* NORMFS_SEED_H */

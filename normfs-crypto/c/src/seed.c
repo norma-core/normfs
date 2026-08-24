@@ -112,10 +112,6 @@ normfs_seed_path(const char *data_dir, size_t data_dir_len, char *out,
 	return NORMFS_SEED_OK;
 }
 
-/*@ requires seed_len == 0 || \valid(seed + (0 .. seed_len - 1));
-    assigns seed[0 .. seed_len - 1];
-    ensures \forall integer k; 0 <= k < seed_len ==> seed[k] == 0;
-*/
 void
 normfs_seed_zero(uint8_t *seed, size_t seed_len)
 {

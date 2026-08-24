@@ -7,6 +7,10 @@ fn main() {
     let sources = [
         manifest_dir.join("c/src/seed.c"),
         manifest_dir.join("c/src/seed_sys.c"),
+        manifest_dir.join("c/src/sha256.c"),
+        manifest_dir.join("c/src/hmac_sha256.c"),
+        manifest_dir.join("c/src/chacha20.c"),
+        manifest_dir.join("c/src/kdf.c"),
     ];
 
     println!("cargo:rerun-if-changed={}", include_dir.display());

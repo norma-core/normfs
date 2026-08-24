@@ -70,7 +70,7 @@ fn create_store_file(crypto_ctx: &CryptoContext, config: &BenchConfig, wal_data:
 
     let final_data = if config.encryption {
         let (nonce, ciphertext) = crypto_ctx
-            .encrypt(&queue_id, &file_id, &data_to_encrypt)
+            .encrypt(&queue_id, &file_id, EncryptionType::AesV2, &data_to_encrypt)
             .unwrap();
         let mut result = BytesMut::with_capacity(nonce.len() + ciphertext.len());
         result.extend_from_slice(&nonce);
@@ -88,7 +88,7 @@ fn create_store_file(crypto_ctx: &CryptoContext, config: &BenchConfig, wal_data:
     };
 
     let encryption_type = if config.encryption {
-        EncryptionType::Aes
+        EncryptionType::AesV2
     } else {
         EncryptionType::None
     };
@@ -162,7 +162,13 @@ fn benchmark_extract(
         let ciphertext = encrypted_bytes.slice(12..);
 
         crypto_ctx
-            .decrypt(&queue_id, &file_id, &nonce, &ciphertext)
+            .decrypt(
+                &queue_id,
+                &file_id,
+                store_header.encryption(),
+                &nonce,
+                &ciphertext,
+            )
             .map_err(|_| normfs_store::StoreError::Decrypt)?
     } else {
         Bytes::from(encrypted_content.to_vec())

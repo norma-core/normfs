@@ -57,7 +57,13 @@ pub fn extract_wal_header(
         let ciphertext = store_bytes.slice(12..);
 
         crypto_ctx
-            .decrypt(queue_id, file_id, &nonce, &ciphertext)
+            .decrypt(
+                queue_id,
+                file_id,
+                store_header.encryption(),
+                &nonce,
+                &ciphertext,
+            )
             .map_err(|_| StoreError::Decrypt)?
     } else {
         Bytes::from(content_bytes.to_vec())

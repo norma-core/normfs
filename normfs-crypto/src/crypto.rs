@@ -6,19 +6,21 @@ use aes_gcm::{
 };
 use bytes::Bytes;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier};
-use hkdf::Hkdf;
-use normfs_types::QueueId;
+use normfs_types::{EncryptionType, QueueId};
 use rand_chacha::ChaCha20Rng;
-use rand_core::{RngCore, SeedableRng};
+use rand_core::SeedableRng;
 use sha2::{Digest, Sha256};
 use uintn::UintN;
-use zeroize::ZeroizeOnDrop;
+use zeroize::{ZeroizeOnDrop, Zeroizing};
 
+use crate::kdf::{self, KdfError, AES_KEY_SIZE, GCM_NONCE_SIZE};
 use crate::seed::{Seed, SeedError};
 
 #[derive(Debug)]
 pub enum CryptoError {
     Seed(SeedError),
+    Kdf(KdfError),
+    UnsupportedEncryption(EncryptionType),
     KeyDerivation,
     Encryption,
     Decryption,
@@ -30,6 +32,10 @@ impl std::fmt::Display for CryptoError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CryptoError::Seed(e) => write!(f, "Seed error: {}", e),
+            CryptoError::Kdf(e) => write!(f, "Key derivation error: {}", e),
+            CryptoError::UnsupportedEncryption(t) => {
+                write!(f, "No key derivation for encryption type {:?}", t)
+            }
             CryptoError::KeyDerivation => write!(f, "Key derivation failed"),
             CryptoError::Encryption => write!(f, "Encryption failed"),
             CryptoError::Decryption => write!(f, "Decryption failed"),
@@ -43,6 +49,7 @@ impl std::error::Error for CryptoError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             CryptoError::Seed(e) => Some(e),
+            CryptoError::Kdf(e) => Some(e),
             _ => None,
         }
     }
@@ -106,36 +113,34 @@ impl CryptoContext {
             .map_err(|_| CryptoError::Verification)
     }
 
-    fn derive_rng(&self, queue_id: &QueueId, file_id: &UintN) -> Result<ChaCha20Rng, CryptoError> {
-        let hkdf = Hkdf::<Sha256>::new(None, self.seed.as_bytes());
+    /// The AES-256 key and GCM nonce for one file. Replaces a `ChaCha20Rng`
+    /// that existed only to draw these 44 bytes, in this order, from its first
+    /// keystream block.
+    fn derive_file_key(
+        &self,
+        queue_id: &QueueId,
+        file_id: &UintN,
+        encryption: EncryptionType,
+    ) -> Result<(Zeroizing<[u8; AES_KEY_SIZE]>, [u8; GCM_NONCE_SIZE]), CryptoError> {
+        let info = match encryption {
+            EncryptionType::Aes => info_v1(queue_id, file_id),
+            EncryptionType::AesV2 => info_v2(queue_id, file_id),
+            EncryptionType::None => return Err(CryptoError::UnsupportedEncryption(encryption)),
+        };
 
-        let file_id_bytes = file_id.value_to_bytes();
-
-        let mut info = Vec::new();
-        info.extend_from_slice(queue_id.to_key_derivation_base().as_bytes());
-        info.extend_from_slice(&file_id_bytes);
-
-        let mut rng_seed = [0u8; 32];
-        hkdf.expand(&info, &mut rng_seed)
-            .map_err(|_| CryptoError::KeyDerivation)?;
-
-        Ok(ChaCha20Rng::from_seed(rng_seed))
+        kdf::derive_file_key(self.seed.as_bytes(), &info).map_err(CryptoError::Kdf)
     }
 
     pub fn encrypt(
         &self,
         queue_id: &QueueId,
         file_id: &UintN,
+        encryption: EncryptionType,
         content: &Bytes,
     ) -> Result<(Bytes, Bytes), CryptoError> {
-        let mut rng = self.derive_rng(queue_id, file_id)?;
+        let (aes_key, nonce_bytes) = self.derive_file_key(queue_id, file_id, encryption)?;
 
-        let mut aes_key = [0u8; 32];
-        rng.fill_bytes(&mut aes_key);
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&aes_key));
-
-        let mut nonce_bytes = [0u8; 12];
-        rng.fill_bytes(&mut nonce_bytes);
+        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(aes_key.as_ref()));
         let nonce = Nonce::from_slice(&nonce_bytes);
 
         let ciphertext = cipher
@@ -152,20 +157,21 @@ impl CryptoContext {
         &self,
         queue_id: &QueueId,
         file_id: &UintN,
+        encryption: EncryptionType,
         nonce: &Bytes,
         ciphertext: &Bytes,
     ) -> Result<Bytes, CryptoError> {
-        if nonce.len() != 12 {
+        if nonce.len() != GCM_NONCE_SIZE {
             return Err(CryptoError::InvalidNonce);
         }
 
-        let mut rng = self.derive_rng(queue_id, file_id)?;
+        // The nonce comes off disk, so the derived one is discarded here --
+        // exactly as the old code discarded it by drawing only the key.
+        let (aes_key, _derived_nonce) = self.derive_file_key(queue_id, file_id, encryption)?;
 
-        let mut aes_key = [0u8; 32];
-        rng.fill_bytes(&mut aes_key);
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&aes_key));
+        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(aes_key.as_ref()));
 
-        let nonce_array: [u8; 12] = nonce.as_ref().try_into().unwrap();
+        let nonce_array: [u8; GCM_NONCE_SIZE] = nonce.as_ref().try_into().unwrap();
         let nonce = Nonce::from_slice(&nonce_array);
 
         let plaintext = cipher
@@ -174,6 +180,33 @@ impl CryptoContext {
 
         Ok(Bytes::from(plaintext))
     }
+}
+
+/// Ambiguous: `("/x/q", 0x3141)` and `("/x/qA", 0x31)` both encode to
+/// `/x/qA1`, so two files share a key and a nonce. Kept unchanged because the
+/// keys of every file already on disk come from it.
+fn info_v1(queue_id: &QueueId, file_id: &UintN) -> Vec<u8> {
+    let base = queue_id.to_key_derivation_base().as_bytes();
+    let file_id_bytes = file_id.value_to_bytes();
+
+    let mut info = Vec::with_capacity(base.len() + file_id_bytes.len());
+    info.extend_from_slice(base);
+    info.extend_from_slice(&file_id_bytes);
+    info
+}
+
+/// Length-prefixed, so no two inputs encode alike. `file_id` is narrowed first
+/// to keep the bytes a function of the value, not of the `UintN` variant held.
+fn info_v2(queue_id: &QueueId, file_id: &UintN) -> Vec<u8> {
+    let base = queue_id.to_key_derivation_base().as_bytes();
+    let file_id_bytes = file_id.shrink_to_fit().value_to_bytes();
+
+    let mut info = Vec::with_capacity(8 + base.len() + file_id_bytes.len());
+    info.extend_from_slice(&(base.len() as u32).to_le_bytes());
+    info.extend_from_slice(base);
+    info.extend_from_slice(&(file_id_bytes.len() as u32).to_le_bytes());
+    info.extend_from_slice(&file_id_bytes);
+    info
 }
 
 #[cfg(test)]
@@ -234,9 +267,17 @@ mod tests {
         let file_id = UintN::from(42u64);
         let plaintext = Bytes::from("Hello, normfs!");
 
-        let (nonce, ciphertext) = ctx.encrypt(&queue_id, &file_id, &plaintext).unwrap();
+        let (nonce, ciphertext) = ctx
+            .encrypt(&queue_id, &file_id, EncryptionType::AesV2, &plaintext)
+            .unwrap();
         let decrypted = ctx
-            .decrypt(&queue_id, &file_id, &nonce, &ciphertext)
+            .decrypt(
+                &queue_id,
+                &file_id,
+                EncryptionType::AesV2,
+                &nonce,
+                &ciphertext,
+            )
             .unwrap();
 
         assert_eq!(plaintext, decrypted);
@@ -253,8 +294,12 @@ mod tests {
         let file_id = UintN::from(42u64);
         let plaintext = Bytes::from("test data");
 
-        let (nonce1, ciphertext1) = ctx.encrypt(&queue_id, &file_id, &plaintext).unwrap();
-        let (nonce2, ciphertext2) = ctx.encrypt(&queue_id, &file_id, &plaintext).unwrap();
+        let (nonce1, ciphertext1) = ctx
+            .encrypt(&queue_id, &file_id, EncryptionType::AesV2, &plaintext)
+            .unwrap();
+        let (nonce2, ciphertext2) = ctx
+            .encrypt(&queue_id, &file_id, EncryptionType::AesV2, &plaintext)
+            .unwrap();
 
         assert_eq!(nonce1, nonce2);
         assert_eq!(ciphertext1, ciphertext2);
@@ -271,10 +316,20 @@ mod tests {
         let plaintext = Bytes::from("same data");
 
         let (nonce1, ciphertext1) = ctx
-            .encrypt(&queue_id, &UintN::from(1u64), &plaintext)
+            .encrypt(
+                &queue_id,
+                &UintN::from(1u64),
+                EncryptionType::AesV2,
+                &plaintext,
+            )
             .unwrap();
         let (nonce2, ciphertext2) = ctx
-            .encrypt(&queue_id, &UintN::from(2u64), &plaintext)
+            .encrypt(
+                &queue_id,
+                &UintN::from(2u64),
+                EncryptionType::AesV2,
+                &plaintext,
+            )
             .unwrap();
 
         assert_ne!(nonce1, nonce2);
@@ -292,10 +347,18 @@ mod tests {
         let file_id = UintN::from(42u64);
         let plaintext = Bytes::from("test");
 
-        let (_, ciphertext) = ctx.encrypt(&queue_id, &file_id, &plaintext).unwrap();
+        let (_, ciphertext) = ctx
+            .encrypt(&queue_id, &file_id, EncryptionType::AesV2, &plaintext)
+            .unwrap();
         let wrong_nonce = Bytes::from(vec![0u8; 12]);
 
-        let result = ctx.decrypt(&queue_id, &file_id, &wrong_nonce, &ciphertext);
+        let result = ctx.decrypt(
+            &queue_id,
+            &file_id,
+            EncryptionType::AesV2,
+            &wrong_nonce,
+            &ciphertext,
+        );
         assert!(result.is_err());
     }
 }

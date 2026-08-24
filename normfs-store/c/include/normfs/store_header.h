@@ -32,7 +32,7 @@
  * that Rust does not repeat the decision.
  */
 #define NORMFS_STORE_COMPRESSION_MAX 3 /* None, Gzip, Xz, Zstd */
-#define NORMFS_STORE_ENCRYPTION_MAX 1  /* None, Aes */
+#define NORMFS_STORE_ENCRYPTION_MAX 2  /* None, Aes, AesV2 */
 
 /* Codes 0 .. 4 take their values from enum normfs_uintn_varint_status so the
  * two cannot drift apart. */
