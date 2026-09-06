@@ -114,17 +114,18 @@ jobs:
       - name: Load the pinned toolchain image
         run: docker load -i /tmp/verify-image/image.tar
 
-      # Restore and save are separate so a run that hits the job timeout still
-      # persists what it proved before dying; cache@v4's own post step does not
-      # run on every such exit. The key is unique per run because a cache entry
-      # is immutable once written, and the prefix restores the newest entry the
-      # branch can see. The image hash is in it so a toolchain bump starts a
-      # fresh directory rather than carrying dead entries forever.
+      # Restore and save are separate steps: on a job the timeout cancels,
+      # cache@v4's post step is skipped, and a run that proved six of seven
+      # targets would leave nothing behind. An explicit save still runs.
+      # The key is unique per attempt because an entry is immutable once
+      # written, and the prefix restores the newest one the branch can see.
+      # The image hash is in it so a toolchain bump starts a fresh directory
+      # rather than carrying dead entries forever.
       - name: Restore the proof cache
         uses: actions/cache/restore@v4
         with:
           path: .wp-cache
-          key: wp-cache-${{ hashFiles('verify/Dockerfile') }}-${{ github.run_id }}
+          key: wp-cache-${{ hashFiles('verify/Dockerfile') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: wp-cache-${{ hashFiles('verify/Dockerfile') }}-
 
       # pipefail: the container's exit status is the whole signal, and tee's
@@ -143,7 +144,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: .wp-cache
-          key: wp-cache-${{ hashFiles('verify/Dockerfile') }}-${{ github.run_id }}
+          key: wp-cache-${{ hashFiles('verify/Dockerfile') }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Summarise
         if: always()
