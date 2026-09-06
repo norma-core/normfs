@@ -22,3 +22,4 @@ normfs-crypto/c/build/
 
 # Proof build directories
 build-verify/
+.wp-cache/

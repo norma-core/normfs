@@ -56,6 +56,7 @@ if(FRAMAC)
             -wp-prover alt-ergo,z3
             -wp-par ${NPROC}
             -wp-cache none
+            -wp-cache-env
             -wp-smoke-tests
             -wp-msg-key shell
             -kernel-warn-key annot:missing-spec=inactive

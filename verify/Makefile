@@ -39,6 +39,21 @@ $(foreach m,$(MODULES),$(foreach t,$(shell $(FIND_TARGETS) $(ROOT)/$(m)/CMakeLis
 
 CMAKE_ARGS := -DCMAKE_BUILD_TYPE=Release
 
+# WP proof cache. Every target passes -wp-cache-env, so these two variables
+# decide whether prover verdicts are reused; unset, the targets prove from
+# scratch. An entry is keyed by the goal itself and the prover version, so a
+# hit means the identical formula was discharged by the identical prover, and
+# a changed annotation misses. That is what makes it safe to carry across
+# runs: what it removes is re-proving the modules a branch did not touch,
+# which is most of the wall clock.
+#
+#   FRAMAC_WP_CACHE=update make -f verify/Makefile verify
+#
+# CACHEDIR must be inside $(ROOT) for docker-verify: the container sees only
+# the bind mount.
+WP_CACHE_ENV := FRAMAC_WP_CACHE FRAMAC_WP_CACHEDIR
+DOCKER_ENV    = $(foreach v,$(WP_CACHE_ENV),$(if $($(v)),-e $(v)=$($(v))))
+
 .PHONY: all verify $(TARGETS) configure build test clean docker-image docker-verify
 
 all: verify
@@ -105,7 +120,7 @@ docker-image:
 	docker build -t $(IMAGE) -f $(ROOT)/verify/Dockerfile $(ROOT)/verify
 
 docker-verify: docker-image
-	docker run --rm -v $(ROOT):/work -w /work $(IMAGE) \
+	docker run --rm -v $(ROOT):/work -w /work $(DOCKER_ENV) $(IMAGE) \
 	    make -f verify/Makefile verify
 
 clean:

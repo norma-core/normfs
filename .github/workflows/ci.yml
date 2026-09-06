@@ -114,14 +114,36 @@ jobs:
       - name: Load the pinned toolchain image
         run: docker load -i /tmp/verify-image/image.tar
 
+      # Restore and save are separate so a run that hits the job timeout still
+      # persists what it proved before dying; cache@v4's own post step does not
+      # run on every such exit. The key is unique per run because a cache entry
+      # is immutable once written, and the prefix restores the newest entry the
+      # branch can see. The image hash is in it so a toolchain bump starts a
+      # fresh directory rather than carrying dead entries forever.
+      - name: Restore the proof cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .wp-cache
+          key: wp-cache-${{ hashFiles('verify/Dockerfile') }}-${{ github.run_id }}
+          restore-keys: wp-cache-${{ hashFiles('verify/Dockerfile') }}-
+
       # pipefail: the container's exit status is the whole signal, and tee's
       # would always be 0.
       - name: Prove
         shell: bash
         run: |
           set -o pipefail
-          docker run --rm -v "$PWD:/work" -w /work normfs-verify:pinned \
+          docker run --rm -v "$PWD:/work" -w /work \
+            -e FRAMAC_WP_CACHE=update -e FRAMAC_WP_CACHEDIR=/work/.wp-cache \
+            normfs-verify:pinned \
             make -f verify/Makefile verify 2>&1 | tee wp.log
+
+      - name: Save the proof cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .wp-cache
+          key: wp-cache-${{ hashFiles('verify/Dockerfile') }}-${{ github.run_id }}
 
       - name: Summarise
         if: always()
