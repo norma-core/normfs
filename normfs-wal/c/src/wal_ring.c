@@ -715,10 +715,51 @@ normfs_wal_ring_rotate_to(struct normfs_wal_ring *ring, size_t index)
 	/*@ assert reset_page_wf: normfs_wal_page_wf(&ring->pages[index]); */
 	/*@ assert pages_wf_holds: normfs_wal_ring_pages_wf(ring); */
 
-	/* Only scalars from here, so everything established above about the
-	 * pages carries to the postconditions by frame. */
+	/* Only scalars from here, but the two fields written are read back
+	 * inside every range the postconditions speak about, so ring_sep has to
+	 * be named and narrowed to them first. */
+	/*@ assert scalar_writes_vs_pages:
+	      \separated(&ring->active,
+	                 ring->pages + (0 .. ring->page_count - 1)) &&
+	      \separated(&ring->next_page_id,
+	                 ring->pages + (0 .. ring->page_count - 1)); */
+	/*@ assert scalar_writes_vs_arena:
+	      \separated(&ring->active,
+	                 ring->arena +
+	                   (0 .. ring->page_count * ring->page_size - 1)) &&
+	      \separated(&ring->next_page_id,
+	                 ring->arena +
+	                   (0 .. ring->page_count * ring->page_size - 1)); */
+
+	/*@ ghost rotated: ; */
 	ring->next_page_id = ring->next_page_id + 1u;
 	ring->active = index;
+
+	/* The frame's conclusion as an equality between the two states: what the
+	 * separations above feed directly, and what page_wf is then rewritten
+	 * with rather than reproved. */
+	/*@ assert ring_shape_unchanged:
+	      ring->pages == \at(ring->pages, rotated) &&
+	      ring->arena == \at(ring->arena, rotated) &&
+	      ring->page_count == \at(ring->page_count, rotated) &&
+	      ring->page_size == \at(ring->page_size, rotated); */
+	/*@ assert page_fields_unchanged:
+	      \forall integer k; 0 <= k < ring->page_count ==>
+	        ring->pages[k].buf == \at(ring->pages[k].buf, rotated) &&
+	        ring->pages[k].cap == \at(ring->pages[k].cap, rotated) &&
+	        ring->pages[k].count == \at(ring->pages[k].count, rotated) &&
+	        ring->pages[k].used_bytes ==
+	          \at(ring->pages[k].used_bytes, rotated) &&
+	        ring->pages[k].first_entry_id ==
+	          \at(ring->pages[k].first_entry_id, rotated) &&
+	        ring->pages[k].last_entry_id ==
+	          \at(ring->pages[k].last_entry_id, rotated); */
+	/*@ assert offsets_unchanged:
+	      \forall integer k, i;
+	        0 <= k < ring->page_count && 0 <= i < ring->pages[k].count ==>
+	          normfs_wal_page_offset_logic(&ring->pages[k], i) ==
+	            \at(normfs_wal_page_offset_logic(&ring->pages[k], i), rotated); */
+	/*@ assert pages_wf_final: normfs_wal_ring_pages_wf(ring); */
 
 	/*@ assert buffers_unmoved:
 	      \forall integer k; 0 <= k < ring->page_count ==>
@@ -773,6 +814,60 @@ normfs_wal_ring_skip_entry(struct normfs_wal_ring *ring)
 	      \forall integer k; 0 <= k < ring->page_count && k != ring->active ==>
 	        normfs_wal_page_wf(&ring->pages[k]); */
 
+	/* ring_sep arrives as an opaque atom, and the write below lands on one
+	 * field of one descriptor, so the separations it holds have to be named
+	 * and then narrowed to that field. */
+	/*@ assert unfold_sep_ring_vs_pages:
+	      \separated(ring, ring->pages + (0 .. ring->page_count - 1)); */
+	/*@ assert unfold_sep_ring_vs_arena:
+	      \separated(ring, ring->arena +
+	                   (0 .. ring->page_count * ring->page_size - 1)); */
+	/*@ assert unfold_sep_pages_vs_arena:
+	      \separated(ring->pages + (0 .. ring->page_count - 1),
+	                 ring->arena +
+	                   (0 .. ring->page_count * ring->page_size - 1)); */
+	/*@ assert active_vs_ring:
+	      \separated(&ring->pages[ring->active], ring); */
+	/*@ assert active_vs_arena:
+	      \separated(&ring->pages[ring->active],
+	                 ring->arena +
+	                   (0 .. ring->page_count * ring->page_size - 1)); */
+	/*@ assert active_vs_other_pages:
+	      \forall integer k; 0 <= k < ring->page_count && k != ring->active ==>
+	        \separated(&ring->pages[k], &ring->pages[ring->active]); */
+
+	/* The active page is empty, so ids_wf's bound is the only clause the new
+	 * first id has to satisfy and the offset table is not read at all. */
+	/*@ assert active_empty:
+	      ring->pages[ring->active].count == 0 &&
+	      ring->pages[ring->active].used_bytes == 0; */
+
 	ring->next_entry_id = ring->next_entry_id + 1u;
 	ring->pages[ring->active].first_entry_id = ring->next_entry_id;
+
+	/* Every range below is built from these, and a separation from the
+	 * address written is not by itself the statement that they did not
+	 * move. */
+	/*@ assert ring_shape_unchanged:
+	      ring->pages == \at(ring->pages, Pre) &&
+	      ring->arena == \at(ring->arena, Pre) &&
+	      ring->page_count == \at(ring->page_count, Pre) &&
+	      ring->page_size == \at(ring->page_size, Pre) &&
+	      ring->active == \at(ring->active, Pre); */
+	/*@ assert pages_unchanged:
+	      \forall integer k; 0 <= k < ring->page_count ==>
+	        ring->pages[k].buf == \at(ring->pages[k].buf, Pre) &&
+	        ring->pages[k].cap == \at(ring->pages[k].cap, Pre) &&
+	        ring->pages[k].count == \at(ring->pages[k].count, Pre) &&
+	        ring->pages[k].used_bytes == \at(ring->pages[k].used_bytes, Pre); */
+
+	/*@ assert other_pages_wf_final:
+	      \forall integer k; 0 <= k < ring->page_count && k != ring->active ==>
+	        normfs_wal_page_wf(&ring->pages[k]); */
+	/*@ assert active_page_wf_final:
+	      normfs_wal_page_wf(&ring->pages[ring->active]); */
+	/*@ assert pages_wf_final: normfs_wal_ring_pages_wf(ring); */
+	/*@ assert scalar_wf_final: normfs_wal_ring_scalar_wf(ring); */
+	/*@ assert layout_final: normfs_wal_ring_layout(ring); */
+	/*@ assert sep_final: normfs_wal_ring_sep(ring); */
 }
