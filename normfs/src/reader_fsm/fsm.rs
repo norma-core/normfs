@@ -8,6 +8,12 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use uintn::UintN;
 
+/// A file id that was never written answers "not there" however often it is
+/// asked; a file being archived answers that only until the rename lands. The
+/// wait is sized to that rename and to nothing longer.
+const MIGRATING_FILE_RETRIES: u32 = 20;
+const MIGRATING_FILE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(25);
+
 /// Reader FSM that manages read operations across different storage backends
 #[derive(Clone)]
 pub struct ReaderFSM {
@@ -146,6 +152,46 @@ impl ReaderFSM {
     /// Prefetch and prepare WAL bytes for the next file
     /// Checks file range first to see if it contains the entry we need
     /// Tries Store → WAL → S3 and returns ready-to-parse WAL bytes
+    /// The file's bytes, waiting out a migration if that is what "not there"
+    /// means.
+    ///
+    /// The backends are asked in turn -- store, then WAL -- and archiving
+    /// renames the store copy into place before deleting the WAL one, so no
+    /// instant exists in which a file is in neither. The two questions are
+    /// asked at two instants, though, and a file that migrates between them
+    /// answers no to both. Walking past that answer drops every record the
+    /// file holds, silently: the walk never returns to those ids and the
+    /// caller is told the read completed.
+    async fn file_bytes_or_wait(
+        &self,
+        queue: &QueueId,
+        file_id: &UintN,
+    ) -> Option<(bytes::Bytes, DataSource)> {
+        for attempt in 1..=MIGRATING_FILE_RETRIES {
+            tokio::time::sleep(MIGRATING_FILE_RETRY_DELAY).await;
+            match self
+                .clone()
+                .prefetch_next_file(queue.clone(), file_id.clone())
+                .await
+            {
+                Ok(Some(found)) => {
+                    log::info!(target: "normfs-reader-fsm",
+                        "Queue '{}' - file {} was unreadable for {} attempt(s) and then \
+                         appeared; it was migrating between backends, not missing",
+                        queue, file_id, attempt);
+                    return Some(found);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    log::warn!(target: "normfs-reader-fsm",
+                        "Queue '{}' - error re-reading file {}: {:?}", queue, file_id, e);
+                    return None;
+                }
+            }
+        }
+        None
+    }
+
     async fn prefetch_next_file(
         self,
         queue: QueueId,
@@ -576,6 +622,17 @@ impl ReaderFSM {
                         ctx.queue, ctx.file_id);
                     Ok(ReaderState::ReadS3 { ctx })
                 } else {
+                    if let Some((wal_bytes, data_source)) =
+                        self.file_bytes_or_wait(&ctx.queue, &ctx.file_id).await
+                    {
+                        return Ok(ReaderState::ParseWalBytes {
+                            ctx,
+                            wal_bytes,
+                            data_source,
+                            prefetch_handle: None,
+                        });
+                    }
+
                     log::debug!(target: "normfs-reader-fsm",
                         "File not found and S3 not configured, moving to next file: queue={}, file_id={}",
                         ctx.queue, ctx.file_id);
@@ -754,6 +811,22 @@ impl ReaderFSM {
         } else {
             None
         };
+
+        // Every entry at or above the id asked for is delivered, so a file
+        // that begins above it reads as a valid answer and the walk moves on.
+        // The records in between are never requested again and the caller
+        // sees a complete read; the gap is real either way, but it is not
+        // something to pass over in silence.
+        if let Ok(header) = normfs_wal::get_wal_header(&wal_bytes) {
+            if header.num_entries_before > ctx.next_id {
+                log::error!(target: "normfs-reader-fsm",
+                    "Queue '{}' - file {} begins at {} while entry {} was still owed: ids \
+                     {}..{} reach no file this read can see, and the entries above them are \
+                     returned without them",
+                    ctx.queue, ctx.file_id, header.num_entries_before, ctx.next_id,
+                    ctx.next_id, header.num_entries_before);
+            }
+        }
 
         // Parse and send entries from WAL bytes
         let Some(wal) = &self.wal else {
@@ -947,6 +1020,17 @@ impl ReaderFSM {
                     });
                 }
                 Ok(Ok(None)) => {
+                    if let Some((wal_bytes, data_source)) =
+                        self.file_bytes_or_wait(&ctx.queue, &next_file_id).await
+                    {
+                        return Ok(ReaderState::ParseWalBytes {
+                            ctx: ctx.with_file_id(next_file_id),
+                            wal_bytes,
+                            data_source,
+                            prefetch_handle: None,
+                        });
+                    }
+
                     log::debug!(target: "normfs-reader-fsm",
                         "Prefetch: file not found in any backend (skipped file): queue={}, file_id={}",
                         ctx.queue, next_file_id);
