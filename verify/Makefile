@@ -49,6 +49,10 @@ CMAKE_ARGS := -DCMAKE_BUILD_TYPE=Release
 #
 #   FRAMAC_WP_CACHE=update make -f verify/Makefile verify
 #
+# A verdict is cached whether or not it was a success, so a goal that failed
+# is not retried on a re-run of the same commit at the same budget: change the
+# annotation, raise NORMFS_WP_TIMEOUT, or drop the directory.
+#
 # CACHEDIR must be inside $(ROOT) for docker-verify: the container sees only
 # the bind mount.
 WP_CACHE_ENV := FRAMAC_WP_CACHE FRAMAC_WP_CACHEDIR

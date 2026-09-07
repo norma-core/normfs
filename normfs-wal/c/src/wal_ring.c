@@ -354,7 +354,14 @@ normfs_wal_ring_release_page(struct normfs_wal_ring *ring, uint64_t ring_id)
 	/*@ ghost dropped: ; */
 	ring->page_count = ring->page_count - 1u;
 
-	/*@ assert pool_page_size_unchanged_by_count_drop:
+	/* The pool identified across the write, not merely separated from it:
+	 * without this the two sides of the rewrite below are terms about two
+	 * different pools, and re-establishing its well-formedness turns from a
+	 * rewrite into a search. */
+	/*@ assert pool_shape_after_count_drop:
+	      ring->pool == \at(ring->pool, dropped) &&
+	      ring->pool->pages == \at(ring->pool->pages, dropped) &&
+	      ring->pool->page_count == \at(ring->pool->page_count, dropped) &&
 	      ring->pool->page_size == \at(ring->pool->page_size, dropped); */
 	/*@ assert pool_caps_unchanged_by_count_drop:
 	      \forall integer k; 0 <= k < ring->pool->page_count ==>
