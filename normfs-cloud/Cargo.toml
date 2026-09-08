@@ -15,10 +15,10 @@ quick-xml = { version = "0.37", features = ["serialize"] }
 serde = { version = "1.0", features = ["derive"] }
 url = "2.5"
 urlencoding = "2.1"
-uintn = { version = "0.3.0", path = "../uintn-rs" }
-normfs-types = { version = "0.3.0", path = "../normfs-types" }
-normfs-store = { version = "0.3.0", path = "../normfs-store" }
-normfs-wal = { version = "0.3.0", path = "../normfs-wal" }
+uintn = { version = "0.3.1", path = "../uintn-rs" }
+normfs-types = { version = "0.3.1", path = "../normfs-types" }
+normfs-store = { version = "0.3.1", path = "../normfs-store" }
+normfs-wal = { version = "0.3.1", path = "../normfs-wal" }
 tokio = { version = "1", features = ["full"] }
 bytes = "1"
 log = "0.4"

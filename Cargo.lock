@@ -1424,7 +1424,7 @@ checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
 
 [[package]]
 name = "normfs"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bytes",
  "clap 4.6.4",
@@ -1453,7 +1453,7 @@ dependencies = [
 
 [[package]]
 name = "normfs-cloud"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bytes",
  "env_logger",
@@ -1474,7 +1474,7 @@ dependencies = [
 
 [[package]]
 name = "normfs-crypto"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "aes-gcm",
  "bytes",
@@ -1492,7 +1492,7 @@ dependencies = [
 
 [[package]]
 name = "normfs-store"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bytes",
  "cc",
@@ -1512,7 +1512,7 @@ dependencies = [
 
 [[package]]
 name = "normfs-types"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bytes",
  "uintn",
@@ -1520,7 +1520,7 @@ dependencies = [
 
 [[package]]
 name = "normfs-wal"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bytes",
  "cc",
@@ -2707,7 +2707,7 @@ checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
 name = "uintn"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bytes",
  "cc",

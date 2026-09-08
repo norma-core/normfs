@@ -9,8 +9,8 @@ homepage.workspace = true
 description = "Cryptographic primitives for NormFS (AES-256-GCM encryption, Ed25519 signatures)"
 
 [dependencies]
-normfs-types = { version = "0.3.0", path = "../normfs-types" }
-uintn = { version = "0.3.0", path = "../uintn-rs" }
+normfs-types = { version = "0.3.1", path = "../normfs-types" }
+uintn = { version = "0.3.1", path = "../uintn-rs" }
 bytes = "1"
 rand_chacha = { version = "0.3", default-features = false }
 rand_core = { version = "0.6", default-features = false }

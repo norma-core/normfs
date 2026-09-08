@@ -15,12 +15,12 @@ websocket = ["fastwebsockets", "hyper", "hyper-util", "http-body-util"]
 server-bin = ["clap", "env_logger"]
 
 [dependencies]
-uintn = { version = "0.3.0", path = "../uintn-rs" }
-normfs-types = { version = "0.3.0", path = "../normfs-types" }
-normfs-wal = { version = "0.3.0", path = "../normfs-wal" }
-normfs-store = { version = "0.3.0", path = "../normfs-store" }
-normfs-cloud = { version = "0.3.0", path = "../normfs-cloud" }
-normfs-crypto = { version = "0.3.0", path = "../normfs-crypto" }
+uintn = { version = "0.3.1", path = "../uintn-rs" }
+normfs-types = { version = "0.3.1", path = "../normfs-types" }
+normfs-wal = { version = "0.3.1", path = "../normfs-wal" }
+normfs-store = { version = "0.3.1", path = "../normfs-store" }
+normfs-cloud = { version = "0.3.1", path = "../normfs-cloud" }
+normfs-crypto = { version = "0.3.1", path = "../normfs-crypto" }
 tokio = { workspace = true }
 bytes = { workspace = true }
 prost = { workspace = true }
@@ -41,7 +41,7 @@ http-body-util = { version = "0.1", optional = true }
 
 [dev-dependencies]
 # A dependency above already; repeated only to turn on the test seam.
-normfs-wal = { version = "0.3.0", path = "../normfs-wal", features = [
+normfs-wal = { version = "0.3.1", path = "../normfs-wal", features = [
     "fault-injection",
 ] }
 tempfile = { workspace = true }
