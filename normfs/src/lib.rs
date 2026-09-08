@@ -62,6 +62,9 @@ pub enum Error {
     /// The record does not fit a page, framing included, so no page can hold
     /// it. Refused before an id is taken — see [`NormFS::enqueue`].
     RecordTooLarge(usize),
+    /// No page could take the record and the caller would not wait
+    /// ([`NormFS::try_enqueue`]).
+    WouldBlock,
     /// The queue was closed for good ([`NormFS::close_queue`]); a later
     /// write is an error. The data stays readable.
     QueueClosed,
@@ -96,6 +99,7 @@ impl std::fmt::Display for Error {
                 f,
                 "Record of {n} bytes does not fit a memory page once framed"
             ),
+            Error::WouldBlock => write!(f, "No page is free and the caller would not wait"),
             Error::QueueClosed => write!(f, "Queue is closed and accepts no more writes"),
             Error::MemoryBelowFloor {
                 max_memory_usage,
@@ -128,6 +132,7 @@ impl std::error::Error for Error {
             Error::NotFound => None,
             Error::ClientDisconnected => None,
             Error::RecordTooLarge(_) => None,
+            Error::WouldBlock => None,
             Error::QueueClosed => None,
             Error::MemoryBelowFloor { .. } => None,
             Error::PageBelowMinimum { .. } => None,
@@ -1174,6 +1179,45 @@ impl NormFS {
             .enqueue_pooled(queue, entry_id.clone(), data, placement)?;
 
         log::trace!(target: "normfs", "Entry enqueued successfully - Queue: '{}', Entry ID: {}", queue, entry_id);
+
+        Ok(entry_id)
+    }
+
+    /// [`NormFS::enqueue`] for callers that cannot wait -- a capture thread, or
+    /// a subscriber callback, which runs while its own queue holds the append
+    /// gate. A refused record took no id.
+    pub fn try_enqueue(&self, queue: &QueueId, data: Bytes) -> Result<UintN, Error> {
+        if self.mem.is_closed(queue) {
+            return Err(Error::QueueClosed);
+        }
+        check_framable(
+            &data,
+            self.page_size_for(queue),
+            self.settings.max_memory_usage,
+        )?;
+
+        let (entry_id, placement) = match self
+            .mem
+            .try_enqueue(queue, data.clone())
+            .ok_or(Error::QueueNotFound)?
+        {
+            mem::TryEnqueue::Placed(id, placement) => (id, placement),
+            mem::TryEnqueue::Full => return Err(Error::WouldBlock),
+            mem::TryEnqueue::Closed => return Err(Error::QueueClosed),
+        };
+
+        if self.is_memory_only() {
+            if let Some(pointers) = &self.memory_pointers {
+                pointers.mark(queue, &entry_id).map_err(Error::Io)?;
+            }
+            self.mem.ack(queue, &entry_id);
+            return Ok(entry_id);
+        }
+
+        self.wal
+            .as_ref()
+            .expect("WAL backend must be available in durable mode")
+            .enqueue_pooled(queue, entry_id.clone(), data, placement)?;
 
         Ok(entry_id)
     }

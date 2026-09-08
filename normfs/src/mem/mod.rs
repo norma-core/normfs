@@ -56,6 +56,13 @@ fn id_to_u64(id: &UintN) -> u64 {
     id.to_u64().unwrap_or(u64::MAX)
 }
 
+#[derive(Debug)]
+pub enum TryEnqueue {
+    Placed(UintN, Placement),
+    Full,
+    Closed,
+}
+
 /// Result of a memory read operation
 #[derive(Debug)]
 pub struct MemReadResult {
@@ -370,11 +377,18 @@ impl MemQueue {
             }
         }
 
+        self.commit(&id, &data, cache);
+        Some((id, placement))
+    }
+
+    /// Called once the record is placed and with the append gate still held,
+    /// so the id the pool saw and the id the queue reports are the same.
+    fn commit(&self, id: &UintN, data: &Bytes, cache: bool) {
         let subscribers_data = {
             let mut inner = self.inner.write().unwrap();
             inner.last_id = Some(id.clone());
             if cache {
-                self.cache_append(&mut inner, id_to_u64(&id), &data);
+                self.cache_append(&mut inner, id_to_u64(id), data);
             }
             if self.subscribers.lock().unwrap().is_empty() {
                 None
@@ -388,8 +402,54 @@ impl MemQueue {
         if let Some(data) = subscribers_data {
             self.notify_subscribers(&[(id.clone(), data)]);
         }
+    }
 
-        Some((id, placement))
+    /// `try_lock` on the gate, because an enqueue parked on a full pool holds
+    /// it. It is also what makes a write from inside a subscriber callback
+    /// safe: the notify runs under the gate, so a callback writing back into
+    /// its own queue is refused rather than deadlocked.
+    pub fn try_enqueue(&self, data: Bytes) -> TryEnqueue {
+        let Ok(_gate) = self.append_gate.try_lock() else {
+            return TryEnqueue::Full;
+        };
+        if self.closed.load(Ordering::Relaxed) {
+            return TryEnqueue::Closed;
+        }
+
+        // As on the awaiting path: no id is taken unless the record is placed.
+        let (id, pool) = {
+            let inner = self.inner.read().unwrap();
+            let id = inner
+                .last_id
+                .as_ref()
+                .map_or(UintN::zero(), |id| id.increment());
+            (id, inner.pool.clone())
+        };
+
+        let mut placement = Placement::legacy();
+        let mut cache = false;
+        if let Some(pool) = pool {
+            if pool.has_drainer() {
+                match pool.try_place_now(id_to_u64(&id), &data) {
+                    Ok(Some(placed)) => placement = placed,
+                    Ok(None) => return TryEnqueue::Full,
+                    Err(e) => {
+                        log::error!(
+                            target: "normfs-mem",
+                            "entry {id} of {} bytes was accepted and cannot be written ({e:?}): \
+                             every later entry in its file will read back under the wrong id",
+                            data.len(),
+                        );
+                        debug_assert!(false, "an unframeable record reached the pool");
+                    }
+                }
+            } else {
+                cache = true;
+            }
+        }
+
+        self.commit(&id, &data, cache);
+        TryEnqueue::Placed(id, placement)
     }
 
     pub fn get_last_id(&self) -> Option<UintN> {
@@ -1192,6 +1252,14 @@ impl MemStore {
             queues.get(queue).cloned()
         };
         mem_queue?.enqueue_awaiting(data).await
+    }
+
+    pub fn try_enqueue(&self, queue: &QueueId, data: Bytes) -> Option<TryEnqueue> {
+        let mem_queue = {
+            let queues = self.queues.read().unwrap();
+            queues.get(queue).cloned()
+        };
+        Some(mem_queue?.try_enqueue(data))
     }
 
     pub async fn enqueue_batch_awaiting(

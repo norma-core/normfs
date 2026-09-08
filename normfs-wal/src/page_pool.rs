@@ -895,6 +895,25 @@ impl PagePool {
     }
 
     /// `Ok(None)` means the pool cannot take the record yet.
+    /// [`PagePool::place`] without the wait: `Ok(None)` where that would park.
+    pub fn try_place_now(
+        &self,
+        expected_id: u64,
+        record: &[u8],
+    ) -> Result<Option<Placement>, PoolError> {
+        let entry_len = encoded_len_of(record.len()).unwrap_or(u64::MAX);
+        if let Some(placed) = self.try_place(expected_id, record, entry_len)? {
+            return Ok(Some(placed));
+        }
+        if self.try_retain_page()
+            && let Some(placed) = self.try_place(expected_id, record, entry_len)?
+        {
+            return Ok(Some(placed));
+        }
+        self.signal_flush();
+        Ok(None)
+    }
+
     fn try_place(
         &self,
         expected_id: u64,

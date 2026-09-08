@@ -1266,3 +1266,65 @@ async fn resuming_ends_the_stall() {
     pool.note_wait();
     assert_eq!(pool.stall_waits(), Some(1), "the next stall starts at one");
 }
+
+#[tokio::test]
+async fn try_place_now_refuses_a_full_pool_instead_of_waiting() {
+    let pool = pool();
+    let n = fill(&pool);
+
+    assert!(matches!(pool.try_place_now(n, &RECORD), Ok(None)));
+    assert_eq!(pool.next_entry_id(), n);
+}
+
+#[tokio::test]
+async fn the_id_a_refused_record_would_have_had_goes_to_the_next_one() {
+    let pool = pool();
+    let n = fill(&pool);
+    assert!(matches!(pool.try_place_now(n, &RECORD), Ok(None)));
+
+    pool.mark_durable(n);
+
+    assert!(matches!(pool.try_place_now(n, &RECORD), Ok(Some(_))));
+    assert_eq!(pool.next_entry_id(), n + 1);
+}
+
+#[tokio::test]
+async fn a_refusal_leaves_the_waiting_path_where_it_was() {
+    let pool = pool();
+    let n = fill(&pool);
+    assert!(matches!(pool.try_place_now(n, &RECORD), Ok(None)));
+
+    let waiter = {
+        let pool = Arc::clone(&pool);
+        tokio::spawn(async move { pool.place(n, &RECORD).await })
+    };
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!waiter.is_finished(), "the pool is still full");
+
+    pool.mark_durable(n);
+    tokio::time::timeout(Duration::from_secs(5), waiter)
+        .await
+        .expect("place should resume")
+        .expect("task panicked")
+        .expect("place should succeed");
+    assert_eq!(pool.next_entry_id(), n + 1);
+}
+
+#[tokio::test]
+async fn try_place_now_takes_a_record_when_a_page_is_free() {
+    let pool = pool();
+    let placed = pool.try_place_now(0, &RECORD).expect("no error");
+    assert!(placed.is_some());
+    assert_eq!(pool.next_entry_id(), 1);
+}
+
+#[tokio::test]
+async fn try_place_now_refuses_a_record_no_page_can_hold() {
+    let pool = pool();
+    let too_wide = vec![0u8; PAGE_SIZE * 2];
+    assert!(matches!(
+        pool.try_place_now(0, &too_wide),
+        Err(PoolError::TooLarge)
+    ));
+    assert_eq!(pool.next_entry_id(), 0);
+}

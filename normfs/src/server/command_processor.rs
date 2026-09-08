@@ -501,6 +501,7 @@ impl CommandProcessor {
                     | Error::Io(_)
                     | Error::RecordTooLarge(_)
                     | Error::QueueClosed
+                    | Error::WouldBlock
                     | Error::MemoryBelowFloor { .. }
                     | Error::PageBelowMinimum { .. } => {
                         error!(
