@@ -27,8 +27,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      # Not --locked: Cargo.lock is untracked here.
-      - run: cargo test --workspace
+      # --locked: Cargo.lock is tracked, so a resolution that drifts from it
+      # (a yanked dep replaced behind our back, a manifest bump nobody
+      # relocked) fails here rather than at `cargo publish`.
+      - run: cargo test --workspace --locked
 
   build:
     name: build + test C (c99, -Werror)

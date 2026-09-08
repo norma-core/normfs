@@ -1,7 +1,6 @@
 # Rust
 target/
 **/*.rs.bk
-Cargo.lock
 uintn-rs/c/build/
 normfs-wal/c/build/
 normfs-store/c/build/
