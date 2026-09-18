@@ -4,9 +4,11 @@ pub mod downloader;
 pub mod errors;
 pub mod offloader;
 mod paths;
+pub mod sink;
 
 pub use client::S3Client;
 pub use downloader::CloudDownloader;
+pub use sink::{CloudSink, LandedIndex};
 
 #[derive(Debug, Clone)]
 pub struct CloudSettings {

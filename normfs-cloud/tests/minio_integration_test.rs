@@ -467,3 +467,14 @@ async fn test_get_object_range() {
         range_data.len()
     );
 }
+
+#[tokio::test]
+async fn test_create_bucket_is_idempotent() {
+    let settings = match skip_if_no_s3() {
+        Some(s) => s,
+        None => return,
+    };
+    let client = create_client(&settings).unwrap();
+    client.create_bucket().await.expect("first create");
+    client.create_bucket().await.expect("second create");
+}

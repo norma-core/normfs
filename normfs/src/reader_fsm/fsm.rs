@@ -17,25 +17,51 @@ const MIGRATING_FILE_RETRY_DELAY: std::time::Duration = std::time::Duration::fro
 /// Reader FSM that manages read operations across different storage backends
 #[derive(Clone)]
 pub struct ReaderFSM {
-    pub(crate) wal: Option<Arc<WalStore>>,
-    pub(crate) store: Option<Arc<PersistStore>>,
+    pub(crate) wal: Arc<WalStore>,
+    pub(crate) store: Arc<PersistStore>,
     pub(crate) mem: Arc<MemStore>,
     pub(crate) s3_downloader: Option<Arc<CloudDownloader>>,
+    queue_settings: Arc<crate::QueueSettings>,
+    pointers: Arc<crate::memory_pointers::MemoryPointers>,
 }
 
 impl ReaderFSM {
     pub fn new(
-        wal: Option<Arc<WalStore>>,
-        store: Option<Arc<PersistStore>>,
+        wal: Arc<WalStore>,
+        store: Arc<PersistStore>,
         mem: Arc<MemStore>,
         s3_downloader: Option<Arc<CloudDownloader>>,
+        queue_settings: Arc<crate::QueueSettings>,
+        pointers: Arc<crate::memory_pointers::MemoryPointers>,
     ) -> Self {
         Self {
             wal,
             store,
             mem,
             s3_downloader,
+            queue_settings,
+            pointers,
         }
+    }
+
+    /// The last file a cloud-direct queue landed, which bounds a file walk
+    /// the way the last local file bounds it for the others.
+    fn cloud_last(&self, queue: &QueueId) -> Option<UintN> {
+        let persist = self.queue_settings.get_config(&queue.to_string()).persist;
+        if persist.cloud && !persist.store {
+            self.pointers.last_landed(queue).map(|(_, file)| file)
+        } else {
+            None
+        }
+    }
+
+    /// A memory queue has no files, and a read must not go looking: its
+    /// restart contract rests on the directory being absent.
+    fn is_memory(&self, queue: &QueueId) -> bool {
+        self.queue_settings
+            .get_config(&queue.to_string())
+            .persist
+            .is_memory()
     }
 
     fn storage_miss(&self, queue: &QueueId) -> ReaderState {
@@ -201,12 +227,8 @@ impl ReaderFSM {
             "Prefetching file: queue={}, file_id={}",
             queue, file_id);
 
-        let Some(store) = &self.store else {
-            return Ok(None);
-        };
-        let Some(wal) = &self.wal else {
-            return Ok(None);
-        };
+        let store = &self.store;
+        let wal = &self.wal;
 
         // Try Store first
         match store.get_store_bytes(&queue, &file_id).await {
@@ -370,7 +392,7 @@ impl ReaderFSM {
             }
         }
 
-        if self.store.is_none() || self.wal.is_none() {
+        if self.is_memory(&queue) {
             return Ok(self.storage_miss(&queue));
         }
 
@@ -411,7 +433,7 @@ impl ReaderFSM {
             let start_id = result.start_id.ok_or(Error::QueueNotFound)?;
             let end_id = Some(start_id.add(&UintN::from((limit - 1) * step)));
 
-            if self.store.is_none() || self.wal.is_none() {
+            if self.is_memory(&queue) {
                 return Ok(self.storage_miss(&queue));
             }
 
@@ -463,7 +485,7 @@ impl ReaderFSM {
 
             let start_id = result.start_id.ok_or(Error::QueueNotFound)?;
 
-            if self.store.is_none() || self.wal.is_none() {
+            if self.is_memory(&queue) {
                 return Ok(self.storage_miss(&queue));
             }
 
@@ -490,13 +512,11 @@ impl ReaderFSM {
             return Ok(ReaderState::Failed(Error::ClientDisconnected));
         }
 
-        // Look up which file contains start_id
-        let Some(store) = &self.store else {
+        if self.is_memory(&queue) {
             return Ok(self.storage_miss(&queue));
-        };
-        let Some(wal) = &self.wal else {
-            return Ok(self.storage_miss(&queue));
-        };
+        }
+        let store = &self.store;
+        let wal = &self.wal;
 
         let file_id = match crate::lookup::find_file_with_s3(
             &queue,
@@ -504,6 +524,7 @@ impl ReaderFSM {
             store,
             wal,
             self.s3_downloader.as_ref(),
+            self.cloud_last(&queue),
         )
         .await
         {
@@ -547,9 +568,7 @@ impl ReaderFSM {
             "Attempting to read from Store: queue={}, file_id={}, next_id={}, last_id={:?}",
             ctx.queue, ctx.file_id, ctx.next_id, ctx.last_id);
 
-        let Some(store) = &self.store else {
-            return Ok(ReaderState::ReadWal { ctx });
-        };
+        let store = &self.store;
 
         // Get store file bytes
         match store.get_store_bytes(&ctx.queue, &ctx.file_id).await {
@@ -590,12 +609,7 @@ impl ReaderFSM {
             "Attempting to read from WAL: queue={}, file_id={}, next_id={}, last_id={:?}",
             ctx.queue, ctx.file_id, ctx.next_id, ctx.last_id);
 
-        let Some(wal) = &self.wal else {
-            if self.s3_downloader.is_some() {
-                return Ok(ReaderState::ReadS3 { ctx });
-            }
-            return Ok(ReaderState::Failed(Error::NotFound));
-        };
+        let wal = &self.wal;
 
         // Get WAL bytes from WAL file
         match wal.get_wal_bytes(&ctx.queue, &ctx.file_id).await {
@@ -741,9 +755,7 @@ impl ReaderFSM {
         // Extract WAL bytes from store bytes (decrypt/decompress)
         // Verify signatures for S3 files, skip verification for local files
         let verify_signatures = matches!(data_source, DataSource::Cloud);
-        let Some(store) = &self.store else {
-            return Ok(ReaderState::Failed(Error::NotFound));
-        };
+        let store = &self.store;
         match store.extract_wal_bytes(&ctx.queue, &ctx.file_id, store_bytes, verify_signatures) {
             Ok(wal_bytes) => {
                 log::trace!(target: "normfs-reader-fsm",
@@ -829,9 +841,7 @@ impl ReaderFSM {
         }
 
         // Parse and send entries from WAL bytes
-        let Some(wal) = &self.wal else {
-            return Ok(ReaderState::Failed(Error::NotFound));
-        };
+        let wal = &self.wal;
         match wal
             .read_wal_content_range(
                 &wal_bytes,
@@ -978,21 +988,17 @@ impl ReaderFSM {
         // next_id never advances when no file holds it, so without this bound
         // the walk increments the file id forever.
         let wal_last_id = async {
-            let Some(wal) = &self.wal else {
-                return None;
-            };
+            let wal = &self.wal;
             wal.get_last_file_id(&ctx.queue).await.ok().flatten()
         };
         let store_last_id = async {
-            let Some(store) = &self.store else {
-                return None;
-            };
+            let store = &self.store;
             store.get_last_file_id(&ctx.queue).await.ok().flatten()
         };
         let (wal_last_id, store_last_id) = tokio::join!(wal_last_id, store_last_id);
         let last_file_id = match (wal_last_id, store_last_id) {
             (Some(w), Some(s)) => Some(w.max(s)),
-            (w, s) => w.or(s),
+            (w, s) => w.or(s).or_else(|| self.cloud_last(&ctx.queue)),
         };
         if last_file_id.is_none_or(|last| next_file_id > last) {
             log::debug!(target: "normfs-reader-fsm",

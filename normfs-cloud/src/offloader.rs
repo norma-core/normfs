@@ -2,10 +2,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use log::{error, info, warn};
 use normfs_types::QueueId;
-use tokio::{
-    sync::{RwLock, mpsc},
-    time::sleep,
-};
+use tokio::sync::{RwLock, mpsc};
 use uintn::{UintN, paths};
 
 use crate::client::S3Client;
@@ -13,7 +10,7 @@ use crate::client::S3Client;
 const RETRY_DELAY: Duration = Duration::from_secs(1);
 
 #[derive(Debug)]
-enum OffloadError {
+pub enum OffloadError {
     LocalFileError(String),
     RemoteError(String),
 }
@@ -28,6 +25,36 @@ impl std::fmt::Display for OffloadError {
 }
 
 impl std::error::Error for OffloadError {}
+
+/// Puts `data` at `key` and reads its size back. S3 and its lookalikes are
+/// read-after-write consistent for a new key, so the HEAD is the verification
+/// and nothing has to wait for it.
+pub async fn put_verified(client: &S3Client, key: &str, data: &[u8]) -> Result<(), OffloadError> {
+    let status_code = client
+        .put_object(key, data)
+        .await
+        .map_err(|e| OffloadError::RemoteError(format!("S3 put_object failed: {}", e)))?;
+    if status_code != 200 {
+        return Err(OffloadError::RemoteError(format!(
+            "Failed to upload to S3, response code: {}",
+            status_code
+        )));
+    }
+
+    let s3_size = client
+        .head_object(key)
+        .await
+        .map_err(|e| OffloadError::RemoteError(format!("S3 head_object failed: {}", e)))?
+        .ok_or_else(|| OffloadError::RemoteError(format!("Not found after upload: {}", key)))?;
+    if s3_size != data.len() as u64 {
+        return Err(OffloadError::RemoteError(format!(
+            "Size mismatch after upload: local={}, s3={}",
+            data.len(),
+            s3_size
+        )));
+    }
+    Ok(())
+}
 
 impl From<std::io::Error> for OffloadError {
     fn from(err: std::io::Error) -> Self {
@@ -288,38 +315,7 @@ impl QueueOffloaderWorker {
             .await
             .map_err(OffloadError::from)?;
 
-        let status_code = self
-            .client
-            .put_object(&s3_key, &file_data)
-            .await
-            .map_err(|e| OffloadError::RemoteError(format!("S3 put_object failed: {}", e)))?;
-
-        if status_code != 200 {
-            return Err(OffloadError::RemoteError(format!(
-                "Failed to upload file to S3, response code: {}",
-                status_code
-            )));
-        }
-
-        sleep(Duration::from_secs(5)).await;
-
-        let s3_size = self
-            .client
-            .head_object(&s3_key)
-            .await
-            .map_err(|e| OffloadError::RemoteError(format!("S3 head_object failed: {}", e)))?
-            .ok_or_else(|| {
-                OffloadError::RemoteError(format!("File not found after upload: {}", s3_key))
-            })?;
-
-        let local_size = file_data.len() as u64;
-
-        if s3_size != local_size {
-            return Err(OffloadError::RemoteError(format!(
-                "Size mismatch after upload: local={}, s3={}",
-                local_size, s3_size
-            )));
-        }
+        put_verified(&self.client, &s3_key, &file_data).await?;
 
         Ok(())
     }

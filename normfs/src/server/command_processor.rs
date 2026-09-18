@@ -497,6 +497,7 @@ impl CommandProcessor {
                     Error::QueueEmpty
                     | Error::Wal(_)
                     | Error::Store(_)
+                    | Error::Config(_)
                     | Error::Cloud(_)
                     | Error::Io(_)
                     | Error::RecordTooLarge(_)

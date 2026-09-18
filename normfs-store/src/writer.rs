@@ -1,20 +1,15 @@
-use bytes::{Bytes, BytesMut};
 use normfs_crypto::CryptoContext;
 use normfs_types::QueueId;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::fs;
-use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex, broadcast, mpsc};
 use uintn::UintN;
-use uuid::Uuid;
 
 use crate::WalFile;
-use crate::header::{CompressionType, EncryptionType, FileAuthentication, StoreHeader};
 use crate::ranges::RangeStore;
-use crate::store_header_v1::StoreHeaderV1;
-use normfs_wal::{WalContent, WalStore};
+use crate::store_file;
+use normfs_wal::WalStore;
 
 pub struct StoreWriteWorker {
     root_dir: PathBuf,
@@ -104,27 +99,47 @@ impl StoreWriteWorker {
             }
         };
 
-        let data_to_write = match self.maybe_compress_and_encrypt(&wal_data.content, wal_file) {
-            Ok(data) => {
-                log::debug!(target: "normfs-store",
-                        "Data to write for queue: {}, file_id: {:?}, size: {} bytes",
-                        queue_id, file_id, data.len());
-                data
-            }
+        // Off the runtime for the same reason as the page writer: a file's
+        // worth of zstd and AES on a worker thread stalls every other task.
+        let build = {
+            let (queue_id, file_id, crypto) =
+                (queue_id.clone(), file_id.clone(), self.crypto_ctx.clone());
+            let (compression, encryption) = (wal_file.compression_type, wal_file.encryption_type);
+            let (before, num, content) = (
+                wal_data.entries_before.clone(),
+                wal_data.num_entries.clone(),
+                wal_data.content.clone(),
+            );
+            tokio::task::spawn_blocking(move || {
+                store_file::build(
+                    &queue_id,
+                    &file_id,
+                    compression,
+                    encryption,
+                    before,
+                    num,
+                    &content,
+                    &crypto,
+                )
+            })
+            .await
+            .map_err(std::io::Error::other)
+            .and_then(|r| r)
+        };
+        let sealed = match build {
+            Ok(sealed) => sealed,
             Err(e) => {
                 if !self.shutting_down.load(Ordering::Relaxed) {
                     log::error!(target: "normfs-store",
-                        "Error compressing/encrypting data for queue: {}, file_id: {:?}: {:?}",
-                        queue_id, file_id, e
-                    );
+                        "Error sealing store file for queue: {}, file_id: {:?}: {:?}",
+                        queue_id, file_id, e);
                 }
                 return;
             }
         };
 
-        if let Err(e) = self
-            .write_store_file(wal_file, &wal_data, &data_to_write, store_done_tx)
-            .await
+        if let Err(e) =
+            store_file::land_local(&self.root_dir, queue_id, file_id, &sealed, true).await
         {
             if !self.shutting_down.load(Ordering::Relaxed) {
                 log::error!(target: "normfs-store",
@@ -135,9 +150,13 @@ impl StoreWriteWorker {
             return;
         }
 
-        log::debug!(target: "normfs-store",
-            "Successfully wrote store file for queue: {}, file_id: {:?}",
-            queue_id, file_id);
+        if let Err(e) = store_done_tx.send((queue_id.clone(), file_id.clone()))
+            && !self.shutting_down.load(Ordering::Relaxed)
+        {
+            log::error!(target: "normfs-store",
+                "Failed to send store completion notification for queue: {}, file_id: {:?}: {:?}",
+                queue_id, file_id, e);
+        }
 
         let last_id = wal_data
             .entries_before
@@ -184,137 +203,5 @@ impl StoreWriteWorker {
                 "Successfully processed and deleted WAL file for queue: {}, file_id: {:?}, entries: {:?} to {:?}",
                 queue_id, file_id, wal_data.entries_before, last_id);
         }
-    }
-
-    fn maybe_compress_and_encrypt(
-        &self,
-        data: &Bytes,
-        wal_file: &WalFile,
-    ) -> Result<Bytes, std::io::Error> {
-        let mut data_to_process = data.clone();
-
-        if wal_file.compression_type != CompressionType::None {
-            log::debug!(target: "normfs-store",
-                "Compressing data with {:?} for queue: {}, original size: {} bytes",
-                wal_file.compression_type, wal_file.queue_id, data.len());
-
-            let compressed_data = match wal_file.compression_type {
-                CompressionType::Zstd => crate::compression::zstd_compress(data.as_ref())?,
-                CompressionType::None => data.to_vec(),
-                _ => {
-                    return Err(std::io::Error::other(format!(
-                        "Unsupported compression type: {:?}",
-                        wal_file.compression_type
-                    )));
-                }
-            };
-
-            log::debug!(target: "normfs-store",
-                "Compressed data with {:?} for queue: {}, compressed size: {} bytes, ratio: {:.2}%",
-                wal_file.compression_type, wal_file.queue_id, compressed_data.len(),
-                (compressed_data.len() as f64 / data.len() as f64) * 100.0);
-            data_to_process = Bytes::from(compressed_data);
-        }
-
-        if wal_file.encryption_type != EncryptionType::None {
-            let (nonce, ciphertext) = self
-                .crypto_ctx
-                .encrypt(&wal_file.queue_id, &wal_file.file_id, &data_to_process)
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
-
-            let mut result = BytesMut::with_capacity(nonce.len() + ciphertext.len());
-            result.extend_from_slice(&nonce);
-            result.extend_from_slice(&ciphertext);
-
-            log::debug!(target: "normfs-store",
-                "Encrypted data for queue: {}, final size: {} bytes",
-                wal_file.queue_id, result.len());
-
-            data_to_process = result.freeze();
-        }
-
-        Ok(data_to_process)
-    }
-
-    async fn write_store_file(
-        &self,
-        wal_file: &WalFile,
-        wal_data: &WalContent,
-        data: &Bytes,
-        store_done_tx: &mpsc::UnboundedSender<(QueueId, UintN)>,
-    ) -> Result<(), std::io::Error> {
-        let compression = wal_file.compression_type;
-        let encryption = wal_file.encryption_type;
-
-        // New store files are written as V1. Readers dispatch on the version
-        // word, so files already on disk keep being read as V0.
-        let header = StoreHeader::new(
-            compression,
-            encryption,
-            wal_data.entries_before.clone(),
-            wal_data.num_entries.clone(),
-        );
-        let header_v1 = StoreHeaderV1::from_v0(&header)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-
-        let mut header_bytes = BytesMut::new();
-        header_v1
-            .write_to_bytes(&mut header_bytes)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-
-        let header_signature = self.crypto_ctx.sign(&header_bytes);
-        let content_signature = self.crypto_ctx.sign(data);
-
-        let file_auth =
-            FileAuthentication::new(header_signature.to_bytes(), content_signature.to_bytes());
-
-        let store_file_path = wal_file
-            .queue_id
-            .to_store_path(&self.root_dir, &wal_file.file_id);
-
-        log::debug!(target: "normfs-store",
-            "Writing store file for queue: {}, file_id: {:?}, path: {:?}",
-            wal_file.queue_id, wal_file.file_id, store_file_path);
-
-        if let Some(parent) = store_file_path.parent() {
-            fs::create_dir_all(parent).await?;
-        }
-
-        let tmp_dir = self.root_dir.join("tmp");
-        fs::create_dir_all(&tmp_dir).await?;
-
-        let temp_file_path = tmp_dir.join(format!("{}.tmp", Uuid::new_v4()));
-
-        log::debug!(target: "normfs-store",
-            "Writing to temp file: {:?}", temp_file_path);
-
-        // Write: FileAuthentication + StoreHeader + encrypted/compressed data
-        let mut file = fs::File::create(&temp_file_path).await?;
-        let mut auth_bytes = BytesMut::new();
-        file_auth.write_to_bytes(&mut auth_bytes);
-        file.write_all(&auth_bytes).await?;
-        file.write_all(&header_bytes).await?;
-        file.write_all(data).await?;
-        file.sync_all().await?;
-
-        fs::rename(&temp_file_path, &store_file_path).await?;
-
-        log::debug!(target: "normfs-store",
-            "Successfully renamed temp file to store file for queue: {}, file_id: {:?}",
-            wal_file.queue_id, wal_file.file_id);
-
-        if let Err(e) = store_done_tx.send((wal_file.queue_id.clone(), wal_file.file_id.clone())) {
-            if !self.shutting_down.load(Ordering::Relaxed) {
-                log::error!(target: "normfs-store",
-                    "Failed to send store completion notification for queue: {}, file_id: {:?}: {:?}",
-                    wal_file.queue_id, wal_file.file_id, e);
-            }
-        } else {
-            log::debug!(target: "normfs-store",
-                "Sent store completion notification for queue: {}, file_id: {:?}",
-                wal_file.queue_id, wal_file.file_id);
-        }
-
-        Ok(())
     }
 }

@@ -2,7 +2,7 @@ use crate::client::S3Client;
 use crate::errors::CloudError;
 use normfs_store::parser::parse_store_header;
 use normfs_types::QueueId;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use uintn::UintN;
@@ -12,8 +12,15 @@ use uintn::UintN;
 /// there to cover it without a second round trip.
 const HEADER_PREFIX_LEN: u64 = 408;
 
+/// Ranges remembered per queue, oldest file out first. A miss is one ranged
+/// GET, so this bounds memory, not correctness.
+const RANGES_PER_QUEUE: usize = 4096;
+
+/// Per queue, per store file: its first and last entry id.
+type Ranges = HashMap<QueueId, BTreeMap<UintN, (UintN, UintN)>>;
+
 pub struct RangeCache {
-    ranges: RwLock<HashMap<String, (UintN, UintN)>>,
+    ranges: RwLock<Ranges>,
 }
 
 impl RangeCache {
@@ -23,8 +30,12 @@ impl RangeCache {
         }
     }
 
-    fn key(queue_id: &QueueId, file_id: &UintN) -> String {
-        format!("{}-{}", queue_id, file_id)
+    fn remember(ranges: &mut Ranges, queue_id: &QueueId, file_id: &UintN, range: (UintN, UintN)) {
+        let per_queue = ranges.entry(queue_id.clone()).or_default();
+        per_queue.insert(file_id.clone(), range);
+        while per_queue.len() > RANGES_PER_QUEUE {
+            per_queue.pop_first();
+        }
     }
 
     async fn read_range_from_s3(
@@ -141,19 +152,16 @@ impl RangeCache {
         queue_id: &QueueId,
         file_id: &UintN,
     ) -> Result<Option<(UintN, UintN)>, CloudError> {
-        let key = Self::key(queue_id, file_id);
-
         log::debug!(
-            "Getting range for queue: {}, file_id: {:?}, cache key: {}",
+            "Getting range for queue: {}, file_id: {:?}",
             queue_id,
-            file_id,
-            key
+            file_id
         );
 
         // Check cache first
         {
             let ranges = self.ranges.read().await;
-            if let Some(range) = ranges.get(&key) {
+            if let Some(range) = ranges.get(queue_id).and_then(|per| per.get(file_id)) {
                 log::debug!(
                     "Found cached range for queue: {}, file_id: {:?}, range: {:?} to {:?}",
                     queue_id,
@@ -177,7 +185,7 @@ impl RangeCache {
         // Cache the result if we found a range
         if let Some(range_val) = &range {
             let mut ranges = self.ranges.write().await;
-            ranges.insert(key.clone(), range_val.clone());
+            Self::remember(&mut ranges, queue_id, file_id, range_val.clone());
             log::debug!(
                 "Cached range for queue: {}, file_id: {:?}, range: {:?} to {:?}",
                 queue_id,
@@ -197,19 +205,21 @@ impl RangeCache {
         first_id: &UintN,
         last_id: &UintN,
     ) -> Result<(), CloudError> {
-        let key = Self::key(queue_id, file_id);
-
         log::debug!(
-            "Recording range for queue: {}, file_id: {:?}, range: {:?} to {:?}, cache key: {}",
+            "Recording range for queue: {}, file_id: {:?}, range: {:?} to {:?}",
             queue_id,
             file_id,
             first_id,
-            last_id,
-            key
+            last_id
         );
 
         let mut ranges = self.ranges.write().await;
-        ranges.insert(key, (first_id.clone(), last_id.clone()));
+        Self::remember(
+            &mut ranges,
+            queue_id,
+            file_id,
+            (first_id.clone(), last_id.clone()),
+        );
 
         log::debug!(
             "Successfully recorded range for queue: {}, file_id: {:?}",

@@ -2,16 +2,24 @@ use crate::header::{FileAuthentication, StoreHeaderError};
 use crate::store_header_v1::{AnyStoreHeader, AnyStoreHeaderError};
 use normfs_crypto::CryptoContext;
 use normfs_types::QueueId;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use uintn::{Error as UintNError, UintN, paths};
 
+/// Ranges remembered per queue. The oldest file goes first, and a miss costs
+/// one 256-byte read, so this bounds memory rather than correctness: at
+/// 4 MiB store files it covers 16 GiB of a queue.
+const RANGES_PER_QUEUE: usize = 4096;
+
+/// Per queue, per store file: its first and last entry id.
+type Ranges = HashMap<QueueId, BTreeMap<UintN, (UintN, UintN)>>;
+
 pub struct RangeStore {
     root: PathBuf,
-    ranges: RwLock<HashMap<String, (UintN, UintN)>>,
+    ranges: RwLock<Ranges>,
     crypto_ctx: Arc<CryptoContext>,
     verify_signatures: bool,
 }
@@ -101,8 +109,12 @@ impl RangeStore {
         }
     }
 
-    fn key(queue_id: &QueueId, file_id: &UintN) -> String {
-        format!("{}-{}", queue_id, file_id)
+    fn remember(ranges: &mut Ranges, queue_id: &QueueId, file_id: &UintN, range: (UintN, UintN)) {
+        let per_queue = ranges.entry(queue_id.clone()).or_default();
+        per_queue.insert(file_id.clone(), range);
+        while per_queue.len() > RANGES_PER_QUEUE {
+            per_queue.pop_first();
+        }
     }
 
     async fn read_range_from_fs(
@@ -175,15 +187,13 @@ impl RangeStore {
         queue_id: &QueueId,
         file_id: &UintN,
     ) -> Result<Option<(UintN, UintN)>, RangeStoreError> {
-        let key = Self::key(queue_id, file_id);
-
         log::debug!(target: "normfs-store",
-            "Getting range for queue: {}, file_id: {:?}, key: {}",
-            queue_id, file_id, key);
+            "Getting range for queue: {}, file_id: {:?}",
+            queue_id, file_id);
 
         {
             let ranges = self.ranges.read().unwrap();
-            if let Some(range) = ranges.get(&key) {
+            if let Some(range) = ranges.get(queue_id).and_then(|per| per.get(file_id)) {
                 log::debug!(target: "normfs-store",
                     "Found cached range for queue: {}, file_id: {:?}, range: {:?} to {:?}",
                     queue_id, file_id, range.0, range.1);
@@ -201,7 +211,7 @@ impl RangeStore {
             Ok(range) => {
                 if let Some(range_val) = &range {
                     let mut ranges = self.ranges.write().unwrap();
-                    ranges.insert(key.clone(), range_val.clone());
+                    Self::remember(&mut ranges, queue_id, file_id, range_val.clone());
                     log::debug!(target: "normfs-store",
                         "Cached range for queue: {}, file_id: {:?}, range: {:?} to {:?}",
                         queue_id, file_id, range_val.0, range_val.1);
@@ -230,14 +240,17 @@ impl RangeStore {
         first_id: &UintN,
         last_id: &UintN,
     ) -> Result<(), RangeStoreError> {
-        let key = Self::key(queue_id, file_id);
-
         log::debug!(target: "normfs-store",
-            "Recording range for queue: {}, file_id: {:?}, range: {:?} to {:?}, key: {}",
-            queue_id, file_id, first_id, last_id, key);
+            "Recording range for queue: {}, file_id: {:?}, range: {:?} to {:?}",
+            queue_id, file_id, first_id, last_id);
 
         let mut ranges = self.ranges.write().unwrap();
-        ranges.insert(key, (first_id.clone(), last_id.clone()));
+        Self::remember(
+            &mut ranges,
+            queue_id,
+            file_id,
+            (first_id.clone(), last_id.clone()),
+        );
 
         log::debug!(target: "normfs-store",
             "Successfully recorded range for queue: {}, file_id: {:?}",

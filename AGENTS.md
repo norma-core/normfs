@@ -111,10 +111,12 @@ depends on:
   because the entry codec's quantified byte clauses make Z3 time out under
   load, and a proof that depends on machine load is not a proof.
 
-Neither `verify/Makefile` nor `.github/workflows/ci.yml` names modules or
+Neither `verify/Makefile` nor `.github/workflows/verify.yml` names modules or
 targets — both discover them from the tree. Adding a module needs no edit to
 either; adding a `verify-*` target to a module's `CMakeLists.txt` is enough.
-Do not introduce a hand-maintained list that mirrors the tree.
+Do not introduce a hand-maintained list that mirrors the tree. The proof job
+runs only when the C layer changes (`*/c/**`, `**.c`, `**.h`, `verify/**`);
+`ci.yml` runs on everything.
 
 ## Rust ↔ C FFI
 
@@ -150,9 +152,10 @@ Do not introduce a hand-maintained list that mirrors the tree.
   bounds re-exported from `lib.rs`, and a `peek_version` for dispatch. New
   files are always written at the current version; older versions stay
   readable.
-- `Cargo.lock` is **untracked** (it is in `.gitignore`). CI therefore runs
-  `cargo test --workspace` without `--locked` — do not add the flag, and do not
-  commit the lockfile.
+- `Cargo.lock` is **tracked**, so a yanked dependency cannot come back on
+  its own, and CI runs `cargo test --workspace --locked`. A change that adds
+  or removes a dependency, or bumps the workspace version, must commit the
+  relocked file with it or CI fails at the resolver.
 
 ## Secrets
 

@@ -1328,3 +1328,134 @@ async fn try_place_now_refuses_a_record_no_page_can_hold() {
     ));
     assert_eq!(pool.next_entry_id(), 0);
 }
+
+/// The cut at a handover bound in the middle of a page falls exactly where the
+/// first unclaimed entry begins, so the run is whole entries and the writer's
+/// next take starts on the same boundary.
+#[tokio::test]
+async fn a_mid_page_handover_cuts_between_entries() {
+    let pool = Arc::new(PagePool::new(2, 4 * PAGE_SIZE, 0));
+    let entry_len = crate::wal_entry_v1::encoded_len(RECORD.len() as u32);
+
+    let first = pool.next_entry_id();
+    for i in 0..4u64 {
+        pool.place(first + i, &RECORD).await.unwrap();
+    }
+    pool.note_handed_over(first + 1);
+
+    let pending = pool.take_pending(0);
+    assert_eq!(pending.len(), 1);
+    let (w, bytes) = &pending[0];
+    assert_eq!((w.first_entry_id, w.last_entry_id), (first, first + 1));
+    assert_eq!(w.to - w.from, 2 * entry_len);
+    assert_eq!(bytes.len(), 2 * entry_len);
+    pool.commit_written(w);
+
+    pool.note_handed_over(first + 3);
+    let rest = pool.take_pending(0);
+    assert_eq!(rest.len(), 1);
+    let (w2, _) = &rest[0];
+    assert_eq!(w2.last_entry_id, first + 3);
+    assert_eq!(w2.from, w.to, "the second take resumes on the first cut");
+    assert_eq!(w2.to - w2.from, 2 * entry_len);
+}
+
+/// Two records per page at this size, so ids 0..1 are file 0, 2..3 file 1 and
+/// 4 opens file 2. Records here never wait: four pages, five records.
+async fn place_five(pool: &PagePool) -> Vec<Placement> {
+    let mut placed = Vec::new();
+    for i in 0..5u64 {
+        placed.push(pool.place(i, &RECORD).await.unwrap());
+    }
+    placed
+}
+
+#[tokio::test]
+async fn page_files_rotate_on_every_opened_page_but_the_first() {
+    let pool = Arc::new(PagePool::new(4, PAGE_SIZE, 0));
+    pool.arm_page_files(HEADER);
+
+    let placed = place_five(&pool).await;
+    let hints: Vec<_> = placed.iter().map(|p| (p.rotate, p.epoch)).collect();
+    assert_eq!(
+        hints,
+        [
+            (RotateHint::None, 0),
+            (RotateHint::None, 0),
+            (RotateHint::Before, 1),
+            (RotateHint::None, 1),
+            (RotateHint::Before, 2),
+        ]
+    );
+    assert_eq!(pool.epoch(), 2);
+}
+
+#[tokio::test]
+async fn take_file_takes_one_epoch_whole_and_only_once() {
+    let pool = Arc::new(PagePool::new(4, PAGE_SIZE, 0));
+    pool.arm_page_files(HEADER);
+    place_five(&pool).await;
+    let entry_len = record_charge() as usize;
+
+    let file0 = pool.take_file(0).expect("file 0 is closed and unwritten");
+    assert_eq!((file0.first_entry_id, file0.last_entry_id), (0, 1));
+    assert_eq!(file0.runs.len(), 1);
+    assert_eq!(file0.runs[0].1.len(), 2 * entry_len);
+    assert!(
+        pool.take_file(0).is_none(),
+        "the cursors moved with the take"
+    );
+
+    let file1 = pool.take_file(1).unwrap();
+    assert_eq!((file1.first_entry_id, file1.last_entry_id), (2, 3));
+
+    // The open file is a prefix: taking it is allowed but not final.
+    let open = pool.take_file(2).unwrap();
+    assert_eq!((open.first_entry_id, open.last_entry_id), (4, 4));
+    assert!(pool.take_file(3).is_none());
+}
+
+#[tokio::test]
+async fn seal_cuts_the_active_page_between_entries_and_the_next_append_starts_a_new_file() {
+    // Four of these fit on a page, so the seal lands mid-page and the file
+    // after it shares the page with the file before it.
+    let small = [0x11u8; 4];
+    let entry_len = crate::wal_entry_v1::encoded_len(small.len() as u32);
+    let pool = Arc::new(PagePool::new(2, PAGE_SIZE, 0));
+    pool.arm_page_files(HEADER);
+
+    assert!(pool.seal_open_file().is_none(), "nothing to seal yet");
+    assert_eq!(pool.epoch(), 0);
+
+    pool.place(0, &small).await.unwrap();
+    pool.place(1, &small).await.unwrap();
+    let (epoch, sealed) = pool.seal_open_file().expect("two records are owed");
+    assert_eq!(epoch, 0);
+    assert_eq!((sealed.first_entry_id, sealed.last_entry_id), (0, 1));
+    assert_eq!(
+        (sealed.runs[0].0.from, sealed.runs[0].0.to),
+        (0, 2 * entry_len)
+    );
+    assert_eq!(pool.epoch(), 1);
+    assert!(
+        pool.seal_open_file().is_none(),
+        "sealing twice takes nothing twice"
+    );
+    assert_eq!(pool.epoch(), 1, "and does not open an empty file");
+
+    // Same page, next file: no rotation, stamped with the new epoch.
+    let p2 = pool.place(2, &small).await.unwrap();
+    assert_eq!((p2.rotate, p2.epoch), (RotateHint::None, 1));
+    pool.place(3, &small).await.unwrap();
+    let p4 = pool.place(4, &small).await.unwrap();
+    assert_eq!((p4.rotate, p4.epoch), (RotateHint::Before, 2));
+
+    assert!(pool.take_file(0).is_none(), "file 0 went with the seal");
+    let file1 = pool.take_file(1).unwrap();
+    assert_eq!((file1.first_entry_id, file1.last_entry_id), (2, 3));
+    assert_eq!(
+        (file1.runs[0].0.from, file1.runs[0].0.to),
+        (2 * entry_len, 4 * entry_len),
+        "file 1 starts on the seal's cut and holds nothing of file 0"
+    );
+}

@@ -42,6 +42,24 @@ impl CloudDownloader {
         }
     }
 
+    pub async fn find_max_id(&self, queue: &QueueId) -> Result<Option<UintN>, CloudError> {
+        let full_prefix = queue.to_cloud_queue_path(&self.base_prefix);
+
+        match paths::find_max_id(&self.client, &full_prefix, "store").await {
+            Ok(id) => Ok(Some(id)),
+            Err(CloudError::NoFilesFound) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn key(&self, queue: &QueueId, file_id: &UintN) -> String {
+        queue.to_cloud_key(&self.base_prefix, file_id)
+    }
+
+    pub fn client(&self) -> &Arc<S3Client> {
+        &self.client
+    }
+
     pub async fn get_file_range(
         &self,
         queue: &QueueId,

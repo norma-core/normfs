@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use normfs::{Error, NormFS, NormFsSettings, PersistenceMode, ReadPosition};
+use normfs::{Error, NormFS, NormFsSettings, Persist, QueueSettings, ReadPosition};
 use tokio::sync::mpsc;
 use uintn::UintN;
 
@@ -130,7 +130,7 @@ async fn a_closed_queue_refuses_a_try_the_same_way_it_refuses_a_wait() {
 async fn memory_only_accepts_a_try_because_it_never_waits() {
     let dir = tempfile::tempdir().unwrap();
     let settings = NormFsSettings {
-        persistence_mode: PersistenceMode::MemoryOnly,
+        queue_settings: QueueSettings::all_active().with_default_persist(Persist::MEMORY),
         max_disk_usage_per_queue: None,
         ..settings()
     };

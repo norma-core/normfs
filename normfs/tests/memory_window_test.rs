@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use normfs::{NormFS, NormFsSettings, PersistenceMode, ReadPosition};
+use normfs::{NormFS, NormFsSettings, Persist, QueueSettings, ReadPosition};
 use tempfile::TempDir;
 use uintn::UintN;
 
@@ -23,7 +23,7 @@ async fn last_n(fs: &NormFS, q: &normfs::QueueId, n: u64) -> usize {
 async fn memory_only_keeps_a_sliding_tail_window() {
     let temp_dir = TempDir::new().unwrap();
     let settings = NormFsSettings {
-        persistence_mode: PersistenceMode::MemoryOnly,
+        queue_settings: QueueSettings::all_active().with_default_persist(Persist::MEMORY),
         max_memory_usage: 64 * 1024,
         mem_page_size: 4096,
         ..NormFsSettings::all_active()

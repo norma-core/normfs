@@ -57,6 +57,12 @@ struct CRingAppendResult {
 }
 
 #[repr(C)]
+struct CPageFindResult {
+    index: u32,
+    found: c_int,
+}
+
+#[repr(C)]
 struct CRingSeekResult {
     page_index: usize,
     index: u32,
@@ -88,6 +94,8 @@ unsafe extern "C" {
     );
     fn normfs_wal_page_offset(page: *mut CWalPage, index: u32) -> u32;
     fn normfs_wal_page_entry_id(page: *mut CWalPage, index: u32) -> u64;
+    fn normfs_wal_page_cut(page: *mut CWalPage, entry_id: u64) -> usize;
+    fn normfs_wal_page_first_from(page: *mut CWalPage, from: usize) -> CPageFindResult;
     fn normfs_wal_page_pin(page: *mut CWalPage);
     fn normfs_wal_page_unpin(page: *mut CWalPage);
     fn normfs_wal_page_reusable(page: *const CWalPage, min_essential_id: u64) -> c_int;
@@ -575,6 +583,20 @@ impl WalRing {
     /// bytes of entries up to some id end exactly where the next entry begins.
     pub fn page_entry_offset(&self, page_index: usize, index: u32) -> usize {
         unsafe { normfs_wal_page_offset(self.page(page_index), index) as usize }
+    }
+
+    /// Where page `page_index` splits into ids below `entry_id` and ids at or
+    /// above it: the whole page when every id is below, the start of entry 0
+    /// when none is. Proved to land between two entries, never inside one.
+    pub fn page_cut(&self, page_index: usize, entry_id: u64) -> usize {
+        unsafe { normfs_wal_page_cut(self.page(page_index), entry_id) }
+    }
+
+    /// Index of the first entry of page `page_index` that begins at or after
+    /// byte `from`; `None` when every entry begins before it.
+    pub fn page_first_index_from(&self, page_index: usize, from: usize) -> Option<u32> {
+        let r = unsafe { normfs_wal_page_first_from(self.page(page_index), from) };
+        (r.found != 0).then_some(r.index)
     }
 
     /// Resets the ring to empty, with `first_entry_id` as the next id to cache.

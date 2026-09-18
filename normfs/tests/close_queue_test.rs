@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use normfs::{Error, NormFS, NormFsSettings, PersistenceMode, ReadPosition};
+use normfs::{Error, NormFS, NormFsSettings, Persist, QueueSettings, ReadPosition};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 use uintn::UintN;
@@ -108,7 +108,7 @@ async fn a_closed_queue_starts_again_and_continues_its_ids() {
 async fn a_memory_only_queue_starts_again_after_a_close() {
     let temp = tempfile::TempDir::new().unwrap();
     let settings = NormFsSettings {
-        persistence_mode: PersistenceMode::MemoryOnly,
+        queue_settings: QueueSettings::all_active().with_default_persist(Persist::MEMORY),
         max_disk_usage_per_queue: None,
         ..NormFsSettings::all_active()
     };

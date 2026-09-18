@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tokio::time;
 use uintn::{paths, UintN};
@@ -20,6 +21,9 @@ pub struct DiskMonitorConfig {
     pub check_interval: Duration,
     /// WAL settings to validate minimum size
     pub wal_settings: WalSettings,
+    /// Whether this queue's store files go to the cloud. Without it the
+    /// monitor only deletes, and deletes nothing it would have had to send.
+    pub offload: bool,
 }
 
 impl DiskMonitorConfig {
@@ -39,12 +43,21 @@ impl DiskMonitorConfig {
     }
 }
 
+/// How long the running store total is trusted before a walk re-seeds it;
+/// only a file removed by hand can put it off.
+const STORE_RESEED_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+
 #[derive(Debug)]
 struct QueueMonitor {
     queue_id: QueueId,
     config: DiskMonitorConfig,
     root_path: PathBuf,
     offloader: Option<QueueOffloader>,
+    /// Bytes of store files, kept as they land and are deleted. With page-sized
+    /// files a queue holds hundreds of thousands; stat-ing each per tick was
+    /// the tick.
+    store_bytes: AtomicU64,
+    store_seeded: std::sync::Mutex<Instant>,
 }
 
 impl QueueMonitor {
@@ -55,33 +68,68 @@ impl QueueMonitor {
         client: Option<Arc<S3Client>>,
         prefix: Option<&str>,
     ) -> Self {
-        let offloader = if let (Some(client), Some(prefix)) = (client, prefix) {
-            Some(QueueOffloader::new(queue_id.clone(), root_path.clone(), client, prefix).await)
-        } else {
-            None
+        let offloader = match (client, prefix) {
+            (Some(client), Some(prefix)) if config.offload => {
+                Some(QueueOffloader::new(queue_id.clone(), root_path.clone(), client, prefix).await)
+            }
+            _ => None,
         };
 
-        Self {
+        let monitor = Self {
             queue_id,
             config,
             root_path,
             offloader,
+            store_bytes: AtomicU64::new(0),
+            store_seeded: std::sync::Mutex::new(Instant::now()),
+        };
+        monitor.reseed_store_bytes().await;
+        monitor
+    }
+
+    /// One walk of the store directory, the only full walk it ever gets.
+    async fn reseed_store_bytes(&self) {
+        let store_path = self.queue_id.to_store_dir(&self.root_path);
+        let bytes = if store_path.exists() {
+            match Self::get_directory_size(&store_path).await {
+                Ok(bytes) => bytes as u64,
+                Err(e) => {
+                    log::warn!(target: "normfs::disk_monitor",
+                        "Queue '{}': could not size the store directory: {}", self.queue_id, e);
+                    return;
+                }
+            }
+        } else {
+            0
+        };
+        self.store_bytes.store(bytes, Ordering::Relaxed);
+        *self.store_seeded.lock().unwrap() = Instant::now();
+    }
+
+    /// A store file has just landed: one stat, not a walk.
+    fn note_store_file(&self, file_id: &UintN) {
+        let path = self.queue_id.to_store_path(&self.root_path, file_id);
+        match std::fs::metadata(&path) {
+            Ok(meta) => {
+                self.store_bytes.fetch_add(meta.len(), Ordering::Relaxed);
+            }
+            Err(e) => log::warn!(target: "normfs::disk_monitor",
+                "Queue '{}': landed store file {} cannot be sized: {}", self.queue_id, file_id, e),
         }
     }
 
     async fn get_queue_size(&self) -> Result<usize, Error> {
-        let mut total_size = 0;
+        let stale = self.store_seeded.lock().unwrap().elapsed() > STORE_RESEED_INTERVAL;
+        if stale {
+            self.reseed_store_bytes().await;
+        }
+        let mut total_size = self.store_bytes.load(Ordering::Relaxed) as usize;
 
-        // Calculate WAL folder size
+        // WAL files are bounded by max_disk / max_file_size, so this walk
+        // stays short whatever the store holds.
         let wal_path = self.queue_id.to_wal_dir(&self.root_path);
         if wal_path.exists() {
             total_size += Self::get_directory_size(&wal_path).await?;
-        }
-
-        // Calculate store folder size
-        let store_path = self.queue_id.to_store_dir(&self.root_path);
-        if store_path.exists() {
-            total_size += Self::get_directory_size(&store_path).await?;
         }
 
         Ok(total_size)
@@ -221,6 +269,11 @@ impl QueueMonitor {
 
                         match tokio::fs::remove_file(&store_file_path).await {
                             Ok(_) => {
+                                self.store_bytes
+                                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |b| {
+                                        Some(b.saturating_sub(file_size as u64))
+                                    })
+                                    .ok();
                                 size_to_free = size_to_free.saturating_sub(file_size);
                                 total_freed += file_size;
                                 let remaining_size = current_size.saturating_sub(total_freed);
@@ -380,6 +433,7 @@ impl DiskMonitor {
     ) -> Result<(), Error> {
         let monitors = self.monitors.read().await;
         if let Some(monitor) = monitors.get(queue_id) {
+            monitor.note_store_file(&file_id);
             if let Some(ref offloader) = monitor.offloader {
                 if let Err(e) = offloader.enqueue_file(file_id.clone()).await {
                     log::error!(
