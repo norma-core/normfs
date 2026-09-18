@@ -1,8 +1,7 @@
 use crate::client::S3Client;
 use crate::errors::CloudError;
 use normfs_store::parser::parse_store_header;
-use normfs_types::QueueId;
-use std::collections::HashMap;
+use normfs_types::{BoundedMap, QueueId};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use uintn::UintN;
@@ -12,14 +11,17 @@ use uintn::UintN;
 /// there to cover it without a second round trip.
 const HEADER_PREFIX_LEN: u64 = 408;
 
+/// Capped like the local range cache: one entry per object.
+const RANGE_CACHE_CAP: usize = 4096;
+
 pub struct RangeCache {
-    ranges: RwLock<HashMap<String, (UintN, UintN)>>,
+    ranges: RwLock<BoundedMap<String, (UintN, UintN)>>,
 }
 
 impl RangeCache {
     pub fn new() -> Self {
         Self {
-            ranges: RwLock::new(HashMap::new()),
+            ranges: RwLock::new(BoundedMap::new(RANGE_CACHE_CAP)),
         }
     }
 

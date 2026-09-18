@@ -1,17 +1,18 @@
 use crate::header::{FileAuthentication, StoreHeaderError};
 use crate::store_header_v1::{AnyStoreHeader, AnyStoreHeaderError};
 use normfs_crypto::CryptoContext;
-use normfs_types::QueueId;
-use std::collections::HashMap;
+use normfs_types::{BoundedMap, QueueId};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use uintn::{Error as UintNError, UintN, paths};
 
+const RANGE_CACHE_CAP: usize = 4096;
+
 pub struct RangeStore {
     root: PathBuf,
-    ranges: RwLock<HashMap<String, (UintN, UintN)>>,
+    ranges: RwLock<BoundedMap<String, (UintN, UintN)>>,
     crypto_ctx: Arc<CryptoContext>,
     verify_signatures: bool,
 }
@@ -95,7 +96,7 @@ impl RangeStore {
     ) -> Self {
         Self {
             root: root.as_ref().to_path_buf(),
-            ranges: RwLock::new(HashMap::new()),
+            ranges: RwLock::new(BoundedMap::new(RANGE_CACHE_CAP)),
             crypto_ctx,
             verify_signatures,
         }
@@ -244,5 +245,12 @@ impl RangeStore {
             queue_id, file_id);
 
         Ok(())
+    }
+
+    pub fn forget(&self, queue_id: &QueueId, file_id: &UintN) {
+        self.ranges
+            .write()
+            .unwrap()
+            .remove(&Self::key(queue_id, file_id));
     }
 }

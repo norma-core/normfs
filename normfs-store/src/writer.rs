@@ -10,16 +10,17 @@ use tokio::sync::{Mutex, broadcast, mpsc};
 use uintn::UintN;
 use uuid::Uuid;
 
-use crate::WalFile;
 use crate::header::{CompressionType, EncryptionType, FileAuthentication, StoreHeader};
 use crate::ranges::RangeStore;
 use crate::store_header_v1::StoreHeaderV1;
+use crate::{DiskUsage, WalFile};
 use normfs_wal::{WalContent, WalStore};
 
 pub struct StoreWriteWorker {
     root_dir: PathBuf,
     wal_store: Arc<WalStore>,
     range_store: Arc<RangeStore>,
+    disk_usage: Arc<DiskUsage>,
     crypto_ctx: Arc<CryptoContext>,
     shutting_down: Arc<AtomicBool>,
 }
@@ -30,11 +31,13 @@ impl StoreWriteWorker {
         crypto_ctx: Arc<CryptoContext>,
         wal_store: Arc<WalStore>,
         range_store: Arc<RangeStore>,
+        disk_usage: Arc<DiskUsage>,
     ) -> Self {
         Self {
             root_dir,
             wal_store,
             range_store,
+            disk_usage,
             crypto_ctx,
             shutting_down: Arc::new(AtomicBool::new(false)),
         }
@@ -297,7 +300,10 @@ impl StoreWriteWorker {
         file.write_all(data).await?;
         file.sync_all().await?;
 
-        fs::rename(&temp_file_path, &store_file_path).await?;
+        let size = auth_bytes.len() as u64 + header_bytes.len() as u64 + data.len() as u64;
+        self.disk_usage
+            .publish(&wal_file.queue_id, &temp_file_path, &store_file_path, size)
+            .await?;
 
         log::debug!(target: "normfs-store",
             "Successfully renamed temp file to store file for queue: {}, file_id: {:?}",

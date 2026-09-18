@@ -233,5 +233,10 @@ impl ReadEntry {
     }
 }
 
+mod bounded_map;
+pub use bounded_map::BoundedMap;
+
+#[cfg(test)]
+mod bounded_map_test;
 #[cfg(test)]
 mod queue_id_test;

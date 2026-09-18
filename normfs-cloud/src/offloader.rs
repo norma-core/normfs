@@ -2,10 +2,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use log::{error, info, warn};
 use normfs_types::QueueId;
-use tokio::{
-    sync::{RwLock, mpsc},
-    time::sleep,
-};
+use tokio::sync::{RwLock, mpsc};
 use uintn::{UintN, paths};
 
 use crate::client::S3Client;
@@ -300,8 +297,6 @@ impl QueueOffloaderWorker {
                 status_code
             )));
         }
-
-        sleep(Duration::from_secs(5)).await;
 
         let s3_size = self
             .client

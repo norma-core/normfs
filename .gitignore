@@ -5,6 +5,7 @@ uintn-rs/c/build/
 normfs-wal/c/build/
 normfs-store/c/build/
 normfs-crypto/c/build/
+normfs/c/build/
 
 # macOS
 .DS_Store
