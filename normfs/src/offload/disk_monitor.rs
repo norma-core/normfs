@@ -34,7 +34,6 @@ const NORMFS_DISK_STOP_GAP: c_int = 2;
 const NORMFS_DISK_STOP_BOUND: c_int = 3;
 const NORMFS_DISK_STOP_ERROR: c_int = 4;
 
-/// Two 4-byte fields in the order of `struct normfs_disk_result`.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct CDiskResult {
@@ -433,10 +432,8 @@ struct QueueMonitor {
     wal_dir: PathBuf,
     offloader: Option<QueueOffloader>,
     store_bytes: Arc<Mutex<u64>>,
-    /// Where the next eviction starts: the `next` of the last one. Publication
-    /// shares `store_bytes`' lock, so cleanup must not walk the store to find
-    /// its oldest file; a walk happens only at a rescan or when this lands on
-    /// a gap.
+    /// The last eviction's `next`. Publication takes `store_bytes`' lock, so
+    /// cleanup starts here instead of walking the store for its oldest file.
     cursor: std::sync::Mutex<Option<UintN>>,
     forget_range: Option<ForgetRange>,
 }
@@ -511,8 +508,7 @@ impl QueueMonitor {
         Ok((*self.store_bytes.lock().await).saturating_add(wal))
     }
 
-    /// `None` when publication and earlier deletions already brought the
-    /// queue under its limit.
+    /// `None` when the queue is already under its limit.
     async fn evict_from(
         &self,
         start: UintN,
@@ -605,7 +601,7 @@ impl QueueMonitor {
                 }
             };
             // Nothing at the cursor: files removed by hand, or a WAL file
-            // older than the store. One walk puts it back on the oldest file.
+            // older than the store.
             if from_cursor && eviction.stop == Stop::Gap && eviction.events.is_empty() {
                 let oldest = self.locate_oldest(wal_scan.min.clone()).await?;
                 if oldest != start {

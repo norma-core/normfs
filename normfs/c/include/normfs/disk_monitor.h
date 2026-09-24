@@ -43,8 +43,8 @@ enum normfs_disk_status {
 };
 
 /* MORE: the event buffer filled; call again, the request carries the
- * position. ERROR: the last event is a failed stat or unlink and `next` is
- * still its id, so a retry starts there rather than past it. */
+ * position. ERROR: the last event is a failed stat or unlink; `next` is
+ * still its id. */
 enum normfs_disk_stop {
 	NORMFS_DISK_STOP_MORE = 0,
 	NORMFS_DISK_STOP_FREED = 1,

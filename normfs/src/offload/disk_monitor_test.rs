@@ -79,7 +79,6 @@ async fn the_tracked_size_follows_completions_and_deletions() {
     assert!(!store_file_exists(root, &queue, 3));
     assert_eq!(queue_monitor.get_queue_size().await.unwrap(), 200);
 
-    // The periodic rescan picks up the unreported file.
     queue_monitor.check_and_cleanup(true).await.unwrap();
     assert!(!store_file_exists(root, &queue, 4));
     assert!(store_file_exists(root, &queue, 5));

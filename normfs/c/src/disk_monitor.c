@@ -1092,7 +1092,7 @@ normfs_disk_evict_one(struct normfs_disk_evict_req *req,
 	}
 
 	/* Stepping past a file that stays would delete a newer one in its
-	 * place and leave the cursor beyond it for good. */
+	 * place. */
 	if (deleted == 0)
 		*stop = NORMFS_DISK_STOP_ERROR;
 
@@ -1147,7 +1147,6 @@ normfs_disk_event_append(struct normfs_disk_event *events, size_t index,
 {
 	size_t k;
 
-	/* All of hex, used or not, so no stale byte reaches the Rust buffer. */
 	/*@ loop invariant 0 <= k <= NORMFS_DISK_ID_MAX;
 	    loop invariant \forall integer q; 0 <= q < k ==>
 	      events[index].id.hex[q] == event->id.hex[q];
@@ -1164,12 +1163,8 @@ normfs_disk_event_append(struct normfs_disk_event *events, size_t index,
 	events[index].os_error = event->os_error;
 }
 
-/*
- * Ids are consecutive, so the first id with neither file is the end.
- *
- * The accounting clauses pin `freed` of the last event as the sum of every
- * reported deletion: the recurrence over the events has one solution.
- */
+/* Ids are consecutive, so the first id with neither file is the end. The
+ * `freed` recurrence has one solution: the sum of the reported deletions. */
 /*@ requires \valid(req);
     requires \valid_read(req->store_dir + (0 .. req->store_dir_len));
     requires req->store_dir[req->store_dir_len] == 0;
@@ -1231,7 +1226,7 @@ normfs_disk_evict(struct normfs_disk_evict_req *req,
     size_t *count, int *stop)
 {
 	struct normfs_disk_result r;
-	/* The struct copy overwrites even the unused ID bytes in the Rust buffer. */
+	/* Zeroed: append copies all of hex, used or not, to the Rust buffer. */
 	struct normfs_disk_event event = {0};
 	uint64_t freed = 0u;
 	int st;
@@ -1293,9 +1288,8 @@ normfs_disk_evict(struct normfs_disk_evict_req *req,
 			return r;
 		}
 
-		/* Before the append, so no write to char memory follows it and
-		 * the events' digit clauses need no framing. On overflow `next`
-		 * is unchanged and the deletion is still reported. */
+		/* Before the append: a char write after it would have the
+		 * provers frame every event's digit clauses. */
 		inc = normfs_disk_id_increment(&req->next);
 		normfs_disk_event_append(events, *count, &event) /*@ ghost (req) */;
 		*count += 1u;
