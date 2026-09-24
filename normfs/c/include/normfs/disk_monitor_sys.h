@@ -25,6 +25,10 @@
       logic integer disk_fs_size{L}(char *path, integer len)
         reads normfs_disk_fs_world, path[0 .. len];
       logic integer disk_fs_bytes{L} reads normfs_disk_fs_world;
+
+      // statfs(2) counts blocks in 64 bits; a byte total past that has no
+      // filesystem to live on.
+      axiom disk_fs_bytes_range{L}: 0 <= disk_fs_bytes <= UINT64_MAX;
     }
 */
 
@@ -111,6 +115,7 @@ int normfs_disk_sys_file_size(const char *path, size_t path_len,
     ensures \result == 0 || \result == -1;
     ensures \result == -1 ==> *os_error > 0;
     ensures \result == 0 ==> *os_error == 0;
+    ensures \result == -1 ==> disk_fs_bytes == \old(disk_fs_bytes);
     ensures \result == 0 ==> disk_fs_present{Pre}(path, path_len);
     ensures \result == 0 ==> !disk_fs_present(path, path_len) &&
               !disk_fs_regular(path, path_len);

@@ -467,6 +467,7 @@ test_evict_frees_from_the_bottom(void)
 	}
 	CHECK(id_is(&ev[0].id, "1"));
 	CHECK(id_is(&ev[2].id, "3"));
+	CHECK(ev[0].freed == 100u && ev[2].freed == 300u);
 	CHECK(file_exists(store, "3", NORMFS_DISK_STORE) == 0);
 	CHECK(file_exists(store, "4", NORMFS_DISK_STORE) == 1);
 	CHECK(file_exists(wal, "5", NORMFS_DISK_WAL) == 1);
@@ -592,7 +593,7 @@ test_evict_resumes_after_a_full_buffer(void)
 }
 
 static int
-test_evict_reports_a_failed_unlink_and_moves_on(void)
+test_evict_stops_at_a_failed_unlink(void)
 {
 	char store[640];
 	char wal[640];
@@ -618,13 +619,15 @@ test_evict_reports_a_failed_unlink_and_moves_on(void)
 	r = normfs_disk_evict(&rq, ev, 8u, &count, &stop);
 	CHECK(chmod(chunk, 0700) == 0);
 	CHECK(r.status == NORMFS_DISK_OK);
-	CHECK(stop == NORMFS_DISK_STOP_GAP);
-	CHECK(count == 2u);
+	CHECK(stop == NORMFS_DISK_STOP_ERROR);
+	CHECK(count == 1u);
 	CHECK(ev[0].deleted == 0);
 	CHECK(ev[0].os_error == EACCES || ev[0].os_error == EPERM);
-	CHECK(ev[1].deleted == 0);
+	CHECK(ev[0].freed == 0u);
+	CHECK(id_is(&rq.next, "1000"));
 	CHECK(rq.to_free == 1000u);
 	CHECK(file_exists(store, "1000", NORMFS_DISK_STORE) == 1);
+	CHECK(file_exists(store, "1001", NORMFS_DISK_STORE) == 1);
 	return 0;
 }
 
@@ -723,7 +726,7 @@ main(void)
 		return 1;
 	if (test_evict_resumes_after_a_full_buffer() != 0)
 		return 1;
-	if (test_evict_reports_a_failed_unlink_and_moves_on() != 0)
+	if (test_evict_stops_at_a_failed_unlink() != 0)
 		return 1;
 	if (test_evict_overflows_at_the_layout_cap() != 0)
 		return 1;

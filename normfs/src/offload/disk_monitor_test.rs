@@ -257,3 +257,122 @@ async fn concurrent_rescans_and_out_of_order_publications_preserve_usage() {
         3200
     );
 }
+
+async fn seeded_monitor(root: &Path, queue: &QueueId, max_size: usize) -> QueueMonitor {
+    QueueMonitor::new(
+        queue.clone(),
+        DiskMonitorConfig {
+            max_size,
+            check_interval: Duration::from_secs(60),
+            wal_settings: WalSettings {
+                max_file_size: 10,
+                ..Default::default()
+            },
+        },
+        root.to_path_buf(),
+        None,
+        None,
+        None,
+        Arc::new(DiskUsage::default()),
+    )
+    .await
+    .unwrap()
+}
+
+async fn publish_store_file(monitor: &QueueMonitor, root: &Path, queue: &QueueId, id: u64) {
+    let temp_file = root.join("new-store-file");
+    std::fs::write(&temp_file, vec![0; 100]).unwrap();
+    let path = queue.to_store_path(root, &UintN::from(id));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::rename(&temp_file, &path).unwrap();
+    *monitor.store_bytes.lock().await += 100;
+}
+
+#[tokio::test]
+async fn cleanup_resumes_at_the_cursor_without_walking_the_store() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let root = temp.path();
+    let queue = QueueIdResolver::new("inst").resolve("cam");
+    for id in 1..=4 {
+        write_store_file(root, &queue, id, 100);
+    }
+    let monitor = seeded_monitor(root, &queue, 250).await;
+    monitor.check_and_cleanup(false).await.unwrap();
+    assert!(!store_file_exists(root, &queue, 2));
+
+    // Behind the cursor and never reported: only a walk would find it.
+    write_store_file(root, &queue, 1, 100);
+    publish_store_file(&monitor, root, &queue, 5).await;
+    monitor.check_and_cleanup(false).await.unwrap();
+
+    assert!(store_file_exists(root, &queue, 1));
+    assert!(!store_file_exists(root, &queue, 3));
+    assert!(store_file_exists(root, &queue, 4));
+    assert_eq!(*monitor.cursor.lock().unwrap(), Some(UintN::from(4u64)));
+}
+
+#[tokio::test]
+async fn a_cursor_left_on_a_gap_is_moved_to_the_oldest_file() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let root = temp.path();
+    let queue = QueueIdResolver::new("inst").resolve("cam");
+    for id in 1..=6 {
+        write_store_file(root, &queue, id, 100);
+    }
+    let monitor = seeded_monitor(root, &queue, 350).await;
+    monitor.check_and_cleanup(false).await.unwrap();
+    assert!(!store_file_exists(root, &queue, 3));
+    assert!(store_file_exists(root, &queue, 4));
+
+    std::fs::remove_file(queue.to_store_path(root, &UintN::from(4u64))).unwrap();
+    publish_store_file(&monitor, root, &queue, 7).await;
+    monitor.check_and_cleanup(false).await.unwrap();
+
+    assert!(!store_file_exists(root, &queue, 5));
+    assert!(store_file_exists(root, &queue, 6));
+    assert_eq!(*monitor.cursor.lock().unwrap(), Some(UintN::from(6u64)));
+}
+
+#[tokio::test]
+async fn a_file_that_cannot_be_deleted_holds_cleanup_at_its_id() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::TempDir::new().unwrap();
+    let root = temp.path();
+    let queue = QueueIdResolver::new("inst").resolve("cam");
+    // 0x1fff and 0x2000 sit in different chunk directories.
+    for id in [0x1fffu64, 0x2000, 0x2001] {
+        write_store_file(root, &queue, id, 100);
+    }
+    let locked = queue
+        .to_store_path(root, &UintN::from(0x1fffu64))
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let probe = locked.join("probe");
+    std::fs::write(&probe, b"").unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+    if std::fs::remove_file(&probe).is_ok() {
+        // root unlinks regardless of the directory mode.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        return;
+    }
+
+    let monitor = seeded_monitor(root, &queue, 150).await;
+    let result = monitor.check_and_cleanup(false).await;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+    result.unwrap();
+
+    assert!(store_file_exists(root, &queue, 0x1fff));
+    assert!(store_file_exists(root, &queue, 0x2000));
+    assert_eq!(
+        *monitor.cursor.lock().unwrap(),
+        Some(UintN::from(0x1fffu64))
+    );
+    assert_eq!(monitor.get_queue_size().await.unwrap(), 300);
+
+    monitor.check_and_cleanup(false).await.unwrap();
+    assert!(!store_file_exists(root, &queue, 0x1fff));
+    assert!(!store_file_exists(root, &queue, 0x2000));
+    assert!(store_file_exists(root, &queue, 0x2001));
+}

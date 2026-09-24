@@ -91,6 +91,13 @@ struct normfs_disk_level {
      ((e)->deleted == 0 || (e)->deleted == 1) && \
      ((e)->deleted == 1 ==> (e)->os_error == 0) && \
      ((e)->deleted == 0 ==> (e)->os_error > 0))
+#define DISK_DELTA(e) ((e)->deleted == 1 ? (e)->size : 0)
+#define DISK_FREED(ev, n) ((n) == 0 ? 0 : (ev)[(n) - 1].freed)
+#define DISK_SAT_SUB(a, b) ((b) >= (a) ? 0 : (a) - (b))
+#define DISK_SAME_ID(a, b) \
+    ((a)->len == (b)->len && \
+     (\forall integer same_digit; 0 <= same_digit < (a)->len ==> \
+        (a)->hex[same_digit] == (b)->hex[same_digit]))
 
 /*@ assigns \nothing;
     ensures \result == 0 || \result == 1;
@@ -1009,30 +1016,35 @@ normfs_disk_scan(const char *dir, size_t dir_len, int kind,
     requires \separated(req, ev, stop,
                         req->store_dir + (0 .. req->store_dir_len),
                         req->wal_dir + (0 .. req->wal_dir_len));
+    requires freed + disk_fs_bytes <= UINT64_MAX;
     assigns ev->id.hex[0 .. NORMFS_DISK_ID_MAX - 1], ev->id.len,
-            ev->size, ev->kind, ev->deleted, ev->os_error,
+            ev->size, ev->freed, ev->kind, ev->deleted, ev->os_error,
             req->to_free, *stop, normfs_disk_fs_world;
     ensures \result == NORMFS_DISK_OK ||
             \result == NORMFS_DISK_ERR_PATH_TOO_LONG;
     ensures \result == NORMFS_DISK_OK ==>
               (*stop == NORMFS_DISK_STOP_MORE ||
                *stop == NORMFS_DISK_STOP_GAP ||
-               *stop == NORMFS_DISK_STOP_BOUND);
+               *stop == NORMFS_DISK_STOP_BOUND ||
+               *stop == NORMFS_DISK_STOP_ERROR);
+    ensures \result == NORMFS_DISK_OK &&
+            (*stop == NORMFS_DISK_STOP_MORE || *stop == NORMFS_DISK_STOP_ERROR) ==>
+              DISK_EVENT_WF(ev) && DISK_SAME_ID(&ev->id, &req->next) &&
+              ev->freed == freed + DISK_DELTA(ev);
     ensures \result == NORMFS_DISK_OK && *stop == NORMFS_DISK_STOP_MORE ==>
-              DISK_EVENT_WF(ev) &&
-              req->to_free == (ev->deleted == 1 ?
-                (ev->size >= \old(req->to_free) ? 0 : \old(req->to_free) - ev->size) :
-                \old(req->to_free));
-    ensures \result == NORMFS_DISK_OK && *stop == NORMFS_DISK_STOP_MORE &&
-              ev->deleted == 1 ==>
+              ev->deleted == 1 &&
+              req->to_free == DISK_SAT_SUB(\old(req->to_free), ev->size) &&
               disk_fs_bytes == \old(disk_fs_bytes) - ev->size;
+    ensures \result == NORMFS_DISK_OK && *stop == NORMFS_DISK_STOP_ERROR ==>
+              ev->deleted == 0;
+    ensures !(\result == NORMFS_DISK_OK && *stop == NORMFS_DISK_STOP_MORE) ==>
+              req->to_free == \old(req->to_free) &&
+              disk_fs_bytes == \old(disk_fs_bytes);
     ensures req->to_free <= \old(req->to_free);
-    ensures \result != NORMFS_DISK_OK || *stop != NORMFS_DISK_STOP_MORE ==>
-              req->to_free == \old(req->to_free);
 */
 static int
 normfs_disk_evict_one(struct normfs_disk_evict_req *req,
-    struct normfs_disk_event *ev, int *stop)
+    struct normfs_disk_event *ev, int *stop, uint64_t freed)
 {
 	char path[NORMFS_DISK_PATH_MAX];
 	size_t plen = 0u;
@@ -1079,38 +1091,85 @@ normfs_disk_evict_one(struct normfs_disk_evict_req *req,
 		}
 	}
 
+	/* Stepping past a file that stays would delete a newer one in its
+	 * place and leave the cursor beyond it for good. */
+	if (deleted == 0)
+		*stop = NORMFS_DISK_STOP_ERROR;
+
 	normfs_disk_id_copy(&ev->id, &req->next);
 	ev->kind = kind;
 	ev->size = size;
+	ev->freed = (deleted == 1) ? freed + size : freed;
 	ev->deleted = deleted;
 	ev->os_error = e;
 
 	return NORMFS_DISK_OK;
 }
 
-/* Keep the prefix-frame proof separate from syscalls and ID advancement. */
+/* Keep the prefix-frame proof separate from syscalls and ID advancement.
+ * Field by field for the reason id_copy is; `req` is ghost so the frame of
+ * its ids is proved here rather than in evict's context. */
 /*@ requires \valid(events + (0 .. index));
     requires \valid_read(event);
     requires \separated(event, events + (0 .. index));
+    requires \valid_read(req);
+    requires \separated(req, events + (0 .. index));
+    requires DISK_ID_WF(&req->next);
+    requires req->has_bound == 0 || DISK_ID_WF(&req->bound);
     requires DISK_EVENT_WF(event);
     requires \forall integer k; 0 <= k < index ==> DISK_EVENT_WF(&events[k]);
+    requires event->freed == DISK_FREED(events, index) + DISK_DELTA(event);
+    requires index > 0 ==> events[0].freed == DISK_DELTA(&events[0]);
+    requires \forall integer k; 0 < k < index ==>
+               events[k].freed == events[k - 1].freed + DISK_DELTA(&events[k]);
     assigns events[index];
-    ensures events[index] == *event;
     ensures events[index].size == event->size;
+    ensures events[index].freed == event->freed;
     ensures events[index].deleted == event->deleted;
+    ensures DISK_SAME_ID(&events[index].id, &event->id);
+    ensures DISK_SAME_ID(&event->id, &req->next) ==>
+              DISK_SAME_ID(&events[index].id, &req->next);
+    ensures DISK_ID_WF(&req->next);
+    ensures req->has_bound == 0 || DISK_ID_WF(&req->bound);
     ensures \forall integer k; 0 <= k < index ==>
               events[k].deleted == \old(events[k].deleted) &&
-              events[k].size == \old(events[k].size);
+              events[k].size == \old(events[k].size) &&
+              events[k].freed == \old(events[k].freed);
     ensures \forall integer k; 0 <= k <= index ==> DISK_EVENT_WF(&events[k]);
+    ensures events[0].freed == DISK_DELTA(&events[0]);
+    ensures \forall integer k; 0 < k <= index ==>
+              events[k].freed == events[k - 1].freed + DISK_DELTA(&events[k]);
 */
 static void
 normfs_disk_event_append(struct normfs_disk_event *events, size_t index,
     const struct normfs_disk_event *event)
+    /*@ ghost (const struct normfs_disk_evict_req *req) */
 {
-	events[index] = *event;
+	size_t k;
+
+	/* All of hex, used or not, so no stale byte reaches the Rust buffer. */
+	/*@ loop invariant 0 <= k <= NORMFS_DISK_ID_MAX;
+	    loop invariant \forall integer q; 0 <= q < k ==>
+	      events[index].id.hex[q] == event->id.hex[q];
+	    loop assigns k, events[index].id.hex[0 .. NORMFS_DISK_ID_MAX - 1];
+	    loop variant NORMFS_DISK_ID_MAX - k;
+	*/
+	for (k = 0u; k < (size_t)NORMFS_DISK_ID_MAX; k++)
+		events[index].id.hex[k] = event->id.hex[k];
+	events[index].id.len = event->id.len;
+	events[index].size = event->size;
+	events[index].freed = event->freed;
+	events[index].kind = event->kind;
+	events[index].deleted = event->deleted;
+	events[index].os_error = event->os_error;
 }
 
-/* Ids are consecutive, so the first id with neither file is the end. */
+/*
+ * Ids are consecutive, so the first id with neither file is the end.
+ *
+ * The accounting clauses pin `freed` of the last event as the sum of every
+ * reported deletion: the recurrence over the events has one solution.
+ */
 /*@ requires \valid(req);
     requires \valid_read(req->store_dir + (0 .. req->store_dir_len));
     requires req->store_dir[req->store_dir_len] == 0;
@@ -1137,7 +1196,8 @@ normfs_disk_event_append(struct normfs_disk_event *events, size_t index,
               (*stop == NORMFS_DISK_STOP_MORE ||
                *stop == NORMFS_DISK_STOP_FREED ||
                *stop == NORMFS_DISK_STOP_GAP ||
-               *stop == NORMFS_DISK_STOP_BOUND);
+               *stop == NORMFS_DISK_STOP_BOUND ||
+               *stop == NORMFS_DISK_STOP_ERROR);
     ensures \result.status == NORMFS_DISK_OK && *stop == NORMFS_DISK_STOP_MORE
               ==> *count == cap;
     ensures \result.status == NORMFS_DISK_OK && *stop == NORMFS_DISK_STOP_FREED
@@ -1147,9 +1207,23 @@ normfs_disk_event_append(struct normfs_disk_event *events, size_t index,
     ensures req->to_free <= \old(req->to_free);
     ensures *count == 0 ==> req->to_free == \old(req->to_free);
     ensures \forall integer k; 0 <= k < *count ==> DISK_EVENT_WF(&events[k]);
-    ensures \forall integer k; 0 <= k < *count &&
-              events[k].deleted == 1 && events[k].size > 0 ==>
-              req->to_free < \old(req->to_free);
+
+    ensures *count > 0 ==> events[0].freed == DISK_DELTA(&events[0]);
+    ensures \forall integer k; 0 < k < *count ==>
+              events[k].freed == events[k - 1].freed + DISK_DELTA(&events[k]);
+    ensures disk_fs_bytes ==
+              \old(disk_fs_bytes) - DISK_FREED(events, *count);
+    ensures req->to_free ==
+              DISK_SAT_SUB(\old(req->to_free), DISK_FREED(events, *count));
+    ensures \result.status == NORMFS_DISK_OK && *stop == NORMFS_DISK_STOP_FREED
+              ==> disk_fs_bytes <= \old(disk_fs_bytes) - \old(req->to_free);
+
+    ensures \forall integer k; 0 <= k < *count && events[k].deleted == 0 ==>
+              k == *count - 1 && \result.status == NORMFS_DISK_OK &&
+              *stop == NORMFS_DISK_STOP_ERROR;
+    ensures \result.status == NORMFS_DISK_OK && *stop == NORMFS_DISK_STOP_ERROR
+              ==> *count >= 1 && events[*count - 1].deleted == 0 &&
+                  DISK_SAME_ID(&events[*count - 1].id, &req->next);
 */
 struct normfs_disk_result
 normfs_disk_evict(struct normfs_disk_evict_req *req,
@@ -1159,7 +1233,9 @@ normfs_disk_evict(struct normfs_disk_evict_req *req,
 	struct normfs_disk_result r;
 	/* The struct copy overwrites even the unused ID bytes in the Rust buffer. */
 	struct normfs_disk_event event = {0};
+	uint64_t freed = 0u;
 	int st;
+	int inc;
 	int one = NORMFS_DISK_STOP_MORE;
 
 	r.os_error = 0;
@@ -1180,14 +1256,18 @@ normfs_disk_evict(struct normfs_disk_evict_req *req,
 	    loop invariant req->has_bound == 0 || DISK_ID_WF(&req->bound);
 	    loop invariant req->to_free <= \at(req->to_free, Pre);
 	    loop invariant *count == 0 ==> req->to_free == \at(req->to_free, Pre);
-	    loop invariant \forall integer k; 0 <= k < *count &&
-	      events[k].deleted == 1 && events[k].size > 0 ==>
-	      req->to_free < \at(req->to_free, Pre);
-	    loop invariant \forall integer k; 0 <= k < *count ==>
-	      1 <= events[k].id.len <= NORMFS_DISK_ID_MAX;
 	    loop invariant \forall integer k; 0 <= k < *count ==>
 	      DISK_EVENT_WF(&events[k]);
-	    loop assigns *count, st, one, event, req->next, req->to_free,
+	    loop invariant \forall integer k; 0 <= k < *count ==>
+	      events[k].deleted == 1;
+	    loop invariant freed == DISK_FREED(events, *count);
+	    loop invariant disk_fs_bytes == \at(disk_fs_bytes, Pre) - freed;
+	    loop invariant req->to_free ==
+	      DISK_SAT_SUB(\at(req->to_free, Pre), freed);
+	    loop invariant *count > 0 ==> events[0].freed == DISK_DELTA(&events[0]);
+	    loop invariant \forall integer k; 0 < k < *count ==>
+	      events[k].freed == events[k - 1].freed + DISK_DELTA(&events[k]);
+	    loop assigns *count, st, inc, one, event, freed, req->next, req->to_free,
 	                 events[0 .. cap - 1], normfs_disk_fs_world;
 	    loop variant cap - *count;
 	*/
@@ -1197,19 +1277,30 @@ normfs_disk_evict(struct normfs_disk_evict_req *req,
 			return r;
 		}
 
-		st = normfs_disk_evict_one(req, &event, &one);
+		st = normfs_disk_evict_one(req, &event, &one, freed);
 		if (st != NORMFS_DISK_OK) {
 			r.status = st;
 			return r;
 		}
-		if (one != NORMFS_DISK_STOP_MORE) {
+		if (one == NORMFS_DISK_STOP_GAP || one == NORMFS_DISK_STOP_BOUND) {
 			*stop = one;
 			return r;
 		}
-		normfs_disk_event_append(events, *count, &event);
-		*count += 1u;
+		if (one == NORMFS_DISK_STOP_ERROR) {
+			normfs_disk_event_append(events, *count, &event) /*@ ghost (req) */;
+			*count += 1u;
+			*stop = NORMFS_DISK_STOP_ERROR;
+			return r;
+		}
 
-		if (normfs_disk_id_increment(&req->next) != NORMFS_DISK_OK) {
+		/* Before the append, so no write to char memory follows it and
+		 * the events' digit clauses need no framing. On overflow `next`
+		 * is unchanged and the deletion is still reported. */
+		inc = normfs_disk_id_increment(&req->next);
+		normfs_disk_event_append(events, *count, &event) /*@ ghost (req) */;
+		*count += 1u;
+		freed = event.freed;
+		if (inc != NORMFS_DISK_OK) {
 			r.status = NORMFS_DISK_ERR_ID_OVERFLOW;
 			return r;
 		}

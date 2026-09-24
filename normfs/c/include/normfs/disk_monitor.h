@@ -43,12 +43,14 @@ enum normfs_disk_status {
 };
 
 /* MORE: the event buffer filled; call again, the request carries the
- * position. */
+ * position. ERROR: the last event is a failed stat or unlink and `next` is
+ * still its id, so a retry starts there rather than past it. */
 enum normfs_disk_stop {
 	NORMFS_DISK_STOP_MORE = 0,
 	NORMFS_DISK_STOP_FREED = 1,
 	NORMFS_DISK_STOP_GAP = 2,
-	NORMFS_DISK_STOP_BOUND = 3
+	NORMFS_DISK_STOP_BOUND = 3,
+	NORMFS_DISK_STOP_ERROR = 4
 };
 
 /* os_error is the errno of the failing syscall, 0 when none ran. Two 4 byte
@@ -73,8 +75,9 @@ struct normfs_disk_scan {
 /*
  * Walks ids upward from `next`, deleting the store file at each id, or the
  * WAL file when there is none, until `to_free` bytes are gone, an id has
- * neither file, or the id passes `bound`. `next` and `to_free` are updated in
- * place. has_bound == 0 means every id may go: the no-offloader case.
+ * neither file, the id passes `bound`, or a file cannot be sized or removed.
+ * `next` and `to_free` are updated in place. has_bound == 0 means every id
+ * may go: the no-offloader case.
  */
 struct normfs_disk_evict_req {
 	const char *store_dir;
@@ -87,11 +90,13 @@ struct normfs_disk_evict_req {
 	uint64_t to_free;
 };
 
-/* deleted == 0 carries the errno of the failed stat or unlink; the walk
- * moves on and Rust logs it. */
+/* deleted == 0 carries the errno of the failed stat or unlink and is only
+ * ever the last event, under STOP_ERROR. `freed` is the bytes deleted by this
+ * call up to and including this event. */
 struct normfs_disk_event {
 	struct normfs_disk_id id;
 	uint64_t size;
+	uint64_t freed;
 	int kind;
 	int deleted;
 	int os_error;

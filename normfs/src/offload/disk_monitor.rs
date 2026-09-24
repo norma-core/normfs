@@ -32,6 +32,7 @@ const NORMFS_DISK_STOP_MORE: c_int = 0;
 const NORMFS_DISK_STOP_FREED: c_int = 1;
 const NORMFS_DISK_STOP_GAP: c_int = 2;
 const NORMFS_DISK_STOP_BOUND: c_int = 3;
+const NORMFS_DISK_STOP_ERROR: c_int = 4;
 
 /// Two 4-byte fields in the order of `struct normfs_disk_result`.
 #[repr(C)]
@@ -72,6 +73,7 @@ struct CDiskEvictReq {
 struct CDiskEvent {
     id: CDiskId,
     size: u64,
+    freed: u64,
     kind: c_int,
     deleted: c_int,
     os_error: c_int,
@@ -267,6 +269,8 @@ pub(crate) struct EvictEvent {
     pub id: UintN,
     pub kind: FileKind,
     pub size: u64,
+    /// Bytes deleted by the whole eviction up to and including this event.
+    pub freed: u64,
     pub result: io::Result<()>,
 }
 
@@ -277,6 +281,8 @@ pub(crate) enum Stop {
     Gap,
     /// The next id is past the offloaded bound.
     Bound,
+    /// The last event's file could not be sized or removed; `next` is its id.
+    Error,
 }
 
 pub(crate) struct Eviction {
@@ -315,11 +321,13 @@ pub(crate) fn evict(
     let mut buf = [CDiskEvent {
         id: zero,
         size: 0,
+        freed: 0,
         kind: 0,
         deleted: 0,
         os_error: 0,
     }; 64];
     let mut events = Vec::new();
+    let mut freed = 0u64;
 
     let stop = loop {
         let mut count = 0usize;
@@ -330,11 +338,14 @@ pub(crate) fn evict(
         let r = unsafe {
             normfs_disk_evict(&mut req, buf.as_mut_ptr(), buf.len(), &mut count, &mut stop)
         };
+        let base = freed;
         for event in &buf[..count.min(buf.len())] {
+            freed = base.saturating_add(event.freed);
             events.push(EvictEvent {
                 id: from_c_id(&event.id)?,
                 kind: FileKind::from_c(event.kind)?,
                 size: event.size,
+                freed,
                 result: if event.deleted == 1 {
                     Ok(())
                 } else if event.os_error != 0 {
@@ -353,6 +364,7 @@ pub(crate) fn evict(
             NORMFS_DISK_STOP_FREED => break Stop::Freed,
             NORMFS_DISK_STOP_GAP => break Stop::Gap,
             NORMFS_DISK_STOP_BOUND => break Stop::Bound,
+            NORMFS_DISK_STOP_ERROR => break Stop::Error,
             other => {
                 return Err(io::Error::other(format!(
                     "unknown stop reason {} from the C disk layer",
@@ -421,7 +433,19 @@ struct QueueMonitor {
     wal_dir: PathBuf,
     offloader: Option<QueueOffloader>,
     store_bytes: Arc<Mutex<u64>>,
+    /// Where the next eviction starts: the `next` of the last one. Publication
+    /// shares `store_bytes`' lock, so cleanup must not walk the store to find
+    /// its oldest file; a walk happens only at a rescan or when this lands on
+    /// a gap.
+    cursor: std::sync::Mutex<Option<UintN>>,
     forget_range: Option<ForgetRange>,
+}
+
+fn earliest(a: Option<UintN>, b: Option<UintN>) -> Option<UintN> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
 }
 
 impl QueueMonitor {
@@ -451,6 +475,7 @@ impl QueueMonitor {
             wal_dir,
             offloader,
             store_bytes,
+            cursor: std::sync::Mutex::new(None),
             forget_range,
         };
         monitor.rescan_store().await?;
@@ -465,11 +490,20 @@ impl QueueMonitor {
     async fn rescan_store(&self) -> Result<(), Error> {
         let mut tracked = self.store_bytes.clone().lock_owned().await;
         let dir = self.store_dir.clone();
-        blocking(move || {
-            *tracked = scan(&dir, FileKind::Store)?.total;
-            Ok(())
+        let min = blocking(move || {
+            let store = scan(&dir, FileKind::Store)?;
+            *tracked = store.total;
+            Ok(store.min)
         })
-        .await
+        .await?;
+        *self.cursor.lock().unwrap() = min;
+        Ok(())
+    }
+
+    /// Only the minimum is wanted, so the walk runs without the lock.
+    async fn locate_oldest(&self, wal_min: Option<UintN>) -> Result<Option<UintN>, Error> {
+        let store = Self::scan_dir(&self.store_dir, FileKind::Store).await?;
+        Ok(earliest(store.min, wal_min))
     }
 
     async fn get_queue_size(&self) -> Result<u64, Error> {
@@ -477,7 +511,45 @@ impl QueueMonitor {
         Ok((*self.store_bytes.lock().await).saturating_add(wal))
     }
 
-    async fn cleanup_oldest_files(&self, current_size: u64) -> Result<(), Error> {
+    /// `None` when publication and earlier deletions already brought the
+    /// queue under its limit.
+    async fn evict_from(
+        &self,
+        start: UintN,
+        bound: Option<UintN>,
+        wal_total: u64,
+    ) -> Result<Option<Eviction>, Error> {
+        let max_size = self.config.max_size as u64;
+        let mut tracked = self.store_bytes.clone().lock_owned().await;
+        let store_dir = self.store_dir.clone();
+        let wal_dir = self.wal_dir.clone();
+        blocking(move || {
+            let to_free = tracked.saturating_add(wal_total).saturating_sub(max_size);
+            if to_free == 0 {
+                return Ok(None);
+            }
+            let result = evict(&store_dir, &wal_dir, &start, bound.as_ref(), to_free);
+            match &result {
+                Ok(eviction) => {
+                    for event in &eviction.events {
+                        if event.kind == FileKind::Store && event.result.is_ok() {
+                            *tracked = tracked.saturating_sub(event.size);
+                        }
+                    }
+                }
+                // Deletions before the failure are not reported back.
+                Err(_) => *tracked = scan(&store_dir, FileKind::Store)?.total,
+            }
+            result.map(Some)
+        })
+        .await
+    }
+
+    async fn cleanup_oldest_files(
+        &self,
+        current_size: u64,
+        wal_scan: DirScan,
+    ) -> Result<(), Error> {
         let max_size = self.config.max_size as u64;
         let to_free = current_size.saturating_sub(max_size);
         if to_free == 0 {
@@ -508,52 +580,47 @@ impl QueueMonitor {
             },
         };
 
-        let mut tracked = self.store_bytes.clone().lock_owned().await;
-        let store_scan = Self::scan_dir(&self.store_dir, FileKind::Store).await?;
-        let wal_scan = Self::scan_dir(&self.wal_dir, FileKind::Wal).await?;
-        *tracked = store_scan.total;
-        let current_size = store_scan.total.saturating_add(wal_scan.total);
-        let to_free = current_size.saturating_sub(max_size);
-        if to_free == 0 {
-            return Ok(());
-        }
-        let start = match (store_scan.min, wal_scan.min) {
-            (Some(s), Some(w)) => s.min(w),
-            (Some(s), None) => s,
-            (None, Some(w)) => w,
-            (None, None) => {
+        let remembered = self.cursor.lock().unwrap().clone();
+        let mut from_cursor = remembered.is_some();
+        let mut start = match remembered {
+            Some(cursor) => earliest(Some(cursor), wal_scan.min.clone()),
+            None => self.locate_oldest(wal_scan.min.clone()).await?,
+        };
+
+        let eviction = loop {
+            let Some(from) = start.clone() else {
                 log::warn!(
                     target: "normfs::disk_monitor",
                     "No files found to delete for queue '{}'",
                     self.queue_id
                 );
                 return Ok(());
-            }
-        };
-
-        let store_dir = self.store_dir.clone();
-        let wal_dir = self.wal_dir.clone();
-        let eviction = blocking(move || {
-            let result = evict(&store_dir, &wal_dir, &start, bound.as_ref(), to_free);
-            match &result {
-                Ok(eviction) => {
-                    for event in &eviction.events {
-                        if event.kind == FileKind::Store && event.result.is_ok() {
-                            *tracked = tracked.saturating_sub(event.size);
-                        }
-                    }
+            };
+            let eviction = match self.evict_from(from, bound.clone(), wal_scan.total).await {
+                Ok(Some(eviction)) => eviction,
+                Ok(None) => return Ok(()),
+                Err(e) => {
+                    *self.cursor.lock().unwrap() = None;
+                    return Err(e);
                 }
-                Err(_) => *tracked = scan(&store_dir, FileKind::Store)?.total,
+            };
+            // Nothing at the cursor: files removed by hand, or a WAL file
+            // older than the store. One walk puts it back on the oldest file.
+            if from_cursor && eviction.stop == Stop::Gap && eviction.events.is_empty() {
+                let oldest = self.locate_oldest(wal_scan.min.clone()).await?;
+                if oldest != start {
+                    start = oldest;
+                    from_cursor = false;
+                    continue;
+                }
             }
-            result
-        })
-        .await?;
+            break eviction;
+        };
+        *self.cursor.lock().unwrap() = Some(eviction.next.clone());
 
-        let mut freed = 0u64;
         for event in eviction.events {
             match event.result {
                 Ok(()) => {
-                    freed += event.size;
                     if event.kind == FileKind::Store {
                         if let Some(forget) = &self.forget_range {
                             forget(&self.queue_id, &event.id);
@@ -566,7 +633,7 @@ impl QueueMonitor {
                         event.id,
                         event.size,
                         self.queue_id,
-                        current_size.saturating_sub(freed)
+                        current_size.saturating_sub(event.freed)
                     );
                 }
                 Err(e) => log::error!(
@@ -594,6 +661,12 @@ impl QueueMonitor {
                 eviction.next,
                 self.queue_id
             ),
+            Stop::Error => log::warn!(
+                target: "normfs::disk_monitor",
+                "Cleanup of queue '{}' holds at id {} until it can be deleted",
+                self.queue_id,
+                eviction.next
+            ),
         }
 
         Ok(())
@@ -603,10 +676,11 @@ impl QueueMonitor {
         if rescan {
             self.rescan_store().await?;
         }
-        let current_size = self.get_queue_size().await?;
+        let wal_scan = Self::scan_dir(&self.wal_dir, FileKind::Wal).await?;
+        let current_size = (*self.store_bytes.lock().await).saturating_add(wal_scan.total);
 
         if current_size > self.config.max_size as u64 {
-            self.cleanup_oldest_files(current_size).await?;
+            self.cleanup_oldest_files(current_size, wal_scan).await?;
         } else {
             log::debug!(
                 target: "normfs::disk_monitor",
