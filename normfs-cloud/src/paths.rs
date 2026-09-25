@@ -17,16 +17,41 @@ fn path_to_id(path: &str, extension: &str) -> Result<UintN, CloudError> {
     Ok(UintN::from_hex_digits(&hex_string)?)
 }
 
-fn hex_digits_for_min() -> Vec<char> {
-    vec![
-        '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f',
-    ]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum End {
+    Min,
+    Max,
 }
 
-fn find_min_id_recursive<'a>(
+impl End {
+    /// The order to try directories in: the first with anything in it wins.
+    fn hex_digits(self) -> Vec<char> {
+        let mut digits = vec![
+            '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f',
+        ];
+        if self == End::Max {
+            digits.reverse();
+        }
+        digits
+    }
+
+    fn better(self, candidate: &UintN, current: &UintN) -> bool {
+        match self {
+            End::Min => candidate < current,
+            End::Max => candidate > current,
+        }
+    }
+}
+
+/// Files at a level are the ids with exactly this many digits; directories
+/// hold longer ones. So the smallest id is a file here if there is one, the
+/// largest is in a directory if there is one, and the two ends scan a level
+/// in opposite orders.
+fn find_id_recursive<'a>(
     client: &'a Arc<S3Client>,
     current_prefix: &'a str,
     extension: &'a str,
+    end: End,
 ) -> Pin<Box<dyn Future<Output = Result<String, CloudError>> + Send + 'a>> {
     Box::pin(async move {
         let delimiter = "/";
@@ -59,7 +84,7 @@ fn find_min_id_recursive<'a>(
                 );
                 if let Ok(id) = path_to_id(relative_key, extension) {
                     match &min_file {
-                        Some((_, min_id)) if id < *min_id => {
+                        Some((_, min_id)) if end.better(&id, min_id) => {
                             log::debug!(
                                 "find_min_id_recursive: New min file: {} (id: {:?})",
                                 relative_key,
@@ -81,16 +106,18 @@ fn find_min_id_recursive<'a>(
             }
         }
 
-        if let Some((path, id)) = min_file {
+        if end == End::Min
+            && let Some((path, id)) = &min_file
+        {
             log::debug!(
                 "find_min_id_recursive: Found file at current level, returning early: {} (id: {:?})",
                 path,
                 id
             );
-            return Ok(path);
+            return Ok(path.clone());
         }
 
-        for hex_digit in hex_digits_for_min() {
+        for hex_digit in end.hex_digits() {
             let hex_str = hex_digit.to_string();
 
             let mut found_dir = false;
@@ -118,7 +145,7 @@ fn find_min_id_recursive<'a>(
                         subdir_prefix
                     );
 
-                    match find_min_id_recursive(client, subdir_prefix, extension).await {
+                    match find_id_recursive(client, subdir_prefix, extension, end).await {
                         Ok(sub_path) => {
                             let full_path = format!("{}/{}", hex_str, sub_path);
                             return Ok(full_path);
@@ -139,7 +166,10 @@ fn find_min_id_recursive<'a>(
             }
         }
 
-        Err(CloudError::NoFilesFound)
+        match min_file {
+            Some((path, _)) => Ok(path),
+            None => Err(CloudError::NoFilesFound),
+        }
     })
 }
 
@@ -153,10 +183,23 @@ pub async fn find_min_id(
         prefix,
         extension
     );
-    let relative_path = find_min_id_recursive(client, prefix, extension).await?;
+    let relative_path = find_id_recursive(client, prefix, extension, End::Min).await?;
     log::debug!("find_min_id: Found min path: {}", relative_path);
     let id = path_to_id(&relative_path, extension)?;
     log::debug!("find_min_id: Min ID: {:?}", id);
+    Ok(id)
+}
+
+/// The highest file id under `prefix`: `find_min_id`'s descent, directories
+/// first and the digits reversed. One LIST per level, like it.
+pub async fn find_max_id(
+    client: &Arc<S3Client>,
+    prefix: &str,
+    extension: &str,
+) -> Result<UintN, CloudError> {
+    let relative_path = find_id_recursive(client, prefix, extension, End::Max).await?;
+    let id = path_to_id(&relative_path, extension)?;
+    log::debug!("find_max_id: Max ID: {:?}", id);
     Ok(id)
 }
 

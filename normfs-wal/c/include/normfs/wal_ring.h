@@ -301,13 +301,6 @@ void normfs_wal_ring_init(struct normfs_wal_ring *ring,
  * clause -- a free page belongs to nobody and holds nothing anyone is owed.
  */
 
-/* 83 of this function's 85 goals discharge; why the last two do not, and why
- * it is out of the WP schedule even so, are in c/CMakeLists.txt.
- * Unlike release_page it carries no durability clause -- a free page belongs to
- * nobody and holds nothing anyone is owed -- so what is unproved is
- * well-formedness, not the theorem. Its callee pool_take is proven, and so is
- * release_page, which is the direction that can lose a record. Until they
- * close it is the WalRing Rust tests that stand behind it. */
 /*@ requires normfs_wal_ring_wf(ring);
     requires normfs_wal_ring_in_pool(ring, ring_id);
     requires ring_id != NORMFS_WAL_POOL_FREE;

@@ -42,6 +42,7 @@ async fn the_tracked_size_follows_completions_and_deletions() {
             max_file_size: 10,
             ..Default::default()
         },
+        offload: false,
     };
     monitor.add_queue(&queue, config).await.unwrap();
 
@@ -164,6 +165,7 @@ async fn delayed_and_duplicate_completions_do_not_count_scanned_files_again() {
                     max_file_size: 10,
                     ..Default::default()
                 },
+                offload: false,
             },
         )
         .await
@@ -217,6 +219,7 @@ async fn concurrent_rescans_and_out_of_order_publications_preserve_usage() {
                 max_file_size: 10,
                 ..Default::default()
             },
+            offload: false,
         },
         root.to_path_buf(),
         None,
@@ -267,6 +270,7 @@ async fn seeded_monitor(root: &Path, queue: &QueueId, max_size: usize) -> QueueM
                 max_file_size: 10,
                 ..Default::default()
             },
+            offload: false,
         },
         root.to_path_buf(),
         None,

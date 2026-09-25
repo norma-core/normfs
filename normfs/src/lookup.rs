@@ -75,6 +75,7 @@ async fn find_valid_file_backward(
     min_file_id: &UintN,
     store: &PersistStore,
     wal: &WalStore,
+    cloud_downloader: Option<&Arc<CloudDownloader>>,
 ) -> Result<Option<(UintN, UintN, Option<UintN>)>, LookupError> {
     let mut search_id = start_file_id.clone();
     loop {
@@ -91,6 +92,12 @@ async fn find_valid_file_backward(
                 {
                     return Ok(Some((search_id, start, Some(end))));
                 }
+                // A cloud-direct queue's files were never local.
+                if let Some(s3) = cloud_downloader {
+                    if let Ok(Some((start, end))) = s3.get_file_range(queue, &search_id).await {
+                        return Ok(Some((search_id, start, Some(end))));
+                    }
+                }
                 if search_id <= *min_file_id {
                     return Ok(None);
                 }
@@ -103,12 +110,15 @@ async fn find_valid_file_backward(
     }
 }
 
+/// `cloud_last` bounds the walk for a cloud-direct queue, which has no local
+/// file to do it and should not pay for a LIST on every read.
 pub async fn find_file_with_s3(
     queue: &QueueId,
     target_id: &UintN,
     store: &PersistStore,
     wal: &WalStore,
     cloud_downloader: Option<&Arc<CloudDownloader>>,
+    cloud_last: Option<UintN>,
 ) -> Result<Option<UintN>, LookupError> {
     log::debug!(target: "normfs-lookup", "Finding file for queue '{}', target ID: {}", queue, target_id);
 
@@ -170,9 +180,11 @@ pub async fn find_file_with_s3(
         (Some(s), Some(w)) => Some(s.max(w).clone()),
         (Some(s), None) => Some(s.clone()),
         (None, Some(w)) => Some(w.clone()),
-        (None, None) => return Ok(None),
-    }
-    .unwrap();
+        (None, None) => cloud_last,
+    };
+    let Some(last_file_id) = last_file_id else {
+        return Ok(None);
+    };
 
     log::debug!(target: "normfs-lookup",
         "Absolute file range for queue '{}': {} to {}",
@@ -250,11 +262,19 @@ pub async fn find_file_with_s3(
 
     // Walk backward from last_file_id to find effective last file with data.
     // Handles empty/missing trailing WAL or Store files (same pattern as recovery).
-    let (last_file_id, last_file_start, last_file_end) =
-        match find_valid_file_backward(queue, &last_file_id, &first_file_id, store, wal).await? {
-            Some((file_id, start, end)) => (file_id, start, end),
-            None => return Ok(None), // no files with data
-        };
+    let (last_file_id, last_file_start, last_file_end) = match find_valid_file_backward(
+        queue,
+        &last_file_id,
+        &first_file_id,
+        store,
+        wal,
+        cloud_downloader,
+    )
+    .await?
+    {
+        Some((file_id, start, end)) => (file_id, start, end),
+        None => return Ok(None), // no files with data
+    };
 
     if target_id > &last_file_start {
         log::debug!(target: "normfs-lookup",
@@ -392,6 +412,7 @@ async fn binary_search(
                                 &min_search,
                                 store,
                                 wal,
+                                cloud_downloader,
                             )
                             .await?
                             {
@@ -411,8 +432,15 @@ async fn binary_search(
                         // Mid file is empty — walk backward to find nearest valid file.
                         // If none found between left and mid, target must be in left file.
                         let min_search = left_file_id.increment();
-                        match find_valid_file_backward(queue, &mid_file_id, &min_search, store, wal)
-                            .await?
+                        match find_valid_file_backward(
+                            queue,
+                            &mid_file_id,
+                            &min_search,
+                            store,
+                            wal,
+                            cloud_downloader,
+                        )
+                        .await?
                         {
                             Some((valid_id, valid_start, valid_end)) => {
                                 // Use valid file as new right boundary

@@ -33,6 +33,18 @@ impl S3Client {
         })
     }
 
+    /// Creates the bucket; an existing one is not an error. For tests and
+    /// first-run tooling, not the write path.
+    pub async fn create_bucket(&self) -> Result<(), crate::errors::CloudError> {
+        let action = self.bucket.create_bucket(&self.credentials);
+        let url = action.sign(PRESIGNED_URL_DURATION);
+        let response = self.http_client.put(url.as_str()).send().await?;
+        match response.status().as_u16() {
+            200 | 409 => Ok(()),
+            code => Err(crate::errors::CloudError::InvalidStatusCode(code)),
+        }
+    }
+
     pub async fn put_object(
         &self,
         key: &str,
@@ -142,18 +154,13 @@ impl S3Client {
         let mut query =
             rusty_s3::actions::ListObjectsV2::new(&self.bucket, Some(&self.credentials));
         query.with_prefix(prefix);
-
-        // Build URL with delimiter as a query parameter if provided
-        let mut url = query.sign(PRESIGNED_URL_DURATION);
+        // Into the action before signing: a query parameter appended to the
+        // signed URL is outside the signature, and a strict endpoint answers
+        // 403 to every listing.
         if let Some(delim) = delimiter {
-            // Manually add delimiter to query string
-            let url_str = if url.query().is_some() {
-                format!("{}&delimiter={}", url.as_str(), urlencoding::encode(delim))
-            } else {
-                format!("{}?delimiter={}", url.as_str(), urlencoding::encode(delim))
-            };
-            url = url::Url::parse(&url_str)?;
+            query.query_mut().insert("delimiter", delim);
         }
+        let url = query.sign(PRESIGNED_URL_DURATION);
 
         let response = self.http_client.get(url.as_str()).send().await?;
 

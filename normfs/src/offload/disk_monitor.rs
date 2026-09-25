@@ -400,6 +400,9 @@ pub struct DiskMonitorConfig {
     pub check_interval: Duration,
     /// WAL settings to validate minimum size
     pub wal_settings: WalSettings,
+    /// Whether this queue's store files go to the cloud. Without it the
+    /// monitor only deletes, and deletes nothing it would have had to send.
+    pub offload: bool,
 }
 
 impl DiskMonitorConfig {
@@ -455,10 +458,11 @@ impl QueueMonitor {
         forget_range: Option<ForgetRange>,
         disk_usage: Arc<DiskUsage>,
     ) -> Result<Self, Error> {
-        let offloader = if let (Some(client), Some(prefix)) = (client, prefix) {
-            Some(QueueOffloader::new(queue_id.clone(), root_path.clone(), client, prefix).await)
-        } else {
-            None
+        let offloader = match (client, prefix) {
+            (Some(client), Some(prefix)) if config.offload => {
+                Some(QueueOffloader::new(queue_id.clone(), root_path.clone(), client, prefix).await)
+            }
+            _ => None,
         };
 
         let store_dir = queue_id.to_store_dir(&root_path);

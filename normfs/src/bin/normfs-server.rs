@@ -1,5 +1,5 @@
 use clap::Parser;
-use normfs::{CloudSettings, NormFS, NormFsSettings, PersistenceMode};
+use normfs::{CloudSettings, NormFS, NormFsSettings, Persist, QueueSettings};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -99,18 +99,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // All-active until the server grows a way to declare per-queue pool
     // rules: a passive default without that knob would silently cap every
     // record at a passive page with no recourse from the command line.
+    let persist = if args.memory_only {
+        Persist::MEMORY
+    } else {
+        Persist {
+            cloud: args.s3_bucket.is_some(),
+            ..Persist::WAL_STORE
+        }
+    };
     let mut settings = NormFsSettings {
         max_disk_usage_per_queue: if args.memory_only {
             None
         } else {
             Some(args.max_queue_disk_size)
         },
-        persistence_mode: if args.memory_only {
-            PersistenceMode::MemoryOnly
-        } else {
-            PersistenceMode::Durable
-        },
-        ..NormFsSettings::all_active()
+        queue_settings: QueueSettings::all_active().with_default_persist(persist),
+        ..NormFsSettings::default()
     };
 
     // Configure S3 cloud offloading if provided

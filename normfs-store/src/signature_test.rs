@@ -156,13 +156,14 @@ fn test_extract_wal_bytes_with_verification() {
     let (wal_entry_send, _) = tokio::sync::mpsc::unbounded_channel();
     let (wal_complete_send, _) = tokio::sync::mpsc::unbounded_channel();
     let wal_store = Arc::new(WalStore::new(&temp_dir, wal_entry_send, wal_complete_send));
+    let (written_tx, _) = tokio::sync::mpsc::unbounded_channel();
 
     let config = StoreWriteConfig {
         num_workers: 1,
         verify_signatures: true,
     };
 
-    let store = PersistStore::new(&temp_dir, config, crypto_ctx.clone(), wal_store);
+    let store = PersistStore::new(&temp_dir, config, crypto_ctx.clone(), wal_store, written_tx);
 
     // Create test data (unencrypted, uncompressed)
     let header = StoreHeader::new(
@@ -232,13 +233,14 @@ fn test_extract_wal_bytes_detects_tampered_header() {
     let (wal_entry_send, _) = tokio::sync::mpsc::unbounded_channel();
     let (wal_complete_send, _) = tokio::sync::mpsc::unbounded_channel();
     let wal_store = Arc::new(WalStore::new(&temp_dir, wal_entry_send, wal_complete_send));
+    let (written_tx, _) = tokio::sync::mpsc::unbounded_channel();
 
     let config = StoreWriteConfig {
         num_workers: 1,
         verify_signatures: true,
     };
 
-    let store = PersistStore::new(&temp_dir, config, crypto_ctx.clone(), wal_store);
+    let store = PersistStore::new(&temp_dir, config, crypto_ctx.clone(), wal_store, written_tx);
 
     // Create test data
     let header = StoreHeader::new(
@@ -308,13 +310,14 @@ fn test_extract_wal_bytes_detects_tampered_content() {
     let (wal_entry_send, _) = tokio::sync::mpsc::unbounded_channel();
     let (wal_complete_send, _) = tokio::sync::mpsc::unbounded_channel();
     let wal_store = Arc::new(WalStore::new(&temp_dir, wal_entry_send, wal_complete_send));
+    let (written_tx, _) = tokio::sync::mpsc::unbounded_channel();
 
     let config = StoreWriteConfig {
         num_workers: 1,
         verify_signatures: true,
     };
 
-    let store = PersistStore::new(&temp_dir, config, crypto_ctx.clone(), wal_store);
+    let store = PersistStore::new(&temp_dir, config, crypto_ctx.clone(), wal_store, written_tx);
 
     // Create test data
     let header = StoreHeader::new(

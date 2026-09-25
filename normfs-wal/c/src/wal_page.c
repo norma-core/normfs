@@ -133,6 +133,49 @@ normfs_wal_page_find(struct normfs_wal_page *page, uint64_t entry_id)
 	return r;
 }
 
+size_t
+normfs_wal_page_cut(struct normfs_wal_page *page, uint64_t entry_id)
+{
+	uint32_t index;
+
+	if (page->count == 0u || entry_id > page->last_entry_id)
+		return page->used_bytes;
+
+	if (entry_id <= page->first_entry_id)
+		index = 0u;
+	else
+		index = (uint32_t)(entry_id - page->first_entry_id);
+	/*@ assert index < page->count; */
+
+	return normfs_wal_page_offset(page, index);
+}
+
+struct normfs_wal_page_find_result
+normfs_wal_page_first_from(struct normfs_wal_page *page, size_t from)
+{
+	struct normfs_wal_page_find_result r;
+	uint32_t i;
+
+	r.index = 0u;
+	r.found = 0;
+
+	/*@ loop invariant 0 <= i <= page->count;
+	    loop invariant \forall integer j; 0 <= j < i ==>
+	      normfs_wal_page_offset_logic(page, j) < from;
+	    loop assigns i;
+	    loop variant page->count - i;
+	*/
+	for (i = 0u; i < page->count; i++) {
+		if (normfs_wal_page_offset(page, i) >= from) {
+			r.index = i;
+			r.found = 1;
+			return r;
+		}
+	}
+
+	return r;
+}
+
 void
 normfs_wal_page_pin(struct normfs_wal_page *page)
 {

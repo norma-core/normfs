@@ -1,5 +1,63 @@
 #include "normfs/wal_ring.h"
 
+/* Fold in isolation so unrelated ring facts do not swamp quantifier matching. */
+/*@ ghost
+/@ requires \valid(pool);
+   requires \valid(pool->arena + (0 .. pool->page_count * pool->page_size - 1));
+   requires \forall integer k; 0 <= k < pool->page_count ==>
+              pool->pages[k].buf == pool->arena + k * pool->page_size;
+   assigns \nothing;
+   ensures normfs_wal_pool_layout(pool);
+@/
+static void normfs_wal_ring_fold_pool_layout(struct normfs_wal_pool *pool)
+{
+	(void)pool;
+}
+
+/@ requires \valid(pool);
+   requires pool->page_count >= 1;
+   requires pool->page_size >= NORMFS_WAL_ENTRY_V1_MIN_SIZE + 4;
+   requires pool->page_size <= 0xFFFFFFFF;
+   requires \valid(pool->pages + (0 .. pool->page_count - 1));
+   requires \valid(pool->owner + (0 .. pool->page_count - 1));
+   requires \forall integer k; 0 <= k < pool->page_count ==>
+              normfs_wal_page_wf(&pool->pages[k]) &&
+              pool->pages[k].cap == pool->page_size;
+   requires normfs_wal_pool_layout(pool);
+   requires normfs_wal_pool_sep(pool);
+   assigns \nothing;
+   ensures normfs_wal_pool_wf(pool);
+@/
+static void normfs_wal_ring_fold_pool_wf(struct normfs_wal_pool *pool)
+{
+	(void)pool;
+}
+
+/@ requires \valid(ring);
+   requires \valid(ring->pool);
+   requires normfs_wal_pool_wf(ring->pool);
+   requires ring->page_size == ring->pool->page_size;
+   requires ring->first_slot + ring->page_count <= ring->pool->page_count;
+   requires ring->pages == ring->pool->pages + ring->first_slot;
+   requires ring->arena == ring->pool->arena + ring->first_slot * ring->page_size;
+   requires \separated(ring, ring->pool);
+   requires \separated(ring, ring->pool->owner + (0 .. ring->pool->page_count - 1));
+   requires \separated(ring, ring->pool->pages + (0 .. ring->pool->page_count - 1));
+   requires \separated(ring, ring->pool->arena +
+                        (0 .. ring->pool->page_count * ring->pool->page_size - 1));
+   requires \forall integer k; 0 <= k < ring->page_count ==>
+              ring->pool->owner[ring->first_slot + k] == ring_id;
+   assigns \nothing;
+   ensures normfs_wal_ring_in_pool(ring, ring_id);
+@/
+static void normfs_wal_ring_fold_in_pool(struct normfs_wal_ring *ring, uint64_t ring_id)
+{
+	(void)ring;
+	(void)ring_id;
+}
+
+*/
+
 void
 normfs_wal_ring_init(struct normfs_wal_ring *ring, struct normfs_wal_page *pages,
     uint8_t *arena, size_t page_count, size_t page_size, uint64_t first_entry_id)
@@ -28,6 +86,17 @@ normfs_wal_ring_set_essential(struct normfs_wal_ring *ring,
 void
 normfs_wal_ring_retain_page(struct normfs_wal_ring *ring, uint64_t ring_id)
 {
+	const size_t page_count = ring->page_count;
+	/*@ assert original_page_layout:
+	      \forall integer k; 0 <= k < page_count ==>
+	        ring->pages[k].cap == ring->page_size &&
+	        ring->pages[k].buf == ring->arena + k * ring->page_size; */
+	/*@ assert original_active_sequence:
+	      ring->pages[ring->active].first_entry_id +
+	        (integer)ring->pages[ring->active].count == ring->next_entry_id; */
+	/*@ assert owned_before_take:
+	      \forall integer k; 0 <= k < page_count ==>
+	        ring->pool->owner[ring->first_slot + k] == ring_id; */
 	/* The range widens by a page, so the ring's view of the arena has to
 	 * stretch with it. That the bytes are there is the pool's -- the ring's
 	 * arena is the pool's at first_slot, and the slot taken is inside the
@@ -48,6 +117,9 @@ normfs_wal_ring_retain_page(struct normfs_wal_ring *ring, uint64_t ring_id)
 	/*@ assert unfold_ring_vs_pool_owner:
 	      \separated(ring, ring->pool->owner +
 	                   (0 .. ring->pool->page_count - 1)); */
+	/*@ assert unfold_pool_vs_owner:
+	      \separated(ring->pool,
+	                 ring->pool->owner + (0 .. ring->pool->page_count - 1)); */
 	/*@ assert unfold_pool_pages_vs_arena:
 	      \separated(ring->pool->pages + (0 .. ring->pool->page_count - 1),
 	                 ring->pool->arena +
@@ -123,8 +195,33 @@ normfs_wal_ring_retain_page(struct normfs_wal_ring *ring, uint64_t ring_id)
 	          0 <= ring->first_slot * ring->page_size + j <
 	            ring->pool->page_count * ring->pool->page_size; */
 
-	normfs_wal_pool_take(ring->pool, ring->first_slot + ring->page_count,
+	/* Establish the wider slice before either write changes the memory map. */
+	/*@ assert wider_pages_subset:
+	      \subset(ring->pages + (0 .. ring->page_count),
+	              ring->pool->pages + (0 .. ring->pool->page_count - 1)); */
+	/*@ assert wider_arena_subset:
+	      \subset(ring->arena +
+	                (0 .. (ring->page_count + 1) * ring->page_size - 1),
+	              ring->pool->arena +
+	                (0 .. ring->pool->page_count * ring->pool->page_size - 1)); */
+	/*@ assert wider_pages_separated:
+	      \separated(ring->pages + (0 .. ring->page_count),
+	                 ring->pool->arena +
+	                   (0 .. ring->pool->page_count * ring->pool->page_size - 1)); */
+	/*@ assert wider_slice_separated:
+	      \separated(ring->pages + (0 .. ring->page_count),
+	                 ring->arena +
+	                   (0 .. (ring->page_count + 1) * ring->page_size - 1)); */
+
+	normfs_wal_pool_take(ring->pool, ring->first_slot + page_count,
 	    ring_id);
+	/*@ assert pool_shape_after_take:
+	      ring->pool->page_count == \at(ring->pool->page_count, Pre) &&
+	      ring->pool->page_size == \at(ring->pool->page_size, Pre); */
+	/*@ assert ring_shape_after_take:
+	      ring->first_slot == \at(ring->first_slot, Pre) &&
+	      ring->page_size == \at(ring->page_size, Pre) &&
+	      ring->page_count == page_count; */
 
 	/* Read off pool_take's postcondition rather than carried across the
 	 * write: pool_wf already says every page of the pool is well-formed, and
@@ -184,11 +281,44 @@ normfs_wal_ring_retain_page(struct normfs_wal_ring *ring, uint64_t ring_id)
 	                   (0 .. (ring->page_count + 1) * ring->page_size - 1)); */
 
 	/*@ ghost taken: ; */
-	ring->page_count = ring->page_count + 1u;
+	ring->page_count = page_count + 1u;
 
+	/*@ assert ring_shape_unchanged:
+	      ring->first_slot == \at(ring->first_slot, Pre) &&
+	      ring->page_size == \at(ring->page_size, Pre); */
+	/*@ assert ring_pool_layout_final:
+	      ring->page_size == ring->pool->page_size &&
+	      ring->pages == ring->pool->pages + ring->first_slot &&
+	      ring->arena == ring->pool->arena + ring->first_slot * ring->page_size; */
+	/*@ assert ring_width_final: ring->page_count == page_count + 1; */
 	/* The frame's conclusion as an equality between the two states, which is
 	 * what the separations above feed directly; well-formedness follows by
 	 * rewriting rather than by reproving. */
+	/*@ assert pages_unchanged_by_count_bump:
+	      \forall integer k; 0 <= k < ring->page_count ==>
+	        ring->pages[k].buf == \at(ring->pages[k].buf, taken) &&
+	        ring->pages[k].cap == \at(ring->pages[k].cap, taken) &&
+	        ring->pages[k].count == \at(ring->pages[k].count, taken) &&
+	        ring->pages[k].used_bytes == \at(ring->pages[k].used_bytes, taken) &&
+	        ring->pages[k].first_entry_id ==
+	          \at(ring->pages[k].first_entry_id, taken) &&
+	        ring->pages[k].last_entry_id ==
+	          \at(ring->pages[k].last_entry_id, taken); */
+	/*@ assert pool_scalars_unchanged_by_count_bump:
+	      ring->pool->page_count == \at(ring->pool->page_count, taken) &&
+	      ring->pool->page_size == \at(ring->pool->page_size, taken); */
+	/*@ assert pool_owners_unchanged_by_count_bump:
+	      \forall integer k; 0 <= k < ring->pool->page_count ==>
+	        ring->pool->owner[k] == \at(ring->pool->owner[k], taken); */
+	/*@ assert pool_pages_unchanged_by_count_bump:
+	      \forall integer k; 0 <= k < ring->pool->page_count ==>
+	        ring->pool->pages[k].cap == \at(ring->pool->pages[k].cap, taken) &&
+	        ring->pool->pages[k].used_bytes ==
+	          \at(ring->pool->pages[k].used_bytes, taken) &&
+	        ring->pool->pages[k].first_entry_id ==
+	          \at(ring->pool->pages[k].first_entry_id, taken) &&
+	        ring->pool->pages[k].last_entry_id ==
+	          \at(ring->pool->pages[k].last_entry_id, taken); */
 	/*@ assert offsets_unchanged_by_count_bump:
 	      \forall integer k, i;
 	        0 <= k < ring->page_count && 0 <= i < ring->pages[k].count ==>
@@ -201,20 +331,48 @@ normfs_wal_ring_retain_page(struct normfs_wal_ring *ring, uint64_t ring_id)
 	          normfs_wal_page_offset_logic(&ring->pool->pages[k], i) ==
 	            \at(normfs_wal_page_offset_logic(&ring->pool->pages[k], i),
 	                taken); */
-	/*@ assert pages_unchanged_by_count_bump:
-	      \forall integer k; 0 <= k < ring->page_count ==>
-	        ring->pages[k].buf == \at(ring->pages[k].buf, taken) &&
-	        ring->pages[k].cap == \at(ring->pages[k].cap, taken) &&
-	        ring->pages[k].count == \at(ring->pages[k].count, taken) &&
-	        ring->pages[k].used_bytes == \at(ring->pages[k].used_bytes, taken) &&
-	        ring->pages[k].first_entry_id ==
-	          \at(ring->pages[k].first_entry_id, taken) &&
-	        ring->pages[k].last_entry_id ==
-	          \at(ring->pages[k].last_entry_id, taken); */
+	/*@ assert pool_page_layouts_final:
+	      \forall integer k; 0 <= k < ring->pool->page_count ==>
+	        normfs_wal_page_layout(&ring->pool->pages[k]); */
+	/*@ assert pool_page_offsets_final:
+	      \forall integer k; 0 <= k < ring->pool->page_count ==>
+	        normfs_wal_page_offsets_wf(&ring->pool->pages[k]); */
+	/*@ assert pool_page_ids_final:
+	      \forall integer k; 0 <= k < ring->pool->page_count ==>
+	        normfs_wal_page_ids_wf(&ring->pool->pages[k]); */
+	/*@ assert pool_pages_wf_final:
+	      \forall integer k; 0 <= k < ring->pool->page_count ==>
+	        normfs_wal_page_wf(&ring->pool->pages[k]); */
+	/*@ assert pool_arena_valid_final:
+	      \valid(ring->pool->arena +
+	        (0 .. ring->pool->page_count * ring->pool->page_size - 1)); */
+	/*@ assert pool_buffers_final:
+	      \forall integer k; 0 <= k < ring->pool->page_count ==>
+	        ring->pool->pages[k].buf ==
+	          ring->pool->arena + k * ring->pool->page_size; */
+	/*@ ghost normfs_wal_ring_fold_pool_layout(ring->pool); */
+	/*@ assert pool_layout_final: normfs_wal_pool_layout(ring->pool); */
+	/*@ assert pool_sep_final: normfs_wal_pool_sep(ring->pool); */
+	/*@ assert pool_caps_final:
+	      \forall integer k; 0 <= k < ring->pool->page_count ==>
+	        ring->pool->pages[k].cap == ring->pool->page_size; */
+	/*@ assert pool_valid_final:
+	      \valid(ring->pool) &&
+	      \valid(ring->pool->pages + (0 .. ring->pool->page_count - 1)) &&
+	      \valid(ring->pool->owner + (0 .. ring->pool->page_count - 1)); */
+	/*@ assert pool_bounds_final:
+	      ring->pool->page_count >= 1 &&
+	      ring->pool->page_size >= NORMFS_WAL_ENTRY_V1_MIN_SIZE + 4 &&
+	      ring->pool->page_size <= 0xFFFFFFFF; */
+	/*@ assert pool_pages_and_caps_final:
+	      \forall integer k; 0 <= k < ring->pool->page_count ==>
+	        normfs_wal_page_wf(&ring->pool->pages[k]) &&
+	        ring->pool->pages[k].cap == ring->pool->page_size; */
+	/*@ ghost normfs_wal_ring_fold_pool_wf(ring->pool); */
+	/*@ assert pool_wf_final: normfs_wal_pool_wf(ring->pool); */
 	/*@ assert pages_wf_final:
 	      \forall integer k; 0 <= k < ring->page_count ==>
 	        normfs_wal_page_wf(&ring->pages[k]); */
-	/*@ assert pool_wf_final: normfs_wal_pool_wf(ring->pool); */
 
 	/* After the write, where the counter already reads what the
 	 * postconditions ask about. */
@@ -236,6 +394,9 @@ normfs_wal_ring_retain_page(struct normfs_wal_ring *ring, uint64_t ring_id)
 	/* Narrowed one side at a time. Both at once -- the descriptor sub-range
 	 * against the arena sub-range -- is two inclusions to find in one step,
 	 * and that is the step neither prover takes. */
+	/*@ assert ring_pages_subset:
+	      \subset(ring->pages + (0 .. ring->page_count - 1),
+	              ring->pool->pages + (0 .. ring->pool->page_count - 1)); */
 	/*@ assert sep_ring_pages_vs_pool_arena:
 	      \separated(ring->pages + (0 .. ring->page_count - 1),
 	                 ring->pool->arena +
@@ -257,14 +418,40 @@ normfs_wal_ring_retain_page(struct normfs_wal_ring *ring, uint64_t ring_id)
 	                 ring->arena +
 	                   (0 .. ring->page_count * ring->page_size - 1)); */
 
+	/*@ assert active_unchanged:
+	      ring->active == \at(ring->active, Pre) &&
+	      ring->next_entry_id == \at(ring->next_entry_id, Pre); */
+	/*@ assert count_grew: ring->page_count == \at(ring->page_count, Pre) + 1; */
+	/*@ assert active_in_range_final: ring->active < ring->page_count; */
+	/*@ assert active_page_unchanged:
+	      ring->pages[ring->active].first_entry_id ==
+	        \at(ring->pages[ring->active].first_entry_id, Pre) &&
+	      ring->pages[ring->active].count ==
+	        \at(ring->pages[ring->active].count, Pre); */
+	/*@ assert active_id_run_final:
+	      ring->pages[ring->active].first_entry_id +
+	        (integer)ring->pages[ring->active].count == ring->next_entry_id; */
+	/*@ assert scalar_wf_final: normfs_wal_ring_scalar_wf(ring); */
+	/*@ assert layout_pred_final: normfs_wal_ring_layout(ring); */
+	/*@ assert pages_wf_pred_final: normfs_wal_ring_pages_wf(ring); */
+
 	/* Folded back into the predicates the postconditions ask for. */
 	/*@ assert sep_pred_final: normfs_wal_ring_sep(ring); */
-	/*@ assert in_pool_final: normfs_wal_ring_in_pool(ring, ring_id); */
 	/*@ assert owner_final:
 	      \forall integer k; 0 <= k < ring->page_count ==>
 	        ring->pool->owner[ring->first_slot + k] == ring_id; */
 	/*@ assert slots_fit_final:
 	      ring->first_slot + ring->page_count <= ring->pool->page_count; */
+	/*@ assert sep_ring_vs_pool_final: \separated(ring, ring->pool); */
+	/*@ assert sep_ring_vs_pool_pages_final:
+	      \separated(ring, ring->pool->pages + (0 .. ring->pool->page_count - 1)); */
+	/*@ assert sep_ring_vs_pool_owner_final:
+	      \separated(ring, ring->pool->owner + (0 .. ring->pool->page_count - 1)); */
+	/*@ assert sep_ring_vs_pool_arena_final:
+	      \separated(ring, ring->pool->arena +
+	                   (0 .. ring->pool->page_count * ring->pool->page_size - 1)); */
+	/*@ ghost normfs_wal_ring_fold_in_pool(ring, ring_id); */
+	/*@ assert in_pool_final: normfs_wal_ring_in_pool(ring, ring_id); */
 }
 
 void

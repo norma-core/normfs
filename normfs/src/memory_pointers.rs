@@ -10,8 +10,16 @@ use uintn::UintN;
 const POINTERS_FILE: &str = ".memory_pointers";
 const POINTERS_TMP_FILE: &str = ".memory_pointers.tmp";
 
+/// What survives a restart for a queue that keeps no local files: the last
+/// id, and for a cloud-direct queue the file that id landed in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Pointer {
+    pub id: u64,
+    pub file: Option<u64>,
+}
+
 struct PointerState {
-    queues: HashMap<String, u64>,
+    queues: HashMap<String, Pointer>,
     dirty: bool,
 }
 
@@ -44,22 +52,50 @@ impl MemoryPointers {
     }
 
     pub(crate) fn last_id(&self, queue: &QueueId) -> Option<UintN> {
-        let state = self.state.lock().unwrap();
-        state.queues.get(queue.as_str()).copied().map(UintN::from)
+        self.pointer(queue).map(|p| UintN::from(p.id))
     }
 
+    pub(crate) fn last_landed(&self, queue: &QueueId) -> Option<(UintN, UintN)> {
+        let p = self.pointer(queue)?;
+        Some((UintN::from(p.id), UintN::from(p.file?)))
+    }
+
+    fn pointer(&self, queue: &QueueId) -> Option<Pointer> {
+        let state = self.state.lock().unwrap();
+        state.queues.get(queue.as_str()).copied()
+    }
+
+    /// Records the last accepted id; the flusher writes it out within its
+    /// interval, which is the loss a memory queue accepts.
     pub(crate) fn mark(&self, queue: &QueueId, id: &UintN) -> Result<(), Error> {
-        let id = id.to_u64().map_err(|e| {
-            Error::new(
-                ErrorKind::InvalidInput,
-                format!("memory-only pointers support u64 ids only: {e}"),
-            )
-        })?;
+        self.advance(queue, id, None)
+    }
+
+    /// Records that `file_id` holding ids up to `last_id` is in the cloud, and
+    /// writes it out before returning: the next life starts from this, and a
+    /// stale one would overwrite that object.
+    pub(crate) fn mark_landed(
+        &self,
+        queue: &QueueId,
+        last_id: &UintN,
+        file_id: &UintN,
+    ) -> Result<(), Error> {
+        self.advance(queue, last_id, Some(file_id))?;
+        self.flush_if_dirty()
+    }
+
+    fn advance(&self, queue: &QueueId, id: &UintN, file: Option<&UintN>) -> Result<(), Error> {
+        let id = to_u64(id, "id")?;
+        let file = file.map(|f| to_u64(f, "file id")).transpose()?;
 
         let mut state = self.state.lock().unwrap();
-        let entry = state.queues.entry(queue.as_str().to_string()).or_insert(id);
-        if id >= *entry {
-            *entry = id;
+        let entry = state
+            .queues
+            .entry(queue.as_str().to_string())
+            .or_insert(Pointer { id, file });
+        if id >= entry.id {
+            entry.id = id;
+            entry.file = file.or(entry.file);
             state.dirty = true;
         }
         Ok(())
@@ -97,27 +133,54 @@ impl MemoryPointers {
         })
     }
 
-    fn write_snapshot(&self, snapshot: &HashMap<String, u64>) -> Result<(), Error> {
+    fn write_snapshot(&self, snapshot: &HashMap<String, Pointer>) -> Result<(), Error> {
         let mut entries: Vec<_> = snapshot.iter().collect();
         entries.sort_by(|(a, _), (b, _)| a.cmp(b));
 
         let mut file = std::fs::File::create(&self.tmp_path)?;
         file.write_all(b"# normfs memory-only pointers v1\n")?;
-        for (queue, id) in entries {
+        for (queue, pointer) in entries {
             file.write_all(queue.as_bytes())?;
             file.write_all(b"\t")?;
-            file.write_all(id.to_string().as_bytes())?;
+            file.write_all(pointer.id.to_string().as_bytes())?;
+            if let Some(f) = pointer.file {
+                file.write_all(b"\t")?;
+                file.write_all(f.to_string().as_bytes())?;
+            }
             file.write_all(b"\n")?;
         }
         file.sync_all()?;
         drop(file);
 
         std::fs::rename(&self.tmp_path, &self.path)?;
+        std::fs::File::open(self.path.parent().unwrap_or(Path::new(".")))?.sync_all()?;
         Ok(())
     }
 }
 
-fn parse_pointers(contents: &str) -> Result<HashMap<String, u64>, Error> {
+impl normfs_cloud::LandedIndex for MemoryPointers {
+    fn mark_landed(
+        &self,
+        queue: &QueueId,
+        last_entry_id: &UintN,
+        file_id: &UintN,
+    ) -> Result<(), Error> {
+        MemoryPointers::mark_landed(self, queue, last_entry_id, file_id)
+    }
+}
+
+fn to_u64(n: &UintN, what: &str) -> Result<u64, Error> {
+    n.to_u64().map_err(|e| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            format!("memory pointers support u64 {what}s only: {e}"),
+        )
+    })
+}
+
+/// `queue\tid` or `queue\tid\tfile`; the third column is the cloud-direct
+/// queue's last file and a v1 file without it still parses.
+fn parse_pointers(contents: &str) -> Result<HashMap<String, Pointer>, Error> {
     let mut queues = HashMap::new();
     for (line_no, line) in contents.lines().enumerate() {
         let line = line.trim_end();
@@ -125,19 +188,24 @@ fn parse_pointers(contents: &str) -> Result<HashMap<String, u64>, Error> {
             continue;
         }
 
-        let (queue, id) = line.split_once('\t').ok_or_else(|| {
-            Error::new(
+        let mut cols = line.split('\t');
+        let (Some(queue), Some(id)) = (cols.next(), cols.next()) else {
+            return Err(Error::new(
                 ErrorKind::InvalidData,
                 format!("invalid memory pointer line {}", line_no + 1),
-            )
-        })?;
-        let id = id.parse::<u64>().map_err(|e| {
-            Error::new(
-                ErrorKind::InvalidData,
-                format!("invalid memory pointer id on line {}: {e}", line_no + 1),
-            )
-        })?;
-        queues.insert(queue.to_string(), id);
+            ));
+        };
+        let parse = |field: &str, what: &str| {
+            field.parse::<u64>().map_err(|e| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    format!("invalid memory pointer {what} on line {}: {e}", line_no + 1),
+                )
+            })
+        };
+        let id = parse(id, "id")?;
+        let file = cols.next().map(|f| parse(f, "file id")).transpose()?;
+        queues.insert(queue.to_string(), Pointer { id, file });
     }
     Ok(queues)
 }

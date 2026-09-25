@@ -94,6 +94,8 @@ if(FRAMAC)
         normfs_wal_page_offset
         normfs_wal_page_entry_id
         normfs_wal_page_find
+        normfs_wal_page_cut
+        normfs_wal_page_first_from
         normfs_wal_page_pin
         normfs_wal_page_unpin
         normfs_wal_page_reusable)
@@ -104,19 +106,13 @@ if(FRAMAC)
     # discarded, release_page the one place a page crosses to another queue,
     # and skip_entry the one place the id sequence moves without a record
     # behind it.
-    #
-    # retain_page is excluded. It carries no durability clause -- a free page
-    # belongs to nobody and holds nothing anyone is owed -- so what is unproved
-    # is well-formedness, not the theorem. Its open goals are all one step:
-    # narrowing a \separated from the pool's whole arena to the slice one ring
-    # holds, which the provers reject outright rather than time out on. At
-    # NORMFS_WP_TIMEOUT per goal and two provers each, a handful of those
-    # outlasts the CI job's budget and takes every other function's verdict
-    # with it. Its callee pool_take is proven, and the WalRing Rust tests cover
-    # it; adding it back to this list is how to see where the proof stands.
 
     set(NORMFS_WAL_RING_WP_FCTS
+        normfs_wal_ring_fold_pool_layout
+        normfs_wal_ring_fold_pool_wf
+        normfs_wal_ring_fold_in_pool
         normfs_wal_ring_init
+        normfs_wal_ring_retain_page
         normfs_wal_ring_try_append
         normfs_wal_ring_set_essential
         normfs_wal_ring_find_reusable

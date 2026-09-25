@@ -1,14 +1,13 @@
 use bytes::Bytes;
-use normfs::{Error, NormFS, NormFsSettings, PersistenceMode, ReadPosition};
+use normfs::{Error, NormFS, NormFsSettings, ReadPosition};
 use std::time::Duration;
 use tempfile::TempDir;
 use uintn::UintN;
 
 fn memory_only_settings() -> NormFsSettings {
     NormFsSettings {
-        persistence_mode: PersistenceMode::MemoryOnly,
         memory_pointers_flush_interval: Duration::from_millis(10),
-        ..Default::default()
+        ..NormFsSettings::memory_only()
     }
 }
 

@@ -293,6 +293,19 @@ pub struct Stranded {
     pub last_entry_id: u64,
 }
 
+/// Every unwritten byte a file has, taken in one go and owned by the taker.
+///
+/// The page-per-file path has no handover bound: the append gate orders the
+/// records and a file's pages stop changing when the next page opens. So a
+/// file is taken whole, once, cursors moving with the take, and the sink
+/// retries from its own copy -- as [`PagePool::take_stranded`] already does.
+#[derive(Debug)]
+pub struct FileRuns {
+    pub runs: Vec<(PendingWrite, Bytes)>,
+    pub first_entry_id: u64,
+    pub last_entry_id: u64,
+}
+
 struct Inner {
     ring: WalRing,
     /// Per page: how many of its bytes the file writer has taken. A page is
@@ -330,17 +343,60 @@ struct Inner {
     stranded: BTreeMap<u64, u64>,
 }
 
-/// The offset table is only defined below `count`, which
-/// `normfs_wal_page_offset` asserts, so the walk stops there.
 fn first_id_at(inner: &Inner, k: usize, from: usize) -> Option<u64> {
     let first = inner.ring.page_first_entry_id(k)?;
-    let count = inner.ring.page_len(k);
-    for i in 0..count {
-        if inner.ring.page_entry_offset(k, i) >= from {
-            return Some(first + i as u64);
+    let index = inner.ring.page_first_index_from(k, from)?;
+    Some(first + index as u64)
+}
+
+fn take_file_locked(inner: &mut Inner, epoch: u64) -> Option<FileRuns> {
+    let count = inner.ring.page_count();
+    let mut runs: Vec<(PendingWrite, Bytes)> = Vec::new();
+
+    for k in 0..count {
+        if inner.page_epoch[k] != epoch {
+            continue;
         }
+        let used = inner.ring.page_bytes(k).len();
+        let from = inner.written[k];
+        if from >= used || inner.ring.page_len(k) == 0 {
+            continue;
+        }
+        let (Some(first_entry_id), Some(last_entry_id)) = (
+            first_id_at(inner, k, from),
+            inner.ring.page_last_entry_id(k),
+        ) else {
+            continue;
+        };
+        runs.push((
+            PendingWrite {
+                page: k,
+                from,
+                to: used,
+                first_entry_id,
+                last_entry_id,
+            },
+            Bytes::copy_from_slice(&inner.ring.page_bytes(k)[from..used]),
+        ));
     }
-    None
+
+    if runs.is_empty() {
+        return None;
+    }
+    runs.sort_by_key(|(w, _)| w.first_entry_id);
+
+    for (write, _) in &runs {
+        let PendingWrite { page, to, .. } = *write;
+        let taken = to - inner.written[page];
+        inner.written[page] = to;
+        inner.unwritten = inner.unwritten.saturating_sub(taken);
+    }
+
+    Some(FileRuns {
+        first_entry_id: runs[0].0.first_entry_id,
+        last_entry_id: runs[runs.len() - 1].0.last_entry_id,
+        runs,
+    })
 }
 
 impl Inner {
@@ -690,6 +746,12 @@ impl PagePool {
         self.inner.lock().unwrap().ring.page_count()
     }
 
+    /// Bytes per page, which on the page-per-file path is also how wide a
+    /// file's data can get.
+    pub fn page_size(&self) -> usize {
+        self.inner.lock().unwrap().ring.page_size()
+    }
+
     /// This pool's slot range in the shared arena, if it has one.
     pub fn slot_range(&self) -> Option<SlotRange> {
         self.inner.lock().unwrap().ring.slot_range()
@@ -799,6 +861,35 @@ impl PagePool {
             inner.page_epoch[k] = 0;
         }
         inner.handed_through = None;
+    }
+
+    /// Arms the pool so that every page is its own file: a zero threshold is
+    /// crossed by any record, so a file ends at the next page to open.
+    pub fn arm_page_files(&self, header_len: u64) {
+        self.arm_file_fill(0, header_len);
+    }
+
+    /// Takes file `epoch` whole: every unwritten byte on a page stamped with
+    /// it. Cursors advance with the take, so a second call finds nothing.
+    /// For a closed epoch; the open one is still growing.
+    pub fn take_file(&self, epoch: u64) -> Option<FileRuns> {
+        let mut inner = self.inner.lock().unwrap();
+        take_file_locked(&mut inner, epoch)
+    }
+
+    /// Ends the open file where it stands and takes it, under one lock: the
+    /// next append re-stamps the active page with the new epoch, and a take
+    /// after it would file the old tail under the new file. `None`, and no
+    /// epoch move, when nothing is owed -- a file is never a header alone.
+    pub fn seal_open_file(&self) -> Option<(u64, FileRuns)> {
+        let mut inner = self.inner.lock().unwrap();
+        let epoch = inner.fill.as_ref()?.epoch;
+        let runs = take_file_locked(&mut inner, epoch)?;
+        let fill = inner.fill.as_mut().expect("checked above");
+        fill.epoch += 1;
+        fill.used = fill.header_len;
+        fill.has_written = false;
+        Some((epoch, runs))
     }
 
     /// Bytes charged to the open file so far, including its header. For tests.
@@ -974,7 +1065,9 @@ impl PagePool {
                 AppendOutcome::Full => return Ok(None),
             }
         };
-        if over_watermark {
+        // A rotation completes a file on the page-per-file path; the WAL
+        // writer gets a spare wakeup out of it, one idle check.
+        if over_watermark || placed.rotate == RotateHint::Before {
             self.signal_flush();
         }
         Ok(Some(placed))
@@ -1200,12 +1293,8 @@ impl PagePool {
             if first_entry_id > bound {
                 continue;
             }
-            let (to, last_entry_id) = if last_entry_id <= bound {
-                (used, last_entry_id)
-            } else {
-                let next = (bound - first_entry_id + 1) as u32;
-                (inner.ring.page_entry_offset(k, next), bound)
-            };
+            let to = inner.ring.page_cut(k, bound.saturating_add(1));
+            let last_entry_id = last_entry_id.min(bound);
             if from >= to {
                 continue;
             }
@@ -1284,12 +1373,8 @@ impl PagePool {
             if first_entry_id > bound {
                 continue;
             }
-            let (to, last_entry_id) = if last_entry_id <= bound {
-                (used, last_entry_id)
-            } else {
-                let next = (bound - first_entry_id + 1) as u32;
-                (inner.ring.page_entry_offset(k, next), bound)
-            };
+            let to = inner.ring.page_cut(k, bound.saturating_add(1));
+            let last_entry_id = last_entry_id.min(bound);
             if from >= to {
                 continue;
             }

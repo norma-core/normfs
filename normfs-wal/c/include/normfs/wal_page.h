@@ -198,6 +198,47 @@ uint64_t normfs_wal_page_entry_id(struct normfs_wal_page *page, uint32_t index);
 struct normfs_wal_page_find_result
 normfs_wal_page_find(struct normfs_wal_page *page, uint64_t entry_id);
 
+/*
+ * Where a page splits into ids below entry_id and ids at or above it. A flush
+ * bounded at some id takes buf[from .. cut(bound + 1)); the neighbour clause
+ * is what proves the cut falls between two entries and never inside one.
+ */
+/*@ requires normfs_wal_page_wf(page);
+    assigns \nothing;
+    ensures \result <= page->used_bytes;
+    ensures (page->count == 0 || entry_id > page->last_entry_id) ==>
+            \result == page->used_bytes;
+    ensures (page->count > 0 && entry_id <= page->first_entry_id) ==>
+            \result == normfs_wal_page_offset_logic(page, 0);
+    ensures (page->count > 0 &&
+             page->first_entry_id < entry_id <= page->last_entry_id) ==>
+            \result == normfs_wal_page_offset_logic(page,
+                          entry_id - page->first_entry_id);
+    ensures (page->count > 0 &&
+             page->first_entry_id < entry_id <= page->last_entry_id) ==>
+            normfs_wal_page_offset_logic(page, entry_id - page->first_entry_id - 1)
+              < \result;
+*/
+size_t normfs_wal_page_cut(struct normfs_wal_page *page, uint64_t entry_id);
+
+/*
+ * The inverse: the first entry beginning at or after byte `from`, which names
+ * the first id a writer resuming mid-page is about to take.
+ */
+/*@ requires normfs_wal_page_wf(page);
+    assigns \nothing;
+    ensures \result.found != 0 ==>
+            \result.index < page->count &&
+            normfs_wal_page_offset_logic(page, \result.index) >= from &&
+            (\forall integer j; 0 <= j < \result.index ==>
+               normfs_wal_page_offset_logic(page, j) < from);
+    ensures \result.found == 0 ==>
+            (\forall integer j; 0 <= j < page->count ==>
+               normfs_wal_page_offset_logic(page, j) < from);
+*/
+struct normfs_wal_page_find_result
+normfs_wal_page_first_from(struct normfs_wal_page *page, size_t from);
+
 /*@ requires \valid(page);
     requires page->pin_count < 0xFFFFFFFF;
     assigns page->pin_count;
