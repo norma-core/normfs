@@ -50,12 +50,31 @@ jobs:
             docker save normfs-verify:pinned -o /tmp/verify-image/image.tar
           fi
 
+  targets:
+    name: WP targets
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      targets: ${{ steps.list.outputs.targets }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: list
+        run: echo "targets=$(make -s -f verify/Makefile list-targets | jq -Rnc '[inputs | select(length > 0)]')" >> "$GITHUB_OUTPUT"
+
+  # One job per target: run serially, a cold cache outlasts any single job's
+  # budget, and one slow module would hide every later module's verdict.
   proofs:
-    name: WP
+    name: WP ${{ matrix.target }}
     # Larger runner: WP is the long pole, the only wall clock anyone waits on.
     runs-on: ubuntu-latest-m
-    needs: image
-    timeout-minutes: 60
+    needs: [image, targets]
+    # Sized for the slowest target on a cold cache, with room for the runner
+    # being twice as slow as a laptop.
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.targets.outputs.targets) }}
     steps:
       - uses: actions/checkout@v7
 
@@ -69,15 +88,19 @@ jobs:
         run: docker load -i /tmp/verify-image/image.tar
 
       # Separate restore and save: the post step is skipped when the timeout
-      # cancels the job, losing every target already proved. The key is unique
+      # cancels the job, losing every goal already proved. The key is unique
       # per attempt because entries are immutable, and carries the image hash so
       # a toolchain bump starts fresh rather than accumulating dead entries.
+      # The second prefix falls back to any target's cache, which is how the
+      # first run per target picks up what an earlier run already proved.
       - name: Restore the proof cache
         uses: actions/cache/restore@v6
         with:
           path: .wp-cache
-          key: wp-cache-${{ hashFiles('verify/Dockerfile') }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: wp-cache-${{ hashFiles('verify/Dockerfile') }}-
+          key: wp-cache-${{ hashFiles('verify/Dockerfile') }}-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            wp-cache-${{ hashFiles('verify/Dockerfile') }}-${{ matrix.target }}-
+            wp-cache-${{ hashFiles('verify/Dockerfile') }}-
 
       # pipefail: the container's status is the signal, tee's is always 0.
       - name: Prove
@@ -87,14 +110,14 @@ jobs:
           docker run --rm -v "$PWD:/work" -w /work \
             -e FRAMAC_WP_CACHE=update -e FRAMAC_WP_CACHEDIR=/work/.wp-cache \
             normfs-verify:pinned \
-            make -f verify/Makefile verify 2>&1 | tee wp.log
+            make -f verify/Makefile ${{ matrix.target }} 2>&1 | tee wp.log
 
       - name: Save the proof cache
         if: always()
         uses: actions/cache/save@v6
         with:
           path: .wp-cache
-          key: wp-cache-${{ hashFiles('verify/Dockerfile') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: wp-cache-${{ hashFiles('verify/Dockerfile') }}-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Summarise
         if: always()
@@ -103,5 +126,15 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: wp-log
+          name: wp-log-${{ matrix.target }}
           path: wp.log
+
+  # The one verdict, under the name the check had before the split.
+  wp:
+    name: WP
+    runs-on: ubuntu-latest
+    needs: proofs
+    if: always()
+    timeout-minutes: 5
+    steps:
+      - run: test "${{ needs.proofs.result }}" = success

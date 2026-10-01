@@ -58,7 +58,7 @@ CMAKE_ARGS := -DCMAKE_BUILD_TYPE=Release
 WP_CACHE_ENV := FRAMAC_WP_CACHE FRAMAC_WP_CACHEDIR
 DOCKER_ENV    = $(foreach v,$(WP_CACHE_ENV),$(if $($(v)),-e $(v)=$($(v))))
 
-.PHONY: all verify $(TARGETS) configure build test clean docker-image docker-verify
+.PHONY: all verify list-targets $(TARGETS) configure build test clean docker-image docker-verify
 
 all: verify
 
@@ -119,6 +119,10 @@ verify: configure
 	    $(MAKE) -f "$(SELF)" $$t || rc=1; \
 	done; \
 	exit $$rc
+
+# The CI matrix, one job per target, built from the same discovery.
+list-targets:
+	@printf '%s\n' $(TARGETS)
 
 docker-image:
 	docker build -t $(IMAGE) -f $(ROOT)/verify/Dockerfile $(ROOT)/verify
