@@ -136,6 +136,18 @@ struct Stall {
     reported: Option<Instant>,
 }
 
+/// A stall as the pool reports it: when it starts, at most every
+/// `STALL_REPORT_EVERY` while it lasts, and once more when it ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StallReport {
+    pub waits: u64,
+    pub stalled_for: Duration,
+    pub resumed: bool,
+}
+
+/// Called on the appender's task, with no pool lock held. It must not wait.
+pub type StallListener = Arc<dyn Fn(StallReport) + Send + Sync>;
+
 /// The share of the pool reads may hold pinned at once, as a divisor: pages
 /// beyond `page_count / PIN_SHARE_DIVISOR` are copied out rather than borrowed.
 ///
@@ -593,6 +605,7 @@ pub struct PagePool {
     /// Never held across `inner`: it is taken, a decision is read out of it,
     /// and released before anything else is locked.
     stall: Mutex<Stall>,
+    on_stall: Mutex<Option<StallListener>>,
 }
 
 impl PagePool {
@@ -625,6 +638,18 @@ impl PagePool {
             arena: None,
             floor: page_count,
             stall: Mutex::new(Stall::default()),
+            on_stall: Mutex::new(None),
+        }
+    }
+
+    pub fn set_stall_listener(&self, listener: StallListener) {
+        *self.on_stall.lock().unwrap() = Some(listener);
+    }
+
+    fn tell_stall(&self, report: StallReport) {
+        let listener = self.on_stall.lock().unwrap().clone();
+        if let Some(listener) = listener {
+            listener(report);
         }
     }
 
@@ -674,6 +699,7 @@ impl PagePool {
             arena: Some(Arc::clone(arena)),
             floor: floor.max(1),
             stall: Mutex::new(Stall::default()),
+            on_stall: Mutex::new(None),
         }
     }
 
@@ -1113,12 +1139,19 @@ impl PagePool {
             }
         };
         match summary {
-            Some((held, waits)) => log::warn!(
-                target: "normfs-wal",
-                "WAL pages available again after {:.1}s, {waits} append(s) had to wait; \
-                 resumed at entry {expected_id}",
-                held.as_secs_f64(),
-            ),
+            Some((held, waits)) => {
+                log::warn!(
+                    target: "normfs-wal",
+                    "WAL pages available again after {:.1}s, {waits} append(s) had to wait; \
+                     resumed at entry {expected_id}",
+                    held.as_secs_f64(),
+                );
+                self.tell_stall(StallReport {
+                    waits,
+                    stalled_for: held,
+                    resumed: true,
+                });
+            }
             None => {
                 log::debug!(target: "normfs-wal", "page pool: resumed at entry {expected_id}")
             }
@@ -1145,6 +1178,11 @@ impl PagePool {
             return false;
         };
         self.warn_stalled(held, waits);
+        self.tell_stall(StallReport {
+            waits,
+            stalled_for: held,
+            resumed: false,
+        });
         true
     }
 

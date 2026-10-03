@@ -261,6 +261,16 @@ impl QueueSettings {
         self.default_config.validate("default")
     }
 
+    /// Puts `config` ahead of every rule for exactly `queue_path`.
+    pub(crate) fn with_override(mut self, queue_path: &str, config: QueueConfig) -> Self {
+        let exact = globset::escape(queue_path);
+        let matcher = Glob::new(&exact)
+            .expect("an escaped path is a valid glob")
+            .compile_matcher();
+        self.rules.insert(0, (matcher, config));
+        self
+    }
+
     pub fn with_default_persist(mut self, persist: Persist) -> Self {
         self.default_config.persist = persist;
         self

@@ -1,6 +1,7 @@
 use normfs_crypto::CryptoContext;
 use normfs_fs::{Fs, Scan, ScanResult};
 use normfs_types::QueueId;
+use normfs_types::events::{self, EventSink};
 use normfs_wal::{AnyWalHeaderError, PagePool, WalError, WalFile, WalHeader, WalStore};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -189,6 +190,7 @@ pub struct PersistStore {
     /// one, so a landed file and a synced file reach memory the same way.
     written_sender: mpsc::UnboundedSender<(QueueId, UintN)>,
     page_writers: std::sync::RwLock<HashMap<QueueId, PageStoreWriter>>,
+    events: EventSink,
 }
 
 impl PersistStore {
@@ -218,10 +220,17 @@ impl PersistStore {
             store_done_rx: Mutex::new(Some(store_done_rx)),
             written_sender,
             page_writers: std::sync::RwLock::new(HashMap::new()),
+            events: events::discard(),
             config,
             crypto_ctx,
             wal_store,
         }
+    }
+
+    /// Where landed store files are reported. Set before the writers start.
+    pub fn with_events(mut self, events: EventSink) -> Self {
+        self.events = events;
+        self
     }
 
     /// Starts the WAL migration workers and hands out the channel every landed
@@ -251,6 +260,7 @@ impl PersistStore {
             self.wal_store.clone(),
             self.range_store.clone(),
             self.disk_usage.clone(),
+            self.events.clone(),
         ));
 
         for worker_id in 0..self.config.num_workers {
@@ -285,6 +295,7 @@ impl PersistStore {
             self.range_store.clone(),
             self.disk_usage.clone(),
             self.store_done_tx.clone(),
+            self.events.clone(),
             fsync,
         ))
     }

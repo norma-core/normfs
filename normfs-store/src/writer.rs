@@ -1,5 +1,6 @@
 use normfs_crypto::CryptoContext;
 use normfs_types::QueueId;
+use normfs_types::events::EventSink;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,6 +18,7 @@ pub struct StoreWriteWorker {
     range_store: Arc<RangeStore>,
     disk_usage: Arc<DiskUsage>,
     crypto_ctx: Arc<CryptoContext>,
+    events: EventSink,
     shutting_down: Arc<AtomicBool>,
 }
 
@@ -27,6 +29,7 @@ impl StoreWriteWorker {
         wal_store: Arc<WalStore>,
         range_store: Arc<RangeStore>,
         disk_usage: Arc<DiskUsage>,
+        events: EventSink,
     ) -> Self {
         Self {
             root_dir,
@@ -34,6 +37,7 @@ impl StoreWriteWorker {
             range_store,
             disk_usage,
             crypto_ctx,
+            events,
             shutting_down: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -160,6 +164,7 @@ impl StoreWriteWorker {
             }
             return;
         }
+        store_file::report_stored(self.events.as_ref(), queue_id, file_id, &sealed);
 
         if let Err(e) = store_done_tx.send((queue_id.clone(), file_id.clone()))
             && !self.shutting_down.load(Ordering::Relaxed)

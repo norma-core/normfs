@@ -46,6 +46,7 @@ async fn the_tracked_size_follows_completions_and_deletions() {
         None,
         Some(forget),
         Arc::new(DiskUsage::default()),
+        events::discard(),
     )
     .await
     .unwrap();
@@ -166,9 +167,17 @@ async fn delayed_and_duplicate_completions_do_not_count_scanned_files_again() {
         write_store_file(root, &queue, id, 100);
     }
     let usage = Arc::new(DiskUsage::default());
-    let monitor = DiskMonitor::new(test_fs(), root, None, None, None, usage.clone())
-        .await
-        .unwrap();
+    let monitor = DiskMonitor::new(
+        test_fs(),
+        root,
+        None,
+        None,
+        None,
+        usage.clone(),
+        events::discard(),
+    )
+    .await
+    .unwrap();
     monitor
         .add_queue(
             &queue,
@@ -240,6 +249,7 @@ async fn concurrent_rescans_and_out_of_order_publications_preserve_usage() {
         None,
         None,
         usage.clone(),
+        events::discard(),
     )
     .await
     .unwrap();
@@ -274,6 +284,15 @@ async fn concurrent_rescans_and_out_of_order_publications_preserve_usage() {
 }
 
 async fn seeded_monitor(root: &Path, queue: &QueueId, max_size: usize) -> QueueMonitor {
+    seeded_monitor_with(root, queue, max_size, events::discard()).await
+}
+
+async fn seeded_monitor_with(
+    root: &Path,
+    queue: &QueueId,
+    max_size: usize,
+    events: EventSink,
+) -> QueueMonitor {
     QueueMonitor::new(
         test_fs(),
         queue.clone(),
@@ -291,9 +310,25 @@ async fn seeded_monitor(root: &Path, queue: &QueueId, max_size: usize) -> QueueM
         None,
         None,
         Arc::new(DiskUsage::default()),
+        events,
     )
     .await
     .unwrap()
+}
+
+#[derive(Default)]
+struct Recorded(Mutex<Vec<SystemEvent>>);
+
+impl events::SystemEvents for Recorded {
+    fn emit(&self, event: SystemEvent) {
+        self.0.lock().unwrap().push(event);
+    }
+}
+
+impl Recorded {
+    fn take(&self) -> Vec<SystemEvent> {
+        std::mem::take(&mut self.0.lock().unwrap())
+    }
 }
 
 async fn publish_store_file(monitor: &QueueMonitor, root: &Path, queue: &QueueId, id: u64) {
@@ -394,4 +429,77 @@ async fn a_file_that_cannot_be_deleted_holds_cleanup_at_its_id() {
     assert!(!store_file_exists(root, &queue, 0x1fff));
     assert!(!store_file_exists(root, &queue, 0x2000));
     assert!(store_file_exists(root, &queue, 0x2001));
+}
+
+#[tokio::test]
+async fn each_deleted_file_is_recorded_with_the_size_left() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let root = temp.path();
+    let queue = QueueIdResolver::new("inst").resolve("cam");
+    for id in 1..=4 {
+        write_store_file(root, &queue, id, 100);
+    }
+    let recorded = Arc::new(Recorded::default());
+    let monitor = seeded_monitor_with(root, &queue, 250, recorded.clone()).await;
+    monitor.check_and_cleanup(false).await.unwrap();
+
+    let evicted = |id: u64, queue_bytes: u64| SystemEvent::FileEvicted {
+        queue: queue.clone(),
+        kind: events::FileKind::Store,
+        file_id: UintN::from(id),
+        file_bytes: 100,
+        queue_bytes,
+        in_cloud: false,
+    };
+    assert_eq!(recorded.take(), vec![evicted(1, 300), evicted(2, 200)]);
+}
+
+#[tokio::test]
+async fn a_held_cleanup_is_reported_once_until_it_moves() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::TempDir::new().unwrap();
+    let root = temp.path();
+    let queue = QueueIdResolver::new("inst").resolve("cam");
+    for id in [0x1fffu64, 0x2000, 0x2001] {
+        write_store_file(root, &queue, id, 100);
+    }
+    let locked = queue
+        .to_store_path(root, &UintN::from(0x1fffu64))
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let probe = locked.join("probe");
+    std::fs::write(&probe, b"").unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+    if std::fs::remove_file(&probe).is_ok() {
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        return;
+    }
+
+    let recorded = Arc::new(Recorded::default());
+    let monitor = seeded_monitor_with(root, &queue, 150, recorded.clone()).await;
+    let first = monitor.check_and_cleanup(false).await;
+    let second = monitor.check_and_cleanup(false).await;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+    first.unwrap();
+    second.unwrap();
+
+    assert_eq!(
+        recorded.take(),
+        vec![SystemEvent::EvictionBlocked {
+            queue: queue.clone(),
+            reason: EvictionBlock::DeleteFailed,
+            held_at: Some(UintN::from(0x1fffu64)),
+            queue_bytes: 300,
+            limit_bytes: 150,
+        }]
+    );
+
+    monitor.check_and_cleanup(false).await.unwrap();
+    let after = recorded.take();
+    assert_eq!(after.len(), 2);
+    assert!(after
+        .iter()
+        .all(|e| matches!(e, SystemEvent::FileEvicted { .. })));
 }
