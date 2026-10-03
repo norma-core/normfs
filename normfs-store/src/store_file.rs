@@ -2,14 +2,15 @@ use bytes::{Bytes, BytesMut};
 use normfs_crypto::CryptoContext;
 use normfs_fs::{Fs, PublishSpec, Runs, TmpMode};
 use normfs_types::QueueId;
+use normfs_types::events::{FileFacts, SystemEvent, SystemEvents};
 use std::io;
 use std::path::Path;
 use uintn::UintN;
 use uuid::Uuid;
 
-use crate::DiskUsage;
 use crate::header::{CompressionType, EncryptionType, FileAuthentication, StoreHeader};
-use crate::store_header_v1::StoreHeaderV1;
+use crate::store_header_v1::{AnyStoreHeader, StoreHeaderV1};
+use crate::{DiskUsage, StoreError};
 
 /// A store file's bytes before they go anywhere: `auth ++ header ++ body`.
 ///
@@ -21,6 +22,8 @@ pub struct SealedFile {
     pub body: Bytes,
     pub entries_before: UintN,
     pub num_entries: UintN,
+    /// Length of the WAL bytes the body was built from.
+    pub raw_len: usize,
 }
 
 impl SealedFile {
@@ -46,6 +49,56 @@ impl SealedFile {
         }
         let minus_one = self.num_entries.sub(&UintN::one()).ok()?;
         Some(self.entries_before.add(&minus_one))
+    }
+
+    pub fn facts(&self, queue: &QueueId, file_id: &UintN) -> Result<FileFacts, StoreError> {
+        let (auth, _) = FileAuthentication::from_bytes(&self.auth)?;
+        let (header, _) = AnyStoreHeader::from_bytes(&self.header)?;
+        Ok(FileFacts {
+            raw_bytes: Some(self.raw_len as u64),
+            ..facts_of(queue, file_id, &auth, &header, self.len() as u64)
+        })
+    }
+}
+
+/// Records a file that reached the local store.
+pub fn report_stored(
+    events: &dyn SystemEvents,
+    queue: &QueueId,
+    file_id: &UintN,
+    file: &SealedFile,
+) {
+    match file.facts(queue, file_id) {
+        Ok(facts) => events.emit(SystemEvent::FileStored(facts)),
+        Err(e) => log::warn!(target: "normfs-store",
+            "queue {queue}: store file {file_id} landed but its blocks do not parse: {e}"),
+    }
+}
+
+/// [`SealedFile::facts`] for a whole store file read back from disk.
+pub fn facts(queue: &QueueId, file_id: &UintN, file: &[u8]) -> Result<FileFacts, StoreError> {
+    let (auth, auth_size) = FileAuthentication::from_bytes(file)?;
+    let (header, _) = AnyStoreHeader::from_bytes(&file[auth_size..])?;
+    Ok(facts_of(queue, file_id, &auth, &header, file.len() as u64))
+}
+
+fn facts_of(
+    queue: &QueueId,
+    file_id: &UintN,
+    auth: &FileAuthentication,
+    header: &AnyStoreHeader,
+    file_bytes: u64,
+) -> FileFacts {
+    FileFacts {
+        queue: queue.clone(),
+        file_id: file_id.clone(),
+        first_id: header.num_entries_before(),
+        num_entries: header.num_entries(),
+        file_bytes,
+        raw_bytes: None,
+        compression: header.compression(),
+        encryption: header.encryption(),
+        content_signature: auth.content_signature,
     }
 }
 
@@ -90,6 +143,7 @@ pub fn build(
         body,
         entries_before,
         num_entries,
+        raw_len: wal_bytes.len(),
     })
 }
 

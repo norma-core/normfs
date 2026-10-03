@@ -5,7 +5,7 @@
 //! *wait*. The previous in-memory store called `reinit` and threw the cache
 //! away, which is silent data loss for anything reading from memory.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::page_pool::{PagePool, Placement, PoolError, RotateHint};
@@ -1265,6 +1265,27 @@ async fn resuming_ends_the_stall() {
 
     pool.note_wait();
     assert_eq!(pool.stall_waits(), Some(1), "the next stall starts at one");
+}
+
+#[tokio::test]
+async fn the_stall_listener_hears_what_the_log_says() {
+    let pool = pool();
+    let n = fill(&pool);
+    let heard = Arc::new(Mutex::new(Vec::new()));
+    let log = heard.clone();
+    pool.set_stall_listener(Arc::new(move |report| log.lock().unwrap().push(report)));
+
+    for _ in 0..3 {
+        pool.note_wait();
+    }
+    assert!(pool.report_stall());
+    assert!(!pool.report_stall());
+    pool.note_resumed(n);
+
+    let heard = heard.lock().unwrap();
+    assert_eq!(heard.len(), 2, "the start and the end, not the quiet pass");
+    assert_eq!((heard[0].waits, heard[0].resumed), (3, false));
+    assert_eq!((heard[1].waits, heard[1].resumed), (3, true));
 }
 
 #[tokio::test]

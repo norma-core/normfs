@@ -1,5 +1,6 @@
 use normfs_fs::Fs;
 use normfs_types::QueueId;
+use normfs_types::events::EventSink;
 use std::future::Future;
 use std::io;
 use std::path::PathBuf;
@@ -35,6 +36,7 @@ pub struct LocalStoreSink {
     range_store: Arc<RangeStore>,
     disk_usage: Arc<DiskUsage>,
     store_done_tx: mpsc::UnboundedSender<(QueueId, UintN)>,
+    events: EventSink,
     fsync: bool,
 }
 
@@ -45,6 +47,7 @@ impl LocalStoreSink {
         range_store: Arc<RangeStore>,
         disk_usage: Arc<DiskUsage>,
         store_done_tx: mpsc::UnboundedSender<(QueueId, UintN)>,
+        events: EventSink,
         fsync: bool,
     ) -> Self {
         Self {
@@ -53,6 +56,7 @@ impl LocalStoreSink {
             range_store,
             disk_usage,
             store_done_tx,
+            events,
             fsync,
         }
     }
@@ -76,6 +80,7 @@ impl SealedFileSink for LocalStoreSink {
                 &self.disk_usage,
             )
             .await?;
+            store_file::report_stored(self.events.as_ref(), queue, file_id, file);
             if let Some(last) = file.last_entry_id() {
                 self.range_store
                     .record_range(queue, file_id, &file.entries_before, &last)

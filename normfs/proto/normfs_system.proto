@@ -1,0 +1,147 @@
+syntax = "proto3";
+
+package normfs.system;
+
+import "normfs.proto";
+
+// One record of the system queue, `<instance>/normfs/system`. Only NormFS
+// writes there; a client write to that path is refused.
+message Event {
+    uint64 unix_ns = 1;
+    // When this process started, so a consumer can tell lives apart even
+    // when the wall clock jumps.
+    uint64 started_unix_ns = 2;
+    // Events this process dropped since the previous one it recorded.
+    // Emission never waits, so a lost event is counted instead.
+    uint64 dropped_before = 3;
+
+    oneof kind {
+        FileStored      file_stored      = 10;
+        FileLanded      file_landed      = 11;
+        UploadFailed    upload_failed    = 12;
+        FileEvicted     file_evicted     = 13;
+        EvictionBlocked eviction_blocked = 14;
+        PoolStalled     pool_stalled     = 15;
+        QueueStarted    queue_started    = 16;
+        QueueClosed     queue_closed     = 17;
+    }
+}
+
+// Values as in the store header.
+enum Compression {
+    C_NONE = 0;
+    C_GZIP = 1;
+    C_XZ   = 2;
+    C_ZSTD = 3;
+}
+
+enum Encryption {
+    E_NONE = 0;
+    E_AES  = 1;
+}
+
+// A store file as its own header and signature block describe it.
+message File {
+    string      queue       = 1;
+    normfs.Id   file_id     = 2;
+    // Holds ids first_id .. first_id + num_entries - 1.
+    normfs.Id   first_id    = 3;
+    uint64      num_entries = 4;
+    uint64      file_bytes  = 5;
+    // WAL bytes before compression; 0 when not known.
+    uint64      raw_bytes   = 6;
+    Compression compression = 7;
+    Encryption  encryption  = 8;
+    // Ed25519 over the file body, the same 64 bytes as in the file, so an
+    // object can be matched against this record without downloading it.
+    bytes       content_signature = 9;
+}
+
+// A store file reached the local store directory.
+message FileStored {
+    File file = 1;
+}
+
+// A store file is in the bucket and its size was read back. Its entries can
+// be read from the cloud from now on.
+message FileLanded {
+    File      file        = 1;
+    string    key         = 2;
+    uint64    duration_ms = 3;
+    // The queue has nothing left to upload up to this file: local copies up
+    // to it may be deleted.
+    normfs.Id landed_through = 4;
+}
+
+// An upload attempt failed; it is retried. A queue's offloader retries every
+// second, and reports attempts 1, 2, 4, 8 and so on.
+message UploadFailed {
+    enum Reason {
+        R_NETWORK       = 0;
+        R_HTTP_STATUS   = 1;
+        R_MISSING       = 2;
+        R_SIZE_MISMATCH = 3;
+        R_LOCAL_READ    = 4;
+    }
+    string    queue       = 1;
+    normfs.Id file_id     = 2;
+    Reason    reason      = 3;
+    uint32    http_status = 4;
+    uint64    local_bytes = 5;
+    uint64    remote_bytes = 6;
+    string    message     = 7;
+}
+
+enum FileKind {
+    FK_WAL   = 0;
+    FK_STORE = 1;
+}
+
+// The disk monitor deleted a local file to keep its queue under the limit.
+message FileEvicted {
+    string    queue       = 1;
+    FileKind  kind        = 2;
+    normfs.Id file_id     = 3;
+    uint64    file_bytes  = 4;
+    uint64    queue_bytes = 5;
+    bool      in_cloud    = 6;
+}
+
+// Over its limit, the queue keeps files it may not delete yet. Reported once
+// per reason until the queue is back under the limit or the reason changes.
+message EvictionBlocked {
+    enum Reason {
+        R_NOT_OFFLOADED = 0;
+        R_DELETE_FAILED = 1;
+        R_NOTHING_FOUND = 2;
+    }
+    string    queue       = 1;
+    Reason    reason      = 2;
+    normfs.Id held_at     = 3;
+    uint64    queue_bytes = 4;
+    uint64    limit_bytes = 5;
+}
+
+// Appenders of a queue are waiting for a page: the files are not draining it
+// fast enough. Reported when the stall starts, every 30 seconds while it
+// lasts, and once with `resumed` when it ends.
+message PoolStalled {
+    string queue          = 1;
+    uint64 waits          = 2;
+    uint64 stalled_for_ms = 3;
+    bool   resumed        = 4;
+}
+
+message QueueStarted {
+    string    queue    = 1;
+    bool      readonly = 2;
+    bool      wal      = 3;
+    bool      store    = 4;
+    bool      cloud    = 5;
+    normfs.Id last_id  = 6;
+}
+
+message QueueClosed {
+    string    queue   = 1;
+    normfs.Id last_id = 2;
+}

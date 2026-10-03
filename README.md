@@ -58,6 +58,15 @@ only its last id survives a restart. `cloud` sends that queue's store files to
 the bucket: offloaded from the local store when there is one, landed there
 directly from the sealed page when there is not.
 
+NormFS records its own work in the queue `normfs/system`, one
+`normfs.system.Event` (`normfs/proto/normfs_system.proto`) per record: each
+store file written and each object landed in the bucket, with its id range,
+sizes and content signature; failed uploads; files the disk monitor deleted or
+could not delete; page stalls; queue starts and closes. Clients can read it
+and cannot write it. It keeps its files locally, offloaded like any store
+queue when cloud is configured, and in memory on a memory-only instance.
+`NormFsSettings::system_queue` turns it off.
+
 ## 🎯 Use Cases
 
 🤖 **Robotics**: High-frequency sensor logging (IMU, lidar, GPS), multi-sensor sync, black box recording, simulation replay, fleet data aggregation

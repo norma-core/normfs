@@ -8,9 +8,13 @@ fn main() -> Result<()> {
     prost_build::Config::new()
         .out_dir(&out_dir)
         .bytes(["."])
-        .compile_protos(&["proto/normfs.proto"], &["proto/"])?;
+        .compile_protos(
+            &["proto/normfs.proto", "proto/normfs_system.proto"],
+            &["proto/"],
+        )?;
 
     println!("cargo:rerun-if-changed=proto/normfs.proto");
+    println!("cargo:rerun-if-changed=proto/normfs_system.proto");
 
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let include_dir = manifest_dir.join("c/include");
