@@ -10,6 +10,7 @@ use writer::WalWriter;
 mod ack_file_writer;
 mod drainer;
 mod errors;
+mod pack_pool;
 mod page_pool;
 mod reader;
 mod wal_arena;
@@ -25,6 +26,7 @@ pub use errors::*;
 #[cfg(any(test, feature = "fault-injection"))]
 pub use normfs_fs::fault::{fail_flushes, heal};
 pub use normfs_fs::{Fs, FsConfig, Scan, ScanResult};
+pub use pack_pool::{PackPool, PackSlot};
 pub use page_pool::{
     FileRuns, MIN_PAGE_SIZE, PagePool, PendingWrite, Placement, PoolError, RotateHint,
     StallListener, StallReport, Stranded, max_record_len,

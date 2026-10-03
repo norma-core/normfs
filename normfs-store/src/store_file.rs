@@ -24,9 +24,31 @@ pub struct SealedFile {
     pub num_entries: UintN,
     /// Length of the WAL bytes the body was built from.
     pub raw_len: usize,
+    /// `auth ++ header ++ body` in one buffer, when they were built that way.
+    whole: Option<Bytes>,
 }
 
 impl SealedFile {
+    /// A file whose three parts lie back to back in `whole`.
+    pub(crate) fn contiguous(
+        whole: Bytes,
+        header_len: usize,
+        entries_before: UintN,
+        num_entries: UintN,
+        raw_len: usize,
+    ) -> Self {
+        let auth_len = FileAuthentication::SIZE;
+        SealedFile {
+            auth: whole.slice(..auth_len),
+            header: whole.slice(auth_len..auth_len + header_len),
+            body: whole.slice(auth_len + header_len..),
+            entries_before,
+            num_entries,
+            raw_len,
+            whole: Some(whole),
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.auth.len() + self.header.len() + self.body.len()
     }
@@ -36,6 +58,9 @@ impl SealedFile {
     }
 
     pub fn to_bytes(&self) -> Bytes {
+        if let Some(whole) = &self.whole {
+            return whole.clone();
+        }
         let mut out = BytesMut::with_capacity(self.len());
         out.extend_from_slice(&self.auth);
         out.extend_from_slice(&self.header);
@@ -144,6 +169,7 @@ pub fn build(
         entries_before,
         num_entries,
         raw_len: wal_bytes.len(),
+        whole: None,
     })
 }
 

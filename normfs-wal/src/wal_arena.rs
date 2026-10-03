@@ -301,6 +301,31 @@ impl WalArena {
         (r.found != 0).then_some(r.index)
     }
 
+    /// Takes any free slot for `owner`, by the proven C scan. For holders of
+    /// single slots, which never grow into a neighbour.
+    pub(crate) fn take_any(&self, owner: u64) -> Option<usize> {
+        assert!(owner != POOL_FREE, "a holder cannot be called FREE");
+        let _slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        let r = unsafe { normfs_wal_pool_find_free(self.pool_ptr(), owner) };
+        if r.found == 0 {
+            return None;
+        }
+        unsafe { normfs_wal_pool_take(self.pool_ptr(), r.index, owner) };
+        Some(r.index)
+    }
+
+    /// Gives back a slot taken with [`WalArena::take_any`]. Its page never held
+    /// a record, so it is reusable under any watermark.
+    pub(crate) fn give_back_any(&self, slot: usize, owner: u64) {
+        let _slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            self.owner_at(slot),
+            owner,
+            "slot {slot} is not held by {owner}"
+        );
+        unsafe { normfs_wal_pool_give_back(self.pool_ptr(), slot, owner, 0) };
+    }
+
     /// How many slots no ring holds.
     pub fn free_pages(&self) -> usize {
         let _slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());

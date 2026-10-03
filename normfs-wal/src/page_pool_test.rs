@@ -1421,7 +1421,7 @@ async fn take_file_takes_one_epoch_whole_and_only_once() {
     let file0 = pool.take_file(0).expect("file 0 is closed and unwritten");
     assert_eq!((file0.first_entry_id, file0.last_entry_id), (0, 1));
     assert_eq!(file0.runs.len(), 1);
-    assert_eq!(file0.runs[0].1.len(), 2 * entry_len);
+    assert_eq!(file0.len(), 2 * entry_len);
     assert!(
         pool.take_file(0).is_none(),
         "the cursors moved with the take"
@@ -1434,6 +1434,28 @@ async fn take_file_takes_one_epoch_whole_and_only_once() {
     let open = pool.take_file(2).unwrap();
     assert_eq!((open.first_entry_id, open.last_entry_id), (4, 4));
     assert!(pool.take_file(3).is_none());
+}
+
+#[tokio::test]
+async fn a_taken_file_keeps_its_pages_pinned_and_can_be_copied_again() {
+    let pool = Arc::new(PagePool::new(4, PAGE_SIZE, 0));
+    pool.arm_page_files(HEADER);
+    place_five(&pool).await;
+
+    let file0 = pool.take_file(0).unwrap();
+    let page = file0.runs[0].page;
+    assert_eq!(pool.pins_on(page), 1);
+    let expected = pool.page_slice(page, file0.runs[0].from, file0.runs[0].to);
+
+    let mut out = vec![0u8; file0.len()];
+    for _ in 0..2 {
+        out.fill(0);
+        assert_eq!(pool.copy_file(&file0, &mut out), file0.len());
+        assert_eq!(out, expected);
+    }
+
+    drop(file0);
+    assert_eq!(pool.pins_on(page), 0);
 }
 
 #[tokio::test]
@@ -1453,10 +1475,7 @@ async fn seal_cuts_the_active_page_between_entries_and_the_next_append_starts_a_
     let (epoch, sealed) = pool.seal_open_file().expect("two records are owed");
     assert_eq!(epoch, 0);
     assert_eq!((sealed.first_entry_id, sealed.last_entry_id), (0, 1));
-    assert_eq!(
-        (sealed.runs[0].0.from, sealed.runs[0].0.to),
-        (0, 2 * entry_len)
-    );
+    assert_eq!((sealed.runs[0].from, sealed.runs[0].to), (0, 2 * entry_len));
     assert_eq!(pool.epoch(), 1);
     assert!(
         pool.seal_open_file().is_none(),
@@ -1474,7 +1493,7 @@ async fn seal_cuts_the_active_page_between_entries_and_the_next_append_starts_a_
     let file1 = pool.take_file(1).unwrap();
     assert_eq!((file1.first_entry_id, file1.last_entry_id), (2, 3));
     assert_eq!(
-        (file1.runs[0].0.from, file1.runs[0].0.to),
+        (file1.runs[0].from, file1.runs[0].to),
         (2 * entry_len, 4 * entry_len),
         "file 1 starts on the seal's cut and holds nothing of file 0"
     );

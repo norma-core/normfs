@@ -305,17 +305,49 @@ pub struct Stranded {
     pub last_entry_id: u64,
 }
 
-/// Every unwritten byte a file has, taken in one go and owned by the taker.
+/// Every unwritten byte a file has, taken in one go.
 ///
 /// The page-per-file path has no handover bound: the append gate orders the
 /// records and a file's pages stop changing when the next page opens. So a
-/// file is taken whole, once, cursors moving with the take, and the sink
-/// retries from its own copy -- as [`PagePool::take_stranded`] already does.
+/// file is taken whole, once, cursors moving with the take. Its pages stay
+/// pinned until this is dropped, so the bytes can be copied out again with
+/// [`PagePool::copy_file`] for every attempt to land it.
 #[derive(Debug)]
 pub struct FileRuns {
-    pub runs: Vec<(PendingWrite, Bytes)>,
+    pub runs: Vec<PendingWrite>,
     pub first_entry_id: u64,
     pub last_entry_id: u64,
+    _pins: FilePins,
+}
+
+impl FileRuns {
+    /// Bytes on the pages, without the file header.
+    pub fn len(&self) -> usize {
+        self.runs.iter().map(|w| w.to - w.from).sum()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.runs.is_empty()
+    }
+}
+
+struct FilePins {
+    pool: Arc<PagePool>,
+    pages: Vec<usize>,
+}
+
+impl Drop for FilePins {
+    fn drop(&mut self) {
+        for &k in &self.pages {
+            self.pool.unpin_page(k);
+        }
+    }
+}
+
+impl std::fmt::Debug for FilePins {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(&self.pages).finish()
+    }
 }
 
 struct Inner {
@@ -361,9 +393,9 @@ fn first_id_at(inner: &Inner, k: usize, from: usize) -> Option<u64> {
     Some(first + index as u64)
 }
 
-fn take_file_locked(inner: &mut Inner, epoch: u64) -> Option<FileRuns> {
+fn take_file_locked(pool: &Arc<PagePool>, inner: &mut Inner, epoch: u64) -> Option<FileRuns> {
     let count = inner.ring.page_count();
-    let mut runs: Vec<(PendingWrite, Bytes)> = Vec::new();
+    let mut runs: Vec<PendingWrite> = Vec::new();
 
     for k in 0..count {
         if inner.page_epoch[k] != epoch {
@@ -380,33 +412,35 @@ fn take_file_locked(inner: &mut Inner, epoch: u64) -> Option<FileRuns> {
         ) else {
             continue;
         };
-        runs.push((
-            PendingWrite {
-                page: k,
-                from,
-                to: used,
-                first_entry_id,
-                last_entry_id,
-            },
-            Bytes::copy_from_slice(&inner.ring.page_bytes(k)[from..used]),
-        ));
+        runs.push(PendingWrite {
+            page: k,
+            from,
+            to: used,
+            first_entry_id,
+            last_entry_id,
+        });
     }
 
     if runs.is_empty() {
         return None;
     }
-    runs.sort_by_key(|(w, _)| w.first_entry_id);
+    runs.sort_by_key(|w| w.first_entry_id);
 
-    for (write, _) in &runs {
+    for write in &runs {
         let PendingWrite { page, to, .. } = *write;
         let taken = to - inner.written[page];
         inner.written[page] = to;
         inner.unwritten = inner.unwritten.saturating_sub(taken);
+        inner.ring.pin(page);
     }
 
     Some(FileRuns {
-        first_entry_id: runs[0].0.first_entry_id,
-        last_entry_id: runs[runs.len() - 1].0.last_entry_id,
+        first_entry_id: runs[0].first_entry_id,
+        last_entry_id: runs[runs.len() - 1].last_entry_id,
+        _pins: FilePins {
+            pool: Arc::clone(pool),
+            pages: runs.iter().map(|w| w.page).collect(),
+        },
         runs,
     })
 }
@@ -898,19 +932,45 @@ impl PagePool {
     /// Takes file `epoch` whole: every unwritten byte on a page stamped with
     /// it. Cursors advance with the take, so a second call finds nothing.
     /// For a closed epoch; the open one is still growing.
-    pub fn take_file(&self, epoch: u64) -> Option<FileRuns> {
+    pub fn take_file(self: &Arc<Self>, epoch: u64) -> Option<FileRuns> {
         let mut inner = self.inner.lock().unwrap();
-        take_file_locked(&mut inner, epoch)
+        take_file_locked(self, &mut inner, epoch)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pins_on(&self, page: usize) -> u32 {
+        self.inner.lock().unwrap().ring.page_pin_count(page)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn page_slice(&self, page: usize, from: usize, to: usize) -> Vec<u8> {
+        self.inner.lock().unwrap().ring.page_bytes(page)[from..to].to_vec()
+    }
+
+    /// Copies `file`'s bytes, in id order, to the front of `out` and returns
+    /// how many. `out` must hold [`FileRuns::len`] bytes.
+    pub fn copy_file(&self, file: &FileRuns, out: &mut [u8]) -> usize {
+        let inner = self.inner.lock().unwrap();
+        let mut at = 0;
+        for w in &file.runs {
+            // The pin keeps the page from being reused, so the run still holds
+            // the ids it was taken with.
+            debug_assert_eq!(first_id_at(&inner, w.page, w.from), Some(w.first_entry_id));
+            let run = &inner.ring.page_bytes(w.page)[w.from..w.to];
+            out[at..at + run.len()].copy_from_slice(run);
+            at += run.len();
+        }
+        at
     }
 
     /// Ends the open file where it stands and takes it, under one lock: the
     /// next append re-stamps the active page with the new epoch, and a take
     /// after it would file the old tail under the new file. `None`, and no
     /// epoch move, when nothing is owed -- a file is never a header alone.
-    pub fn seal_open_file(&self) -> Option<(u64, FileRuns)> {
+    pub fn seal_open_file(self: &Arc<Self>) -> Option<(u64, FileRuns)> {
         let mut inner = self.inner.lock().unwrap();
         let epoch = inner.fill.as_ref()?.epoch;
-        let runs = take_file_locked(&mut inner, epoch)?;
+        let runs = take_file_locked(self, &mut inner, epoch)?;
         let fill = inner.fill.as_mut().expect("checked above");
         fill.epoch += 1;
         fill.used = fill.header_len;
