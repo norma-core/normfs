@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use aes_gcm::{
-    aead::{Aead, KeyInit},
+    aead::{Aead, AeadInPlace, KeyInit},
     Aes256Gcm, Key, Nonce,
 };
 use bytes::Bytes;
@@ -122,12 +122,11 @@ impl CryptoContext {
         Ok(ChaCha20Rng::from_seed(rng_seed))
     }
 
-    pub fn encrypt(
+    fn file_cipher(
         &self,
         queue_id: &QueueId,
         file_id: &UintN,
-        content: &Bytes,
-    ) -> Result<(Bytes, Bytes), CryptoError> {
+    ) -> Result<(Aes256Gcm, [u8; 12]), CryptoError> {
         let mut rng = self.derive_rng(queue_id, file_id)?;
 
         let mut aes_key = [0u8; 32];
@@ -136,16 +135,39 @@ impl CryptoContext {
 
         let mut nonce_bytes = [0u8; 12];
         rng.fill_bytes(&mut nonce_bytes);
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        Ok((cipher, nonce_bytes))
+    }
 
+    pub fn encrypt(
+        &self,
+        queue_id: &QueueId,
+        file_id: &UintN,
+        content: &Bytes,
+    ) -> Result<(Bytes, Bytes), CryptoError> {
+        let (cipher, nonce_bytes) = self.file_cipher(queue_id, file_id)?;
         let ciphertext = cipher
-            .encrypt(nonce, content.as_ref())
+            .encrypt(Nonce::from_slice(&nonce_bytes), content.as_ref())
             .map_err(|_| CryptoError::Encryption)?;
 
         Ok((
             Bytes::copy_from_slice(&nonce_bytes),
             Bytes::from(ciphertext),
         ))
+    }
+
+    /// [`CryptoContext::encrypt`] without allocating: `buf` is encrypted where
+    /// it lies, and the nonce and tag that frame it are returned.
+    pub fn encrypt_in_place(
+        &self,
+        queue_id: &QueueId,
+        file_id: &UintN,
+        buf: &mut [u8],
+    ) -> Result<([u8; 12], [u8; 16]), CryptoError> {
+        let (cipher, nonce_bytes) = self.file_cipher(queue_id, file_id)?;
+        let tag = cipher
+            .encrypt_in_place_detached(Nonce::from_slice(&nonce_bytes), b"", buf)
+            .map_err(|_| CryptoError::Encryption)?;
+        Ok((nonce_bytes, tag.into()))
     }
 
     pub fn decrypt(
@@ -258,6 +280,25 @@ mod tests {
 
         assert_eq!(nonce1, nonce2);
         assert_eq!(ciphertext1, ciphertext2);
+    }
+
+    #[test]
+    fn encrypting_in_place_gives_the_same_bytes() {
+        use normfs_types::QueueIdResolver;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = CryptoContext::open(dir.path()).unwrap();
+        let queue = QueueIdResolver::new("test_instance").resolve("test_queue");
+        let file_id = UintN::from(7u64);
+        let content = Bytes::from_static(b"in place or not, one file format");
+
+        let (nonce, ciphertext) = ctx.encrypt(&queue, &file_id, &content).unwrap();
+        let mut buf = content.to_vec();
+        let (nonce2, tag) = ctx.encrypt_in_place(&queue, &file_id, &mut buf).unwrap();
+
+        assert_eq!(&nonce[..], &nonce2[..]);
+        buf.extend_from_slice(&tag);
+        assert_eq!(&ciphertext[..], &buf[..]);
     }
 
     #[test]

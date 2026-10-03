@@ -453,6 +453,14 @@ impl NormFS {
             fs.clone(),
         ));
 
+        // Page-per-file queues pack one page at a time, so a slot holds the
+        // larger page; one slot per store worker caps packs in flight.
+        let packer = normfs_store::Packer::new(
+            settings.store_cfg.num_workers,
+            normfs_wal::WAL_HEADER_V1_MAX_SIZE
+                + settings.mem_page_size.max(settings.mem_passive_page_size),
+        )
+        .map_err(Error::Io)?;
         let store = PersistStore::new(
             &path,
             settings.store_cfg.clone(),
@@ -460,7 +468,8 @@ impl NormFS {
             wal.clone(),
             wal_entry_send.clone(),
         )
-        .with_events(events.clone());
+        .with_events(events.clone())
+        .with_packer(Arc::new(packer));
 
         store.recover().await?;
 

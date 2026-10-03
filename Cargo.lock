@@ -1537,6 +1537,7 @@ dependencies = [
  "uintn",
  "uuid",
  "zstd",
+ "zstd-sys",
 ]
 
 [[package]]
