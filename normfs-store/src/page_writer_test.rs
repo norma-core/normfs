@@ -119,6 +119,17 @@ async fn settle() {
     tokio::time::sleep(Duration::from_millis(30)).await;
 }
 
+/// For a landing that follows a permit: the writer has been retrying with a
+/// doubling delay, so the next attempt can be further off than `settle`.
+async fn eventually(done: impl Fn() -> bool) {
+    for _ in 0..200 {
+        if done() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
 async fn next_id(rx: &mut mpsc::UnboundedReceiver<(QueueId, UintN)>) -> UintN {
     tokio::time::timeout(Duration::from_secs(1), rx.recv())
         .await
@@ -149,7 +160,7 @@ async fn nothing_is_reported_durable_before_the_sink_returns() {
     );
 
     sink.permits.add_permits(1);
-    settle().await;
+    eventually(|| f.pool.durable_before() == 2).await;
     assert_eq!(sink.landed(), vec![(UintN::one(), Some(UintN::from(1u64)))]);
     assert_eq!(f.pool.durable_before(), 2);
     assert_eq!(next_id(&mut f.written_rx).await, UintN::from(1u64));
@@ -169,7 +180,7 @@ async fn a_sink_that_does_not_land_is_back_pressure_not_loss() {
     assert!(f.pool.try_place_now(4, &RECORD).unwrap().is_none());
 
     sink.permits.add_permits(1);
-    settle().await;
+    eventually(|| f.pool.durable_before() == 2).await;
     assert!(f.pool.try_place_now(4, &RECORD).unwrap().is_some());
     assert_eq!(next_id(&mut f.written_rx).await, UintN::from(1u64));
 }
