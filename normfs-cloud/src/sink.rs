@@ -58,7 +58,7 @@ impl SealedFileSink for CloudSink {
         Box::pin(async move {
             let key = self.downloader.key(queue, file_id);
             let started = Instant::now();
-            if let Err(e) = put_verified(self.downloader.client(), &key, &file.to_bytes()).await {
+            if let Err(e) = put_verified(self.downloader.client(), &key, file.to_bytes()).await {
                 self.events.emit(SystemEvent::UploadFailed {
                     queue: queue.clone(),
                     file_id: file_id.clone(),

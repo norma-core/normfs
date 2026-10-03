@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use rusty_s3::{Bucket, Credentials, S3Action, UrlStyle};
 use std::time::Duration;
 
@@ -57,17 +58,12 @@ impl S3Client {
     pub async fn put_object(
         &self,
         key: &str,
-        data: &[u8],
+        data: Bytes,
     ) -> Result<u16, crate::errors::CloudError> {
         let action = self.bucket.put_object(Some(&self.credentials), key);
         let url = action.sign(PRESIGNED_URL_DURATION);
 
-        let response = self
-            .http_client
-            .put(url.as_str())
-            .body(data.to_vec())
-            .send()
-            .await?;
+        let response = self.http_client.put(url.as_str()).body(data).send().await?;
 
         Ok(response.status().as_u16())
     }
