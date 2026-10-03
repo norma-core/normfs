@@ -1,5 +1,6 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
+use bytes::Bytes;
 use log::{error, info, warn};
 use normfs_fs::{Fs, Scan, ScanResult};
 use normfs_types::QueueId;
@@ -84,7 +85,8 @@ impl From<PutError> for OffloadError {
 /// Puts `data` at `key` and reads its size back. S3 and its lookalikes are
 /// read-after-write consistent for a new key, so the HEAD is the verification
 /// and nothing has to wait for it.
-pub async fn put_verified(client: &S3Client, key: &str, data: &[u8]) -> Result<(), PutError> {
+pub async fn put_verified(client: &S3Client, key: &str, data: Bytes) -> Result<(), PutError> {
+    let local = data.len() as u64;
     let status_code = client
         .put_object(key, data)
         .await
@@ -98,9 +100,9 @@ pub async fn put_verified(client: &S3Client, key: &str, data: &[u8]) -> Result<(
         .await
         .map_err(PutError::Request)?
         .ok_or(PutError::Missing)?;
-    if s3_size != data.len() as u64 {
+    if s3_size != local {
         return Err(PutError::SizeMismatch {
-            local: data.len() as u64,
+            local,
             remote: s3_size,
         });
     }
@@ -379,7 +381,7 @@ impl QueueOffloaderWorker {
         };
 
         let started = Instant::now();
-        if let Err(e) = put_verified(&self.client, &s3_key, &file_data).await {
+        if let Err(e) = put_verified(&self.client, &s3_key, file_data.clone()).await {
             if report {
                 self.report_failure(file_id, e.failure(), &e);
             }
