@@ -18,7 +18,7 @@ mod disk_usage;
 pub use disk_usage::{DiskUsage, QueueBytes};
 pub mod header;
 mod pack;
-pub use pack::Packer;
+pub use pack::{PackError, Packer};
 pub mod page_writer;
 pub mod parser;
 mod ranges;

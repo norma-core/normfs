@@ -11,6 +11,7 @@ use bytes::BytesMut;
 use normfs_crypto::CryptoContext;
 use normfs_types::QueueId;
 use normfs_wal::{PackPool, PackSlot};
+use std::ffi::c_int;
 use std::io;
 use std::sync::{Arc, Mutex};
 use uintn::UintN;
@@ -20,17 +21,91 @@ use crate::store_file::SealedFile;
 use crate::store_header_v1::{STORE_HEADER_V1_MAX_SIZE, StoreHeaderV1};
 
 const AUTH_SIZE: usize = FileAuthentication::SIZE;
-const NONCE_SIZE: usize = 12;
 const TAG_SIZE: usize = 16;
 
-/// `ZSTD_COMPRESSBOUND`: the most a zstd frame of `n` bytes can take.
-fn compress_bound(n: usize) -> usize {
-    const BLOCK: usize = 128 * 1024;
-    n + (n >> 8) + if n < BLOCK { (BLOCK - n) >> 11 } else { 0 }
+// Mirrors NORMFS_STORE_PACK_AUTH_SIZE, which the C layout reserves for it.
+const _: () = assert!(AUTH_SIZE == 152);
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Layout {
+    file_at: usize,
+    header_at: usize,
+    body_at: usize,
+    data_at: usize,
+    data_cap: usize,
+    encrypted: c_int,
 }
 
-fn output_cap(input_cap: usize) -> usize {
-    AUTH_SIZE + STORE_HEADER_V1_MAX_SIZE + NONCE_SIZE + compress_bound(input_cap) + TAG_SIZE
+#[repr(C)]
+struct SizeResult {
+    size: usize,
+    status: c_int,
+}
+
+#[repr(C)]
+struct LayoutResult {
+    layout: Layout,
+    status: c_int,
+}
+
+unsafe extern "C" {
+    fn normfs_store_pack_slot_size(input_cap: usize) -> SizeResult;
+    fn normfs_store_pack_layout(
+        slot_size: usize,
+        input_cap: usize,
+        header_len: usize,
+        encrypted: c_int,
+    ) -> LayoutResult;
+    fn normfs_store_pack_file_len(layout: *const Layout, data_len: usize) -> SizeResult;
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum PackError {
+    InputTooLarge,
+    SlotTooSmall,
+    HeaderTooLarge,
+    DataTooLarge,
+    UnknownStatus(c_int),
+}
+
+impl PackError {
+    fn check(status: c_int) -> Result<(), PackError> {
+        match status {
+            0 => Ok(()),
+            1 => Err(PackError::InputTooLarge),
+            2 => Err(PackError::SlotTooSmall),
+            3 => Err(PackError::HeaderTooLarge),
+            4 => Err(PackError::DataTooLarge),
+            s => Err(PackError::UnknownStatus(s)),
+        }
+    }
+}
+
+impl std::fmt::Display for PackError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PackError::InputTooLarge => write!(f, "pack slot input too large"),
+            PackError::SlotTooSmall => write!(f, "pack slot too small for its input"),
+            PackError::HeaderTooLarge => write!(f, "store header too large for a pack slot"),
+            PackError::DataTooLarge => write!(f, "packed data overflows its slot"),
+            PackError::UnknownStatus(s) => write!(f, "unknown pack slot status {s}"),
+        }
+    }
+}
+
+impl std::error::Error for PackError {}
+
+impl From<PackError> for io::Error {
+    fn from(e: PackError) -> Self {
+        io::Error::new(io::ErrorKind::InvalidInput, e)
+    }
+}
+
+fn slot_size(input_cap: usize) -> Result<usize, PackError> {
+    let r = unsafe { normfs_store_pack_slot_size(input_cap) };
+    PackError::check(r.status)?;
+    Ok(r.size)
 }
 
 pub struct Packer {
@@ -47,7 +122,7 @@ impl Packer {
             .map(|_| Compressor::new(input_cap).map(Mutex::new))
             .collect::<io::Result<_>>()?;
         Ok(Packer {
-            pool: PackPool::new(slots, input_cap + output_cap(input_cap)),
+            pool: PackPool::new(slots, slot_size(input_cap)?),
             input_cap,
             compressors,
         })
@@ -101,37 +176,48 @@ impl Packer {
 
         let encrypted = encryption != EncryptionType::None;
         let index = slot.index();
-        let (input, out) = slot.buf().split_at_mut(self.input_cap);
+        let buf = slot.buf();
+        let r = unsafe {
+            normfs_store_pack_layout(
+                buf.len(),
+                self.input_cap,
+                header_bytes.len(),
+                encrypted as c_int,
+            )
+        };
+        PackError::check(r.status)?;
+        let l = r.layout;
+        let (input, out) = buf.split_at_mut(l.file_at);
         let input = &input[..input_len];
+        let (body_at, data_at) = (l.body_at - l.file_at, l.data_at - l.file_at);
+        let data = &mut out[data_at..data_at + l.data_cap];
 
-        let body_at = AUTH_SIZE + header_bytes.len();
-        let data_at = body_at + if encrypted { NONCE_SIZE } else { 0 };
-        let room = out.len() - if encrypted { TAG_SIZE } else { 0 };
         let data_len = match compression {
             CompressionType::None => {
-                out[data_at..data_at + input.len()].copy_from_slice(input);
+                data[..input.len()].copy_from_slice(input);
                 input.len()
             }
             CompressionType::Zstd => self.compressors[index]
                 .lock()
                 .unwrap()
-                .compress(input, &mut out[data_at..room])?,
+                .compress(input, data)?,
             other => {
                 return Err(io::Error::other(format!(
                     "Unsupported compression type: {other:?}"
                 )));
             }
         };
-        let body_len = if encrypted {
+        let r = unsafe { normfs_store_pack_file_len(&l, data_len) };
+        PackError::check(r.status)?;
+        let file_len = r.size;
+        if encrypted {
             let (nonce, tag) = crypto
                 .encrypt_in_place(queue, file_id, &mut out[data_at..data_at + data_len])
                 .map_err(|e| io::Error::other(e.to_string()))?;
             out[body_at..data_at].copy_from_slice(&nonce);
             out[data_at + data_len..data_at + data_len + TAG_SIZE].copy_from_slice(&tag);
-            NONCE_SIZE + data_len + TAG_SIZE
-        } else {
-            data_len
-        };
+        }
+        let body_len = file_len - body_at;
         out[AUTH_SIZE..body_at].copy_from_slice(&header_bytes);
 
         let header_signature = crypto.sign(&header_bytes);
@@ -142,8 +228,7 @@ impl Packer {
         auth.write_to_bytes(&mut auth_bytes);
         out[..AUTH_SIZE].copy_from_slice(&auth_bytes);
 
-        let file_len = body_at + body_len;
-        let at = self.input_cap;
+        let at = l.file_at;
         let whole = slot.freeze().slice(at..at + file_len);
         Ok(SealedFile::contiguous(
             whole,
