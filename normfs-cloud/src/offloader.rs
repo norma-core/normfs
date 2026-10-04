@@ -91,6 +91,15 @@ pub async fn put_verified(client: &S3Client, key: &str, data: Bytes) -> Result<(
         .put_object(key, data)
         .await
         .map_err(PutError::Request)?;
+    verify_put(client, key, local, status_code).await
+}
+
+async fn verify_put(
+    client: &S3Client,
+    key: &str,
+    local: u64,
+    status_code: u16,
+) -> Result<(), PutError> {
     if status_code != 200 {
         return Err(PutError::Status(status_code));
     }
@@ -369,10 +378,10 @@ impl QueueOffloaderWorker {
 
         info!("Uploading file {:?} to S3 key: {}", file_id, s3_key);
 
-        let file_data = match self.fs.read_whole(&local_path).await {
-            Ok(data) => data,
+        let (file, len, head) = match self.open_for_upload(&local_path).await {
+            Ok(opened) => opened,
             Err(e) => {
-                let e = OffloadError::from(std::io::Error::from(e));
+                let e = OffloadError::from(e);
                 if report {
                     self.report_failure(file_id, UploadFailure::LocalRead, &e);
                 }
@@ -381,7 +390,11 @@ impl QueueOffloaderWorker {
         };
 
         let started = Instant::now();
-        if let Err(e) = put_verified(&self.client, &s3_key, file_data.clone()).await {
+        let put = match self.client.put_object_stream(&s3_key, file, len).await {
+            Ok(status_code) => verify_put(&self.client, &s3_key, len, status_code).await,
+            Err(e) => Err(PutError::Request(e)),
+        };
+        if let Err(e) = put {
             if report {
                 self.report_failure(file_id, e.failure(), &e);
             }
@@ -389,7 +402,7 @@ impl QueueOffloaderWorker {
         }
         let took = started.elapsed();
 
-        let facts = normfs_store::store_file::facts(&self.queue_id, file_id, &file_data)
+        let facts = normfs_store::store_file::facts_of_head(&self.queue_id, file_id, &head, len)
             .inspect_err(|e| {
                 warn!(
                     "Uploaded file {:?} of {} but its blocks do not parse: {}",
@@ -402,6 +415,20 @@ impl QueueOffloaderWorker {
             key: s3_key,
             took,
         })
+    }
+
+    /// The file to stream, its length, and its first bytes for the facts.
+    async fn open_for_upload(
+        &self,
+        path: &std::path::Path,
+    ) -> std::io::Result<(normfs_fs::ReadFile, u64, Vec<u8>)> {
+        use tokio::io::AsyncReadExt;
+        let mut file = self.fs.open_read(path).await?;
+        let len = file.metadata().await?.len();
+        let mut head = vec![0u8; (len as usize).min(normfs_store::store_file::HEAD_LEN)];
+        file.read_exact(&mut head).await?;
+        file.seek(std::io::SeekFrom::Start(0)).await?;
+        Ok((file, len, head))
     }
 
     fn report_failure(&self, file_id: &UintN, failure: UploadFailure, e: &dyn std::fmt::Display) {

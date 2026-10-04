@@ -173,6 +173,36 @@ async fn test_put_get_large_file() {
 }
 
 #[tokio::test]
+async fn test_put_object_stream_sends_every_chunk() {
+    let Some(settings) = skip_if_no_s3() else {
+        return;
+    };
+    let client = create_client(&settings).unwrap();
+    let key = format!(
+        "{}/test-stream-{}.dat",
+        settings.prefix,
+        uuid::Uuid::new_v4()
+    );
+
+    // Not a multiple of the read size, so the last chunk is a short one.
+    let data: Vec<u8> = (0..3 * 1024 * 1024 + 4321u32)
+        .map(|i| (i % 251) as u8)
+        .collect();
+    let status = client
+        .put_object_stream(&key, std::io::Cursor::new(data.clone()), data.len() as u64)
+        .await
+        .unwrap();
+    assert_eq!(status, 200);
+
+    assert_eq!(
+        client.head_object(&key).await.unwrap(),
+        Some(data.len() as u64)
+    );
+    let got = client.get_object(&key).await.unwrap().expect("object");
+    assert_eq!(got, Bytes::from(data));
+}
+
+#[tokio::test]
 async fn test_put_get_multiple_files() {
     let settings = match skip_if_no_s3() {
         Some(s) => s,

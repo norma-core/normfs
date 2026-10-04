@@ -100,11 +100,25 @@ pub fn report_stored(
     }
 }
 
+/// Enough of a store file's start for [`facts_of_head`]: the auth block and
+/// a header of either version.
+pub const HEAD_LEN: usize = 512;
+
 /// [`SealedFile::facts`] for a whole store file read back from disk.
 pub fn facts(queue: &QueueId, file_id: &UintN, file: &[u8]) -> Result<FileFacts, StoreError> {
-    let (auth, auth_size) = FileAuthentication::from_bytes(file)?;
-    let (header, _) = AnyStoreHeader::from_bytes(&file[auth_size..])?;
-    Ok(facts_of(queue, file_id, &auth, &header, file.len() as u64))
+    facts_of_head(queue, file_id, file, file.len() as u64)
+}
+
+/// [`facts`] from the first [`HEAD_LEN`] bytes of a file of `file_len`.
+pub fn facts_of_head(
+    queue: &QueueId,
+    file_id: &UintN,
+    head: &[u8],
+    file_len: u64,
+) -> Result<FileFacts, StoreError> {
+    let (auth, auth_size) = FileAuthentication::from_bytes(head)?;
+    let (header, _) = AnyStoreHeader::from_bytes(&head[auth_size..])?;
+    Ok(facts_of(queue, file_id, &auth, &header, file_len))
 }
 
 fn facts_of(
