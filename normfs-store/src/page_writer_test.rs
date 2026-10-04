@@ -219,7 +219,7 @@ async fn close_reports_a_file_that_did_not_land_and_keeps_trying() {
     assert!(!f.pool.is_fully_durable());
 
     sink.permits.add_permits(1);
-    settle().await;
+    eventually(|| f.pool.is_fully_durable()).await;
     assert_eq!(sink.landed().len(), 1);
     assert!(f.pool.is_fully_durable(), "the background retry landed it");
 }
