@@ -461,6 +461,14 @@ impl NormFS {
                 + settings.mem_page_size.max(settings.mem_passive_page_size),
         )
         .map_err(Error::Io)?;
+        // A WAL file overshoots `max_file_size` by at most the tail of a page.
+        let wal_packer = normfs_store::Packer::new(
+            settings.store_cfg.num_workers,
+            normfs_wal::WAL_HEADER_V1_MAX_SIZE
+                + settings.wal_settings.max_file_size
+                + settings.mem_page_size.max(settings.mem_passive_page_size),
+        )
+        .map_err(Error::Io)?;
         let store = PersistStore::new(
             &path,
             settings.store_cfg.clone(),
@@ -469,7 +477,8 @@ impl NormFS {
             wal_entry_send.clone(),
         )
         .with_events(events.clone())
-        .with_packer(Arc::new(packer));
+        .with_packer(Arc::new(packer))
+        .with_wal_packer(Arc::new(wal_packer));
 
         store.recover().await?;
 

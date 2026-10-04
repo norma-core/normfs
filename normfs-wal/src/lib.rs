@@ -32,7 +32,8 @@ pub use page_pool::{
     StallListener, StallReport, Stranded, max_record_len,
 };
 pub use reader::{
-    ReadRangeResult, WalContent, get_wal_header, read_wal_file_range, read_wal_header,
+    ReadRangeResult, WalContent, count_entries, get_wal_header, read_wal_file_range,
+    read_wal_header,
 };
 pub use wal_arena::{POOL_FREE, SlotRange, WalArena};
 pub use wal_entry::{WAL_ENTRY_HEADER_FIXED_OVERHEAD, WalEntryHeader};
@@ -214,6 +215,11 @@ impl WalStore {
         } else {
             Ok(None)
         }
+    }
+
+    pub fn wal_file_path(&self, queue_id: &QueueId, file_id: &UintN) -> PathBuf {
+        let queue_path = queue_id.to_wal_dir(&self.root);
+        file_id.to_file_path(queue_path.to_str().unwrap(), "wal")
     }
 
     pub async fn get_wal_file_content(

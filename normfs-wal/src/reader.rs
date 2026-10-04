@@ -374,6 +374,17 @@ pub async fn get_wal_content(
         }
     };
 
+    let (entries_before, num_entries) = count_entries(&content, file_id)?;
+    Ok(WalContent {
+        entries_before,
+        num_entries,
+        content,
+    })
+}
+
+/// The file's `num_entries_before` and how many whole entries follow its
+/// header, counting up to the first one that is cut short or corrupt.
+pub fn count_entries(content: &[u8], file_id: &UintN) -> Result<(UintN, UintN), WalError> {
     if content.is_empty() {
         log::warn!("WAL reader: file {} has no content", file_id);
         return Err(WalError::WalEntryError(
@@ -381,7 +392,7 @@ pub async fn get_wal_content(
         ));
     }
 
-    let (any_header, header_size) = AnyWalHeader::from_bytes(&content)?;
+    let (any_header, header_size) = AnyWalHeader::from_bytes(content)?;
     let wal_header = WalHeader::from(&any_header);
 
     // V1: iterate frames from the byte buffer, deriving each id from
@@ -422,11 +433,7 @@ pub async fn get_wal_content(
             content.len()
         );
 
-        return Ok(WalContent {
-            entries_before: wal_header.num_entries_before,
-            num_entries: UintN::from(num_entries),
-            content,
-        });
+        return Ok((wal_header.num_entries_before, UintN::from(num_entries)));
     }
 
     let mut num_entries: u64 = 0;
@@ -500,11 +507,7 @@ pub async fn get_wal_content(
         content.len()
     );
 
-    Ok(WalContent {
-        entries_before: wal_header.num_entries_before,
-        num_entries: UintN::from(num_entries),
-        content,
-    })
+    Ok((wal_header.num_entries_before, UintN::from(num_entries)))
 }
 
 #[derive(Debug)]

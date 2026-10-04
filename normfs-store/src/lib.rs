@@ -33,6 +33,8 @@ pub use store_file::SealedFile;
 
 #[cfg(test)]
 mod page_writer_test;
+#[cfg(test)]
+mod writer_test;
 
 #[cfg(test)]
 mod disk_usage_test;
@@ -193,6 +195,7 @@ pub struct PersistStore {
     written_sender: mpsc::UnboundedSender<(QueueId, UintN)>,
     page_writers: std::sync::RwLock<HashMap<QueueId, PageStoreWriter>>,
     packer: std::sync::OnceLock<Arc<Packer>>,
+    wal_packer: Option<Arc<Packer>>,
     events: EventSink,
 }
 
@@ -224,6 +227,7 @@ impl PersistStore {
             written_sender,
             page_writers: std::sync::RwLock::new(HashMap::new()),
             packer: std::sync::OnceLock::new(),
+            wal_packer: None,
             events: events::discard(),
             config,
             crypto_ctx,
@@ -241,6 +245,13 @@ impl PersistStore {
     /// sizes a pool for its own pages, one slot per worker.
     pub fn with_packer(self, packer: Arc<Packer>) -> Self {
         let _ = self.packer.set(packer);
+        self
+    }
+
+    /// The slots WAL files are packed in on their way to the store. Without
+    /// one, each file is read and packed in memory of its own.
+    pub fn with_wal_packer(mut self, packer: Arc<Packer>) -> Self {
+        self.wal_packer = Some(packer);
         self
     }
 
@@ -271,6 +282,7 @@ impl PersistStore {
             self.wal_store.clone(),
             self.range_store.clone(),
             self.disk_usage.clone(),
+            self.wal_packer.clone(),
             self.events.clone(),
         ));
 
