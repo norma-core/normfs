@@ -11,13 +11,7 @@ use crate::backend::Body;
 use crate::layer::Layer;
 use crate::pack::Packer;
 use crate::store_file::{self, SealedFile};
-use normfs_wal::{PackSlot, WalStore};
-
-/// A WAL file read into a pack slot, or the reason it was not.
-enum Read {
-    Slot(PackSlot, usize),
-    TooLarge(usize),
-}
+use normfs_wal::{Fill, WalStore};
 
 pub struct StoreWriteWorker {
     wal_store: Arc<WalStore>,
@@ -171,27 +165,15 @@ impl StoreWriteWorker {
     ) -> Result<SealedFile, String> {
         let (queue_id, file_id) = (&wal_file.queue_id, &wal_file.file_id);
         let slot = packer.take().await;
-        let path = self.wal_store.wal_file_path(queue_id, file_id);
         let cap = packer.input_cap();
         let read = self
             .wal_store
-            .fs()
-            .run_blocking(move || {
-                use std::os::unix::fs::FileExt;
-                let file = std::fs::File::open(&path)?;
-                let len = file.metadata()?.len() as usize;
-                if len > cap {
-                    return Ok(Read::TooLarge(len));
-                }
-                let mut slot = slot;
-                file.read_exact_at(&mut slot.buf()[..len], 0)?;
-                Ok(Read::Slot(slot, len))
-            })
+            .read_into(queue_id, file_id, slot, cap)
             .await
-            .map_err(|e| format!("reading WAL file: {:?}", std::io::Error::from(e)))?;
+            .map_err(|e| format!("reading WAL file: {e:?}"))?;
         let (mut slot, len) = match read {
-            Read::Slot(slot, len) => (slot, len),
-            Read::TooLarge(len) => {
+            (slot, Fill::Read(len)) => (slot, len),
+            (_, Fill::TooLarge(len)) => {
                 log::warn!(target: "normfs-store",
                     "WAL file {file_id} of queue {queue_id} is {len} bytes, more than the \
                      {cap} a pack slot holds; reading it whole");

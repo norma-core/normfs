@@ -15,11 +15,7 @@ use crate::store_file::publish_local;
 
 pub type BackendFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, BackendError>> + Send + 'a>>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum End {
-    Min,
-    Max,
-}
+pub use normfs_types::End;
 
 /// A store file on its way to a backend.
 pub enum Body {

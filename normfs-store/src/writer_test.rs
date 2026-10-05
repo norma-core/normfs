@@ -15,7 +15,6 @@ const BEFORE: u64 = 10;
 struct Fixture {
     _dir: tempfile::TempDir,
     store: PersistStore,
-    wal: Arc<WalStore>,
     queue: QueueId,
 }
 
@@ -33,7 +32,8 @@ fn fixture(packer: Option<Arc<Packer>>) -> Fixture {
             verify_signatures: true,
         },
         crypto.clone(),
-        wal.clone(),
+        wal,
+        normfs_fs::Fs::new(normfs_fs::FsConfig::default()).unwrap(),
         written_tx,
     );
     if let Some(packer) = packer {
@@ -43,7 +43,6 @@ fn fixture(packer: Option<Arc<Packer>>) -> Fixture {
     Fixture {
         _dir: dir,
         store,
-        wal,
         queue,
     }
 }
@@ -77,7 +76,7 @@ fn wal_file() -> Vec<u8> {
 /// Migrates file 1 to the store and reads back what landed.
 async fn migrate(f: &Fixture, file: &[u8]) -> (u64, Vec<Vec<u8>>) {
     let file_id = UintN::one();
-    let path = f.wal.wal_file_path(&f.queue, &file_id);
+    let path = f.queue.to_wal_path(f._dir.path(), &file_id);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, file).unwrap();
 

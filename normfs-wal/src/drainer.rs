@@ -5,16 +5,14 @@
 //! queue carries on. On a card that never recovers this is back-pressure rather
 //! than loss: the pool fills and `enqueue` waits.
 
-use std::os::unix::fs::MetadataExt;
-use std::path::PathBuf;
 use std::time::Duration;
 
-use normfs_fs::{AppendOutcome, Fs, Runs};
 use normfs_types::QueueId;
 use tokio::sync::mpsc;
 use uintn::UintN;
 
 use crate::WalFile;
+use crate::backend::{Appended, WalBackend};
 use crate::page_pool::{PagePool, Stranded};
 use std::sync::Arc;
 
@@ -27,7 +25,6 @@ pub(crate) struct StrandedFile {
     pub queue_id: QueueId,
     pub file_id: UintN,
     pub epoch: u64,
-    pub path: PathBuf,
     /// Re-applied rather than trusted: `FileTail::restore` only logs when its
     /// own truncate fails.
     pub valid_len: u64,
@@ -46,7 +43,7 @@ pub(crate) enum DrainRequest {
 /// queued after the sender drops -- so a close that reports itself incomplete
 /// can be followed by one that succeeds.
 pub(crate) fn spawn(
-    fs: Fs,
+    backend: Arc<dyn WalBackend>,
     pool: Arc<PagePool>,
     wal_complete_sender: mpsc::UnboundedSender<WalFile>,
     written_sender: mpsc::UnboundedSender<(QueueId, UintN)>,
@@ -54,7 +51,7 @@ pub(crate) fn spawn(
     let (tx, mut rx) = mpsc::unbounded_channel();
     tokio::spawn(async move {
         while let Some(DrainRequest::Retry(file)) = rx.recv().await {
-            if !land(&fs, &file).await {
+            if !land(backend.as_ref(), &file).await {
                 // Left owed on purpose: a close certifies that everything
                 // accepted is on disk, and saying "incomplete" for ever beats
                 // certifying the loss. A restart clears it.
@@ -77,10 +74,10 @@ pub(crate) fn spawn(
 }
 
 /// False only for a failure no retry can pass, never for giving up on one.
-async fn land(fs: &Fs, file: &StrandedFile) -> bool {
+async fn land(backend: &dyn WalBackend, file: &StrandedFile) -> bool {
     let mut attempt: u32 = 0;
     loop {
-        match attempt_once(fs, file).await {
+        match attempt_once(backend, file).await {
             Ok(()) => return true,
             Err(Fatal) => {
                 log::error!(
@@ -123,47 +120,33 @@ enum Failure {
     Fatal,
 }
 
-async fn attempt_once(fs: &Fs, file: &StrandedFile) -> Result<(), Failure> {
+async fn attempt_once(backend: &dyn WalBackend, file: &StrandedFile) -> Result<(), Failure> {
     // Never `create`: a close usually fails on a full disk, which is when the
     // offload monitor deletes WAL files oldest-first, and this is the oldest
     // survivor. Creating it would pair the truncate with an empty file and
     // write the tail after a run of NULs.
-    let path = file.path.clone();
-    let handle = fs
-        .run_blocking(move || std::fs::OpenOptions::new().write(true).open(&path))
+    let target = backend
+        .reopen(&file.queue_id, &file.file_id)
         .await
         .map_err(|e| {
-            let e = std::io::Error::from(e);
             if e.kind() == std::io::ErrorKind::NotFound {
                 Fatal
             } else {
                 Transient(e)
             }
         })?;
-    let handle = Arc::new(handle);
-
-    let metadata = fs
-        .metadata(handle.clone())
-        .await
-        .map_err(|e| Transient(e.into()))?;
-    let inode = metadata.ino();
-    if metadata.len() < file.valid_len {
+    if target.size().await.map_err(Transient)? < file.valid_len {
         return Err(Fatal);
     }
 
     // Before every attempt: a previous one may have left bytes behind, and V1
     // derives ids from position, so a stray frame renumbers what follows.
-    fs.restore_with_inode(handle.clone(), inode, &file.path, file.valid_len)
-        .await
-        .map_err(|e| Transient(e.into()))?;
+    target.restore(file.valid_len).await.map_err(Transient)?;
 
-    let runs = Runs(file.stranded.runs.iter().map(|(_, b)| b.clone()).collect());
-    match fs
-        .append_sync_with_inode(handle, inode, &file.path, file.valid_len, runs, file.fsync)
-        .await
-    {
-        Ok(AppendOutcome::Committed) => Ok(()),
-        Ok(AppendOutcome::Failed { err, .. }) => Err(Transient(err)),
-        Err(e) => Err(Transient(e.into())),
+    let runs = file.stranded.runs.iter().map(|(_, b)| b.clone()).collect();
+    match target.append(file.valid_len, runs, file.fsync).await {
+        Ok(Appended::Committed) => Ok(()),
+        Ok(Appended::Failed { err, .. }) => Err(Transient(err)),
+        Err(e) => Err(Transient(e)),
     }
 }

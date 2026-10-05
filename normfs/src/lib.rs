@@ -466,6 +466,7 @@ impl NormFS {
             settings.store_cfg.clone(),
             crypto_ctx.clone(),
             wal.clone(),
+            fs.clone(),
             wal_entry_send.clone(),
         )
         .with_events(events.clone())

@@ -1,9 +1,9 @@
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use std::sync::Arc;
 
 use crate::ack_file_writer::{AckFileWriter, AckFileWriterSettings};
+use crate::backend::WalBackend;
 use crate::page_pool::{PagePool, Placement, RotateHint};
 use crate::wal_entry_v1::{self, WalEntryV1, WalEntryV1Error};
 use crate::wal_header::WalHeader;
@@ -30,8 +30,7 @@ pub struct WalWriter {
 }
 
 struct WriterState {
-    fs: normfs_fs::Fs,
-    queue_path: PathBuf,
+    backend: Arc<dyn WalBackend>,
     queue_id: QueueId,
     file_id: UintN,
     header: WalHeader,
@@ -69,9 +68,8 @@ struct WriterState {
 
 impl WalWriter {
     pub async fn new(
-        fs: normfs_fs::Fs,
+        backend: Arc<dyn WalBackend>,
         queue: &QueueId,
-        root: &Path,
         file_id: &UintN,
         header: WalHeader,
         settings: WalSettings,
@@ -89,8 +87,7 @@ impl WalWriter {
 
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        let queue_fs_path = queue.to_wal_dir(root);
-        fs.mkdir_all(&queue_fs_path).await?;
+        backend.prepare(queue).await?;
 
         // From here a file writer is draining these pages, so an appender may
         // wait for one to be freed: a flush will end the wait. And from here
@@ -111,8 +108,8 @@ impl WalWriter {
         }
 
         let file_writer = new_file_writer(
-            fs.clone(),
-            &queue_fs_path,
+            backend.as_ref(),
+            queue,
             file_id,
             &header,
             &settings,
@@ -124,8 +121,7 @@ impl WalWriter {
 
         let closing = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut state = WriterState {
-            fs,
-            queue_path: queue_fs_path,
+            backend,
             queue_id: queue.clone(),
             file_id: file_id.clone(),
             header,
@@ -537,9 +533,6 @@ impl WriterState {
             queue_id: self.queue_id.clone(),
             file_id: self.file_id.clone(),
             epoch: self.file_epoch,
-            path: self
-                .file_id
-                .to_file_path(self.queue_path.to_str().unwrap(), "wal"),
             valid_len: self.file_writer.flushed_len().await,
             wal_file: WalFile {
                 queue_id: self.queue_id.clone(),
@@ -553,7 +546,7 @@ impl WriterState {
 
         let drainer = self.drainer.get_or_insert_with(|| {
             crate::drainer::spawn(
-                self.fs.clone(),
+                self.backend.clone(),
                 Arc::clone(pool),
                 self.wal_complete_sender.clone(),
                 self.written_sender.clone(),
@@ -746,8 +739,8 @@ impl WriterState {
         let mut attempt: u32 = 0;
         loop {
             match new_file_writer(
-                self.fs.clone(),
-                &self.queue_path,
+                self.backend.as_ref(),
+                &self.queue_id,
                 &self.file_id,
                 &self.header,
                 &self.settings,
@@ -807,8 +800,8 @@ const ROTATE_RETRY_DELAY: Duration = Duration::from_millis(10);
 const ROTATE_WARN_EVERY: u32 = 500;
 
 async fn new_file_writer(
-    fs: normfs_fs::Fs,
-    queue_path: &Path,
+    backend: &dyn WalBackend,
+    queue: &QueueId,
     file_id: &UintN,
     header: &WalHeader,
     settings: &WalSettings,
@@ -816,17 +809,21 @@ async fn new_file_writer(
     pool: Option<Arc<PagePool>>,
     epoch: u64,
 ) -> Result<AckFileWriter, WalError> {
-    let file_path = file_id.to_file_path(queue_path.to_str().unwrap(), "wal");
-
     // A V1 header over V1 entries, so the file is self-consistent. Readers
     // dispatch on the version word, so a queue may still hold older V0 files
     // and keep reading each correctly.
     let mut header_buf = BytesMut::new();
     WalHeaderV1::from_v0(header)?.write_to_bytes(&mut header_buf)?;
 
+    // Only successful creation certifies the header; recovery must still
+    // accept a torn header left by a crash before creation completed.
+    let header = header_buf.freeze();
+    let header_len = header.len() as u64;
+    let target = backend
+        .create(queue, file_id, header, settings.enable_fsync)
+        .await?;
     let writer = AckFileWriter::new(
-        fs,
-        file_path,
+        target,
         AckFileWriterSettings {
             max_buffer_size: settings.write_buffer_size,
             max_file_size: settings.max_file_size as u64,
@@ -836,7 +833,7 @@ async fn new_file_writer(
             retry_delay: settings.flush_retry_delay,
         },
         written_sender,
-        header_buf.freeze(),
+        header_len,
         pool,
         epoch,
     )

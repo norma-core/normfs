@@ -1,7 +1,8 @@
 use bytes::{Buf, Bytes, BytesMut};
 use normfs_types::{DataSource, ReadEntry};
-use std::io::SeekFrom;
 use std::path::Path;
+
+use crate::backend::WalReader;
 use tokio::io::{AsyncRead, AsyncReadExt, BufReader};
 use tokio::sync::mpsc;
 use uintn::{UintN, varint};
@@ -139,25 +140,45 @@ async fn next_v1_frame<R: AsyncRead + Unpin>(
     Ok(V1Frame::Ready(total))
 }
 
+/// The file at `base_path`, for the path-based helpers below; WalStore opens
+/// files through its backend instead.
+async fn open(
+    fs: &normfs_fs::Fs,
+    base_path: &Path,
+    file_id: &UintN,
+) -> Result<Option<(WalReader, u64)>, WalError> {
+    let file_path = file_id.to_file_path(base_path.to_str().unwrap(), "wal");
+    match fs.open_read(&file_path).await {
+        Ok(file) => {
+            let len = file.metadata().await?.len();
+            Ok(Some((Box::new(file), len)))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
 pub async fn read_wal_header(
     fs: &normfs_fs::Fs,
     base_path: &Path,
     file_id: &UintN,
 ) -> Result<WalHeader, WalError> {
-    let file_path = file_id.to_file_path(base_path.to_str().unwrap(), "wal");
+    read_wal_header_from(open(fs, base_path, file_id).await?, file_id).await
+}
+
+pub(crate) async fn read_wal_header_from(
+    file: Option<(WalReader, u64)>,
+    file_id: &UintN,
+) -> Result<WalHeader, WalError> {
     log::debug!("WAL reader: reading header from file {}", file_id);
 
-    let file = match fs.open_read(&file_path).await {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            log::warn!("WAL reader: file {} not found", file_path.display());
-            return Err(WalError::WalNotFound);
-        }
-        Err(e) => return Err(e.into()),
+    let Some((file, file_len)) = file else {
+        log::warn!("WAL reader: file {} not found", file_id);
+        return Err(WalError::WalNotFound);
     };
 
-    if file.metadata().await?.len() == 0 {
-        log::warn!("WAL reader: file {} is empty", file_path.display());
+    if file_len == 0 {
+        log::warn!("WAL reader: file {} is empty", file_id);
         return Err(WalError::WalEmpty(file_id.clone()));
     }
 
@@ -167,10 +188,7 @@ pub async fn read_wal_header(
         Ok(v) => v,
         Err(AnyWalHeaderError::V0(WalHeaderError::SliceTooShort))
         | Err(AnyWalHeaderError::V1(WalHeaderV1Error::Truncated)) => {
-            log::warn!(
-                "WAL reader: file {} has incomplete header",
-                file_path.display()
-            );
+            log::warn!("WAL reader: file {} has incomplete header", file_id);
             return Err(WalError::WalEmpty(file_id.clone()));
         }
         Err(e) => return Err(e.into()),
@@ -186,24 +204,26 @@ pub async fn read_wal_header(
     Ok(wal_header)
 }
 
+#[cfg(test)]
 pub async fn get_wal_range(
     fs: &normfs_fs::Fs,
     base_path: &Path,
     file_id: &UintN,
 ) -> Result<(WalHeader, Option<(UintN, UintN)>), WalError> {
-    let file_path = file_id.to_file_path(base_path.to_str().unwrap(), "wal");
+    get_wal_range_from(open(fs, base_path, file_id).await?, file_id).await
+}
+
+pub(crate) async fn get_wal_range_from(
+    file: Option<(WalReader, u64)>,
+    file_id: &UintN,
+) -> Result<(WalHeader, Option<(UintN, UintN)>), WalError> {
     log::debug!("WAL reader: getting entry range from file {}", file_id);
 
-    let file = match fs.open_read(&file_path).await {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            log::warn!("WAL reader: file {} not found", file_id);
-            return Err(WalError::WalNotFound);
-        }
-        Err(e) => return Err(e.into()),
+    let Some((file, file_len)) = file else {
+        log::warn!("WAL reader: file {} not found", file_id);
+        return Err(WalError::WalNotFound);
     };
 
-    let file_len = file.metadata().await?.len();
     if file_len == 0 {
         log::warn!("WAL reader: file {} is empty", file_id);
         return Err(WalError::WalEmpty(file_id.clone()));
@@ -279,7 +299,7 @@ pub async fn get_wal_range(
     // seek back to the first entry — one seek against a scan measured in seconds.
     let (_, file) = block.into_parts();
     let mut file = file;
-    file.seek(SeekFrom::Start(header_size as u64)).await?;
+    file.seek_to(header_size as u64).await?;
     let mut reader = BufReader::with_capacity(WAL_READ_BUFFER_CAPACITY, file);
 
     let mut first_id: Option<UintN> = None;
@@ -354,24 +374,35 @@ pub struct WalContent {
     pub content: Bytes,
 }
 
+#[cfg(test)]
 pub async fn get_wal_content(
     fs: &normfs_fs::Fs,
     base_path: &Path,
     file_id: &UintN,
 ) -> Result<WalContent, WalError> {
     let file_path = file_id.to_file_path(base_path.to_str().unwrap(), "wal");
-    log::debug!("WAL reader: getting content from file {}", file_id);
-
     let content = match fs.read_whole(&file_path).await {
-        Ok(c) => c,
+        Ok(c) => Some(c),
         Err(e) => {
             let e = std::io::Error::from(e);
-            if e.kind() == std::io::ErrorKind::NotFound {
-                log::warn!("WAL reader: file {} not found", file_id);
-                return Err(WalError::WalNotFound);
+            if e.kind() != std::io::ErrorKind::NotFound {
+                return Err(e.into());
             }
-            return Err(e.into());
+            None
         }
+    };
+    get_wal_content_from(content, file_id)
+}
+
+pub(crate) fn get_wal_content_from(
+    content: Option<Bytes>,
+    file_id: &UintN,
+) -> Result<WalContent, WalError> {
+    log::debug!("WAL reader: getting content from file {}", file_id);
+
+    let Some(content) = content else {
+        log::warn!("WAL reader: file {} not found", file_id);
+        return Err(WalError::WalNotFound);
     };
 
     let (entries_before, num_entries) = count_entries(&content, file_id)?;
@@ -530,7 +561,19 @@ pub async fn read_wal_file_range(
     target: &mpsc::Sender<ReadEntry>,
     data_source: DataSource,
 ) -> Result<ReadRangeResult, WalError> {
-    let file_path = file_id.to_file_path(base_path.to_str().unwrap(), "wal");
+    let file = open(fs, base_path, file_id).await?;
+    read_wal_file_range_from(file, file_id, from_id, until_id, step, target, data_source).await
+}
+
+pub(crate) async fn read_wal_file_range_from(
+    file: Option<(WalReader, u64)>,
+    file_id: &UintN,
+    from_id: &UintN,
+    until_id: &Option<UintN>,
+    step: usize,
+    target: &mpsc::Sender<ReadEntry>,
+    data_source: DataSource,
+) -> Result<ReadRangeResult, WalError> {
     log::debug!(
         "WAL reader: reading range [{} - {:?}] from file {}",
         from_id,
@@ -538,16 +581,11 @@ pub async fn read_wal_file_range(
         file_id
     );
 
-    let file = match fs.open_read(&file_path).await {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            log::warn!("WAL reader: file {} not found", file_id);
-            return Err(WalError::WalNotFound);
-        }
-        Err(e) => return Err(e.into()),
+    let Some((file, file_len)) = file else {
+        log::warn!("WAL reader: file {} not found", file_id);
+        return Err(WalError::WalNotFound);
     };
 
-    let file_len = file.metadata().await?.len();
     if file_len == 0 {
         log::debug!("WAL reader: file {} is empty", file_id);
         return Ok(ReadRangeResult::PartialRead {
@@ -709,7 +747,7 @@ pub async fn read_wal_file_range(
     // seek back to the first entry rather than handing those bytes over.
     let (_, file) = block.into_parts();
     let mut file = file;
-    file.seek(SeekFrom::Start(header_size as u64)).await?;
+    file.seek_to(header_size as u64).await?;
     let mut reader = BufReader::with_capacity(WAL_READ_BUFFER_CAPACITY, file);
 
     let mut last_read_id: Option<UintN> = None;

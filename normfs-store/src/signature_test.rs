@@ -163,7 +163,14 @@ fn test_extract_wal_bytes_with_verification() {
         verify_signatures: true,
     };
 
-    let store = PersistStore::new(&temp_dir, config, crypto_ctx.clone(), wal_store, written_tx);
+    let store = PersistStore::new(
+        &temp_dir,
+        config,
+        crypto_ctx.clone(),
+        wal_store,
+        normfs_fs::Fs::new(normfs_fs::FsConfig::default()).unwrap(),
+        written_tx,
+    );
 
     // Create test data (unencrypted, uncompressed)
     let header = StoreHeader::new(
@@ -240,7 +247,14 @@ fn test_extract_wal_bytes_detects_tampered_header() {
         verify_signatures: true,
     };
 
-    let store = PersistStore::new(&temp_dir, config, crypto_ctx.clone(), wal_store, written_tx);
+    let store = PersistStore::new(
+        &temp_dir,
+        config,
+        crypto_ctx.clone(),
+        wal_store,
+        normfs_fs::Fs::new(normfs_fs::FsConfig::default()).unwrap(),
+        written_tx,
+    );
 
     // Create test data
     let header = StoreHeader::new(
@@ -317,7 +331,14 @@ fn test_extract_wal_bytes_detects_tampered_content() {
         verify_signatures: true,
     };
 
-    let store = PersistStore::new(&temp_dir, config, crypto_ctx.clone(), wal_store, written_tx);
+    let store = PersistStore::new(
+        &temp_dir,
+        config,
+        crypto_ctx.clone(),
+        wal_store,
+        normfs_fs::Fs::new(normfs_fs::FsConfig::default()).unwrap(),
+        written_tx,
+    );
 
     // Create test data
     let header = StoreHeader::new(

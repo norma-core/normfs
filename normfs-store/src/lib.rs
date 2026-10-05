@@ -225,19 +225,20 @@ impl PersistStore {
         config: StoreWriteConfig,
         crypto_ctx: Arc<CryptoContext>,
         wal_store: Arc<WalStore>,
+        fs: Fs,
         written_sender: mpsc::UnboundedSender<(QueueId, UintN)>,
     ) -> Self {
         let root_path = root.as_ref().to_path_buf();
         let (store_done_tx, store_done_rx) = mpsc::unbounded_channel();
 
         let disk_usage = Arc::new(DiskUsage::default());
-        let backend = LocalStore::new(wal_store.fs().clone(), &root_path, true, disk_usage.clone());
+        let backend = LocalStore::new(fs.clone(), &root_path, true, disk_usage.clone());
         let verify = config.verify_signatures.then(|| crypto_ctx.clone());
 
         Self {
             root: root_path,
             disk_usage,
-            fs: wal_store.fs().clone(),
+            fs,
             local: Arc::new(Layer::new(Arc::new(backend), verify, false)),
             writer_handles: Mutex::new(None),
             shutdown_tx: Mutex::new(None),
