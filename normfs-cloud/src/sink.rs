@@ -1,4 +1,4 @@
-use normfs_store::{SealedFile, SealedFileSink};
+use normfs_store::{Body, Layer, SealedFile, SealedFileSink};
 use normfs_types::QueueId;
 use normfs_types::events::{EventSink, SystemEvent};
 use std::future::Future;
@@ -7,9 +7,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tokio::time::Instant;
 use uintn::UintN;
-
-use crate::downloader::CloudDownloader;
-use crate::offloader::put_verified;
 
 /// Where a cloud-direct queue records what has landed, so a restart knows
 /// its last id and last file without listing the bucket.
@@ -29,19 +26,15 @@ pub trait LandedIndex: Send + Sync {
 /// is touched. Every attempt is a fresh PUT of the same key, so the caller
 /// may retry freely.
 pub struct CloudSink {
-    downloader: Arc<CloudDownloader>,
+    layer: Arc<Layer>,
     index: Arc<dyn LandedIndex>,
     events: EventSink,
 }
 
 impl CloudSink {
-    pub fn new(
-        downloader: Arc<CloudDownloader>,
-        index: Arc<dyn LandedIndex>,
-        events: EventSink,
-    ) -> Self {
+    pub fn new(layer: Arc<Layer>, index: Arc<dyn LandedIndex>, events: EventSink) -> Self {
         Self {
-            downloader,
+            layer,
             index,
             events,
         }
@@ -56,9 +49,11 @@ impl SealedFileSink for CloudSink {
         file: &'a SealedFile,
     ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>> {
         Box::pin(async move {
-            let key = self.downloader.key(queue, file_id);
+            let backend = self.layer.backend();
+            let key = backend.key(queue, file_id);
             let started = Instant::now();
-            if let Err(e) = put_verified(self.downloader.client(), &key, file.to_bytes()).await {
+            let body = Body::Runs(vec![file.to_bytes()]);
+            if let Err(e) = backend.put(queue, file_id, body).await {
                 self.events.emit(SystemEvent::UploadFailed {
                     queue: queue.clone(),
                     file_id: file_id.clone(),
@@ -70,10 +65,8 @@ impl SealedFileSink for CloudSink {
             let took = started.elapsed();
             if let Some(last) = file.last_entry_id() {
                 // Reads consult this before they range-GET the object.
-                self.downloader
-                    .record_range(queue, file_id, &file.entries_before, &last)
-                    .await
-                    .map_err(io::Error::other)?;
+                self.layer
+                    .record_range(queue, file_id, &file.entries_before, &last);
                 self.index.mark_landed(queue, &last, file_id).await?;
             }
             // The writer lands a queue's files one at a time and in order.
