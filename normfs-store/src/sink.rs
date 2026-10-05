@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use uintn::UintN;
 
 use crate::DiskUsage;
-use crate::ranges::RangeStore;
+use crate::layer::Layer;
 use crate::store_file::{self, SealedFile};
 
 /// Where a sealed file goes.
@@ -33,7 +33,7 @@ pub trait SealedFileSink: Send + Sync {
 pub struct LocalStoreSink {
     fs: Fs,
     root: PathBuf,
-    range_store: Arc<RangeStore>,
+    layer: Arc<Layer>,
     disk_usage: Arc<DiskUsage>,
     store_done_tx: mpsc::UnboundedSender<(QueueId, UintN)>,
     events: EventSink,
@@ -44,7 +44,7 @@ impl LocalStoreSink {
     pub(crate) fn new(
         fs: Fs,
         root: PathBuf,
-        range_store: Arc<RangeStore>,
+        layer: Arc<Layer>,
         disk_usage: Arc<DiskUsage>,
         store_done_tx: mpsc::UnboundedSender<(QueueId, UintN)>,
         events: EventSink,
@@ -53,7 +53,7 @@ impl LocalStoreSink {
         Self {
             fs,
             root,
-            range_store,
+            layer,
             disk_usage,
             store_done_tx,
             events,
@@ -82,10 +82,8 @@ impl SealedFileSink for LocalStoreSink {
             .await?;
             store_file::report_stored(self.events.as_ref(), queue, file_id, file);
             if let Some(last) = file.last_entry_id() {
-                self.range_store
-                    .record_range(queue, file_id, &file.entries_before, &last)
-                    .await
-                    .map_err(io::Error::other)?;
+                self.layer
+                    .record_range(queue, file_id, &file.entries_before, &last);
             }
             // A receiver that has gone away is the instance shutting down; the
             // file is on disk either way.

@@ -1,5 +1,5 @@
 use normfs_crypto::CryptoContext;
-use normfs_fs::{Fs, Scan, ScanResult};
+use normfs_fs::Fs;
 use normfs_types::QueueId;
 use normfs_types::events::{self, EventSink};
 use normfs_wal::{AnyWalHeaderError, PagePool, WalError, WalFile, WalHeader, WalStore};
@@ -11,7 +11,7 @@ use tokio::task::JoinHandle;
 use uintn::paths;
 use uintn::{Error as UintNError, UintN};
 
-use crate::ranges::RangeStoreError;
+use crate::layer::LayerError;
 
 pub mod backend;
 mod compression;
@@ -20,15 +20,16 @@ pub use disk_usage::{DiskUsage, QueueBytes};
 pub mod header;
 mod pack;
 pub use pack::{PackError, Packer};
+pub mod layer;
 pub mod page_writer;
 pub mod parser;
-mod ranges;
 pub mod sink;
 pub mod store_file;
 pub mod store_header_v1;
 mod writer;
 
 pub use backend::{BackendError, Body, End, LocalStore, StoreBackend};
+pub use layer::Layer;
 pub use page_writer::{PageStoreWriter, PageWriterSettings};
 pub use sink::{LocalStoreSink, SealedFileSink};
 pub use store_file::SealedFile;
@@ -45,7 +46,7 @@ mod disk_usage_test;
 #[cfg(test)]
 mod header_test;
 #[cfg(test)]
-mod ranges_test;
+mod layer_test;
 
 #[cfg(test)]
 mod store_header_v1_test;
@@ -63,7 +64,8 @@ pub enum StoreError {
     Decrypt,
     Wal(WalError),
     UintN(UintNError),
-    Range(RangeStoreError),
+    Range(LayerError),
+    Backend(BackendError),
     Path(paths::PathError),
     WalHeaderError(AnyWalHeaderError),
     FileNotFound,
@@ -88,6 +90,7 @@ impl std::fmt::Display for StoreError {
             StoreError::Wal(e) => write!(f, "WAL error: {}", e),
             StoreError::UintN(e) => write!(f, "UintN error: {}", e),
             StoreError::Range(e) => write!(f, "Range store error: {}", e),
+            StoreError::Backend(e) => write!(f, "{}", e),
             StoreError::Path(e) => write!(f, "Path error: {}", e),
             StoreError::WalHeaderError(e) => write!(f, "WAL header error: {}", e),
             StoreError::FileNotFound => write!(f, "File not found"),
@@ -105,6 +108,7 @@ impl std::error::Error for StoreError {
             StoreError::Wal(e) => Some(e),
             StoreError::UintN(e) => Some(e),
             StoreError::Range(e) => Some(e),
+            StoreError::Backend(e) => Some(e),
             StoreError::Path(e) => Some(e),
             StoreError::WalHeaderError(e) => Some(e),
             _ => None,
@@ -142,9 +146,18 @@ impl From<UintNError> for StoreError {
     }
 }
 
-impl From<RangeStoreError> for StoreError {
-    fn from(e: RangeStoreError) -> Self {
+impl From<LayerError> for StoreError {
+    fn from(e: LayerError) -> Self {
         StoreError::Range(e)
+    }
+}
+
+impl From<BackendError> for StoreError {
+    fn from(e: BackendError) -> Self {
+        match e {
+            BackendError::Io(e) => StoreError::Io(e),
+            other => StoreError::Backend(other),
+        }
     }
 }
 
@@ -184,7 +197,7 @@ impl Default for StoreWriteConfig {
 pub struct PersistStore {
     root: PathBuf,
     fs: Fs,
-    range_store: Arc<ranges::RangeStore>,
+    local: Arc<Layer>,
     disk_usage: Arc<DiskUsage>,
     config: StoreWriteConfig,
     crypto_ctx: Arc<CryptoContext>,
@@ -214,16 +227,15 @@ impl PersistStore {
         let root_path = root.as_ref().to_path_buf();
         let (store_done_tx, store_done_rx) = mpsc::unbounded_channel();
 
+        let disk_usage = Arc::new(DiskUsage::default());
+        let backend = LocalStore::new(wal_store.fs().clone(), &root_path, true, disk_usage.clone());
+        let verify = config.verify_signatures.then(|| crypto_ctx.clone());
+
         Self {
-            root: root_path.clone(),
-            disk_usage: Arc::new(DiskUsage::default()),
+            root: root_path,
+            disk_usage,
             fs: wal_store.fs().clone(),
-            range_store: Arc::new(ranges::RangeStore::new(
-                wal_store.fs().clone(),
-                root_path,
-                crypto_ctx.clone(),
-                config.verify_signatures,
-            )),
+            local: Arc::new(Layer::new(Arc::new(backend), verify, false)),
             writer_handles: Mutex::new(None),
             shutdown_tx: Mutex::new(None),
             store_done_tx,
@@ -284,7 +296,7 @@ impl PersistStore {
             self.root.clone(),
             self.crypto_ctx.clone(),
             self.wal_store.clone(),
-            self.range_store.clone(),
+            self.local.clone(),
             self.disk_usage.clone(),
             self.wal_packer.clone(),
             self.events.clone(),
@@ -319,7 +331,7 @@ impl PersistStore {
         Arc::new(LocalStoreSink::new(
             self.fs.clone(),
             self.root.clone(),
-            self.range_store.clone(),
+            self.local.clone(),
             self.disk_usage.clone(),
             self.store_done_tx.clone(),
             self.events.clone(),
@@ -441,25 +453,21 @@ impl PersistStore {
         Ok(())
     }
 
+    /// The local store as a layer: what reads and lookups go through.
+    pub fn local(&self) -> &Arc<Layer> {
+        &self.local
+    }
+
     pub async fn get_queue_start(&self, queue: &QueueId) -> Result<Option<UintN>, StoreError> {
-        let first_file_id = self.get_first_file_id(queue).await?;
-        if let Some(first_file_id) = first_file_id {
-            let range = self.get_file_range(queue, &first_file_id).await?;
-            Ok(range.map(|r| r.0))
-        } else {
-            Ok(None)
-        }
+        Ok(self.local.get_queue_start(queue).await?)
     }
 
     /// Get the latest Store file ID for a queue.
     pub async fn find_last_file_id(&self, queue: &QueueId) -> Result<UintN, StoreError> {
-        let queue_path = queue.to_store_dir(&self.root);
-        // A lookup creates nothing: a queue that never wrote a store file has
-        // no store directory, and a restart reads that absence.
-        match self.fs.scan_ids(&queue_path, "store", Scan::Max).await? {
-            ScanResult::One(id) => Ok(id),
-            _ => Err(StoreError::Path(paths::PathError::NoFilesFound)),
-        }
+        self.local
+            .last_file_id(queue)
+            .await?
+            .ok_or(StoreError::Path(paths::PathError::NoFilesFound))
     }
 
     pub async fn get_file_range(
@@ -467,26 +475,11 @@ impl PersistStore {
         queue: &QueueId,
         file_id: &UintN,
     ) -> Result<Option<(UintN, UintN)>, StoreError> {
-        log::debug!(target: "normfs-store", "Getting file range for queue: {}, file_id: {:?}", queue, file_id);
-
-        let result = self
-            .range_store
-            .get_range(queue, file_id)
-            .await
-            .map_err(StoreError::from)?;
-
-        if let Some((start, end)) = &result {
-            log::debug!(target: "normfs-store", "File range for queue {} file {:?}: start={:?}, end={:?}",
-                queue, file_id, start, end);
-        } else {
-            log::debug!(target: "normfs-store", "No range found for queue {} file {:?}", queue, file_id);
-        }
-
-        Ok(result)
+        Ok(self.local.get_file_range(queue, file_id).await?)
     }
 
     pub fn forget_file_range(&self, queue: &QueueId, file_id: &UintN) {
-        self.range_store.forget(queue, file_id);
+        self.local.forget(queue, file_id);
     }
 
     /// Get the last entry ID in a specific Store file.
@@ -571,37 +564,11 @@ impl PersistStore {
     }
 
     pub async fn get_first_file_id(&self, queue: &QueueId) -> Result<Option<UintN>, StoreError> {
-        log::debug!(target: "normfs-store", "Getting first file ID for queue: {}", queue);
-
-        let queue_fs_path = queue.to_store_dir(&self.root);
-        match self.fs.scan_ids(&queue_fs_path, "store", Scan::Min).await? {
-            ScanResult::One(id) => {
-                log::debug!(target: "normfs-store", "First file ID for queue {}: {:?}", queue, id);
-                Ok(Some(id))
-            }
-            _ => {
-                log::debug!(target: "normfs-store", "No store files found for queue: {}", queue);
-                Ok(None)
-            }
-        }
+        Ok(self.local.first_file_id(queue).await?)
     }
 
     pub async fn get_last_file_id(&self, queue: &QueueId) -> Result<Option<UintN>, StoreError> {
-        log::debug!(target: "normfs-store", "Getting last file ID for queue: {}", queue);
-
-        let queue_fs_path = queue.to_store_dir(&self.root);
-        let last_file = match self.fs.scan_ids(&queue_fs_path, "store", Scan::Max).await? {
-            ScanResult::One(file) => {
-                log::debug!(target: "normfs-store", "Last file ID for queue {}: {:?}", queue, file);
-                file
-            }
-            _ => {
-                log::debug!(target: "normfs-store", "No store files found for queue: {}", queue);
-                return Ok(None);
-            }
-        };
-
-        Ok(Some(last_file))
+        Ok(self.local.last_file_id(queue).await?)
     }
 
     pub async fn recover(&self) -> Result<(), StoreError> {
@@ -733,37 +700,6 @@ impl PersistStore {
         queue: &QueueId,
         file_id: &UintN,
     ) -> Result<Option<bytes::Bytes>, StoreError> {
-        log::debug!(target: "normfs-store",
-            "Getting store bytes for queue '{}', file {}",
-            queue, file_id);
-
-        let store_fs_path = queue.to_store_dir(&self.root);
-        let file_path = file_id.to_file_path(store_fs_path.to_str().unwrap(), "store");
-
-        match self
-            .fs
-            .read_whole(&file_path)
-            .await
-            .map_err(std::io::Error::from)
-        {
-            Ok(bytes) => {
-                log::debug!(target: "normfs-store",
-                    "Read {} bytes from store file for queue '{}', file {}",
-                    bytes.len(), queue, file_id);
-                Ok(Some(bytes))
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                log::debug!(target: "normfs-store",
-                    "Store file not found for queue '{}', file {}",
-                    queue, file_id);
-                Ok(None)
-            }
-            Err(e) => {
-                log::error!(target: "normfs-store",
-                    "Error reading store file for queue '{}', file {}: {:?}",
-                    queue, file_id, e);
-                Err(e.into())
-            }
-        }
+        Ok(self.local.get_store_bytes(queue, file_id).await?)
     }
 }

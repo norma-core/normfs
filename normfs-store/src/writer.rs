@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex, broadcast, mpsc};
 use uintn::UintN;
 
+use crate::layer::Layer;
 use crate::pack::Packer;
-use crate::ranges::RangeStore;
 use crate::store_file::{self, SealedFile};
 use crate::{DiskUsage, WalFile};
 use normfs_wal::{PackSlot, WalStore};
@@ -22,7 +22,7 @@ enum Read {
 pub struct StoreWriteWorker {
     root_dir: PathBuf,
     wal_store: Arc<WalStore>,
-    range_store: Arc<RangeStore>,
+    layer: Arc<Layer>,
     disk_usage: Arc<DiskUsage>,
     crypto_ctx: Arc<CryptoContext>,
     packer: Option<Arc<Packer>>,
@@ -35,7 +35,7 @@ impl StoreWriteWorker {
         root_dir: PathBuf,
         crypto_ctx: Arc<CryptoContext>,
         wal_store: Arc<WalStore>,
-        range_store: Arc<RangeStore>,
+        layer: Arc<Layer>,
         disk_usage: Arc<DiskUsage>,
         packer: Option<Arc<Packer>>,
         events: EventSink,
@@ -43,7 +43,7 @@ impl StoreWriteWorker {
         Self {
             root_dir,
             wal_store,
-            range_store,
+            layer,
             disk_usage,
             crypto_ctx,
             packer,
@@ -161,20 +161,8 @@ impl StoreWriteWorker {
             "Entry range for queue: {}, file_id: {:?}: {:?} to {:?}",
             queue_id, file_id, entries_before, last_id);
 
-        if let Err(e) = self
-            .range_store
-            .record_range(queue_id, file_id, &entries_before, &last_id)
-            .await
-        {
-            if !self.shutting_down.load(Ordering::Relaxed) {
-                log::error!(target: "normfs-store",
-                    "Error recording range for queue: {}, file_id: {:?}: {:?}",
-                    queue_id, file_id, e);
-            }
-        } else {
-            log::debug!(target: "normfs-store",
-                "Recorded range for queue: {}, file_id: {:?}", queue_id, file_id);
-        }
+        self.layer
+            .record_range(queue_id, file_id, &entries_before, &last_id);
 
         if let Err(e) = self.wal_store.delete_wal_file(queue_id, file_id).await {
             if !self.shutting_down.load(Ordering::Relaxed) {
