@@ -315,16 +315,33 @@ impl QueueOffloaderWorker {
 
     /// The file to send, and its first bytes for the facts.
     async fn read(&self, file_id: &UintN) -> Result<(crate::Body, bytes::Bytes), BackendError> {
-        let not_found = || BackendError::Io(std::io::ErrorKind::NotFound.into());
-        let from = self.from.backend();
-        let head = from
-            .get_range(&self.queue_id, file_id, 0, HEAD_LEN as u64)
-            .await?
-            .ok_or_else(not_found)?;
-        let body = from
+        let mut body = self
+            .from
+            .backend()
             .body(&self.queue_id, file_id)
             .await?
-            .ok_or_else(not_found)?;
+            .ok_or_else(|| BackendError::Io(std::io::ErrorKind::NotFound.into()))?;
+        // The head comes from the open that is sent, so a file is opened once.
+        let head = match &mut body {
+            crate::Body::Stream { file, len } => {
+                use tokio::io::AsyncReadExt;
+                let mut head = vec![0u8; (*len as usize).min(HEAD_LEN)];
+                file.read_exact(&mut head).await?;
+                file.seek(std::io::SeekFrom::Start(0)).await?;
+                bytes::Bytes::from(head)
+            }
+            crate::Body::Runs(runs) => {
+                let mut head = Vec::with_capacity(HEAD_LEN);
+                for run in runs.iter() {
+                    let take = (HEAD_LEN - head.len()).min(run.len());
+                    head.extend_from_slice(&run[..take]);
+                    if head.len() == HEAD_LEN {
+                        break;
+                    }
+                }
+                bytes::Bytes::from(head)
+            }
+        };
         Ok((body, head))
     }
 
