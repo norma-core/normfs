@@ -13,6 +13,7 @@ use uintn::{Error as UintNError, UintN};
 
 use crate::ranges::RangeStoreError;
 
+pub mod backend;
 mod compression;
 mod disk_usage;
 pub use disk_usage::{DiskUsage, QueueBytes};
@@ -27,10 +28,13 @@ pub mod store_file;
 pub mod store_header_v1;
 mod writer;
 
+pub use backend::{BackendError, Body, End, LocalStore, StoreBackend};
 pub use page_writer::{PageStoreWriter, PageWriterSettings};
 pub use sink::{LocalStoreSink, SealedFileSink};
 pub use store_file::SealedFile;
 
+#[cfg(test)]
+mod backend_test;
 #[cfg(test)]
 mod page_writer_test;
 #[cfg(test)]

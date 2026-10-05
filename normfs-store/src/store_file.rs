@@ -240,6 +240,19 @@ pub async fn land_local(
     fsync: bool,
     usage: &DiskUsage,
 ) -> io::Result<()> {
+    let runs = vec![file.auth.clone(), file.header.clone(), file.body.clone()];
+    publish_local(fs, root, queue, file_id, runs, fsync, usage).await
+}
+
+pub(crate) async fn publish_local(
+    fs: &Fs,
+    root: &Path,
+    queue: &QueueId,
+    file_id: &UintN,
+    runs: Vec<Bytes>,
+    fsync: bool,
+    usage: &DiskUsage,
+) -> io::Result<()> {
     let store_path = queue.to_store_path(root, file_id);
     let parent = store_path
         .parent()
@@ -249,6 +262,7 @@ pub async fn land_local(
     let tmp_dir = root.join("tmp");
     fs.mkdir_all(&tmp_dir).await?;
     let temp_path = tmp_dir.join(format!("{}.tmp", Uuid::new_v4()));
+    let len: usize = runs.iter().map(Bytes::len).sum();
 
     usage
         .publish(
@@ -257,11 +271,7 @@ pub async fn land_local(
             PublishSpec {
                 tmp: temp_path,
                 dst: store_path.clone(),
-                runs: Runs(vec![
-                    file.auth.clone(),
-                    file.header.clone(),
-                    file.body.clone(),
-                ]),
+                runs: Runs(runs),
                 tmp_mode: TmpMode::Excl,
                 sync: fsync,
             },
@@ -270,6 +280,6 @@ pub async fn land_local(
 
     log::debug!(target: "normfs-store",
         "Landed store file for queue {}, file {}: {} bytes at {:?}",
-        queue, file_id, file.len(), store_path);
+        queue, file_id, len, store_path);
     Ok(())
 }
