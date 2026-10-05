@@ -1,8 +1,11 @@
 use crate::DiskUsage;
 use crate::backend::{BackendError, BackendFuture, Body, End, LocalStore, StoreBackend};
+use crate::header::{CompressionType, EncryptionType};
 use crate::layer::Layer;
 use crate::offloader::QueueOffloader;
+use crate::store_file;
 use bytes::Bytes;
+use normfs_crypto::CryptoContext;
 use normfs_types::events::{self, SystemEvent, SystemEvents, UploadFailure};
 use normfs_types::{DataSource, QueueId, QueueIdResolver};
 use std::collections::BTreeMap;
@@ -12,11 +15,13 @@ use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use uintn::UintN;
 
-/// A bucket in memory that turns the first `refuse` puts away.
+/// A bucket in memory that turns the first `refuse` puts away, and answers
+/// the next `lose` puts with an error after keeping the file.
 #[derive(Default)]
 struct Memory {
     files: Mutex<BTreeMap<(String, UintN), Bytes>>,
     refuse: Mutex<u32>,
+    lose: Mutex<u32>,
 }
 
 impl StoreBackend for Memory {
@@ -49,6 +54,11 @@ impl StoreBackend for Memory {
                 .lock()
                 .unwrap()
                 .insert((q.to_string(), id.clone()), data);
+            let mut lose = self.lose.lock().unwrap();
+            if *lose > 0 {
+                *lose -= 1;
+                return Err(BackendError::Status(500));
+            }
             Ok(())
         })
     }
@@ -155,4 +165,61 @@ async fn a_file_moves_to_the_next_layer_once_it_accepts_it() {
             ..
         })
     ));
+}
+
+#[tokio::test]
+async fn a_file_kept_by_a_put_that_failed_is_reported_landed() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let crypto = CryptoContext::open(temp.path()).unwrap();
+    let fs = normfs_fs::Fs::new(normfs_fs::FsConfig::default()).unwrap();
+    let usage = Arc::new(DiskUsage::default());
+    let local: Arc<dyn StoreBackend> =
+        Arc::new(LocalStore::new(fs, temp.path().join("store"), false, usage));
+    let queue = QueueIdResolver::new("inst").resolve("cam");
+    let file_id = UintN::from(7u64);
+    let file = store_file::build(
+        &queue,
+        &file_id,
+        CompressionType::Zstd,
+        EncryptionType::Aes,
+        UintN::from(70u64),
+        UintN::from(3u64),
+        &Bytes::from_static(b"entries"),
+        &crypto,
+    )
+    .unwrap();
+    local
+        .put(&queue, &file_id, Body::Runs(vec![file.to_bytes()]))
+        .await
+        .unwrap();
+
+    let remote = Arc::new(Memory::default());
+    *remote.lose.lock().unwrap() = 1;
+    let recorded = Arc::new(Recorded::default());
+    let events: events::EventSink = recorded.clone();
+    let offloader = QueueOffloader::new(
+        Arc::new(Layer::new(local, None, false)),
+        Arc::new(Layer::new(remote, None, true)),
+        queue.clone(),
+        events,
+    )
+    .await;
+
+    for _ in 0..500 {
+        if offloader.get_latest_offloaded_id().await.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let landed: Vec<_> = recorded
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            SystemEvent::FileLanded { file, .. } => Some(file.file_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(landed, vec![file_id]);
 }

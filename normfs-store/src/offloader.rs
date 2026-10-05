@@ -159,10 +159,17 @@ impl QueueOffloader {
 
         while let Some(file_id) = receiver.recv().await {
             let mut attempt: u32 = 0;
+            let mut first_put = None;
             loop {
                 match worker.is_file_offloaded(&file_id).await {
                     Ok(true) => {
-                        advance(&latest_offloaded_id, &file_id).await;
+                        let landed_through = advance(&latest_offloaded_id, &file_id).await;
+                        // A put this worker saw fail can still have landed.
+                        if let Some(started) = first_put {
+                            worker
+                                .report_landed(&file_id, started, landed_through)
+                                .await;
+                        }
                         break;
                     }
                     Ok(false) => {}
@@ -181,6 +188,7 @@ impl QueueOffloader {
                 }
 
                 attempt = attempt.saturating_add(1);
+                first_put.get_or_insert_with(Instant::now);
                 match worker.upload_file(&file_id, attempt).await {
                     Ok(uploaded) => {
                         info!("Successfully uploaded file {:?}", file_id);
@@ -318,6 +326,33 @@ impl QueueOffloaderWorker {
             .await?
             .ok_or_else(not_found)?;
         Ok((body, head))
+    }
+
+    async fn report_landed(&self, file_id: &UintN, started: Instant, landed_through: UintN) {
+        let from = self.from.backend();
+        let head = from
+            .get_range(&self.queue_id, file_id, 0, HEAD_LEN as u64)
+            .await;
+        let len = from.size(&self.queue_id, file_id).await;
+        let (Ok(Some(head)), Ok(Some(len))) = (head, len) else {
+            warn!(
+                "File {:?} of {} landed but cannot be read back for its facts",
+                file_id, self.queue_id
+            );
+            return;
+        };
+        match store_file::facts_of_head(&self.queue_id, file_id, &head, len) {
+            Ok(file) => self.events.emit(SystemEvent::FileLanded {
+                file,
+                key: self.to.backend().key(&self.queue_id, file_id),
+                took: started.elapsed(),
+                landed_through,
+            }),
+            Err(e) => warn!(
+                "Uploaded file {:?} of {} but its blocks do not parse: {}",
+                file_id, self.queue_id, e
+            ),
+        }
     }
 
     fn report_failure(&self, file_id: &UintN, failure: UploadFailure, e: &dyn std::fmt::Display) {
