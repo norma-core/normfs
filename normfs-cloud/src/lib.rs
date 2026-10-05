@@ -16,3 +16,6 @@ pub struct CloudSettings {
     pub secret_key: String,
     pub prefix: String,
 }
+
+#[cfg(test)]
+mod store_test;

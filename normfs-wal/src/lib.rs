@@ -23,7 +23,10 @@ mod wal_ring_v1;
 mod writer;
 mod writer_buffer;
 
-pub use backend::{AppendTarget, Appended, Fill, LocalWal, WalBackend, WalRead, WalReader};
+pub use backend::{
+    AppendTarget, Appended, Backend, BackendError, BackendFuture, Body, FileRead, Fill, Layout,
+    Local, Publisher, Reader,
+};
 pub use errors::*;
 #[cfg(any(test, feature = "fault-injection"))]
 pub use normfs_fs::fault::{fail_flushes, heal};
@@ -128,7 +131,7 @@ impl Default for WalSettings {
 }
 
 pub struct WalStore {
-    backend: Arc<dyn WalBackend>,
+    backend: Arc<dyn Backend>,
     written_sender: mpsc::UnboundedSender<(QueueId, UintN)>,
     wal_complete_sender: mpsc::UnboundedSender<WalFile>,
     writers: RwLock<HashMap<QueueId, WalWriter>>,
@@ -169,14 +172,14 @@ impl WalStore {
     ) -> Self {
         log::info!("WalStore: initializing at path: {:?}", root.as_ref());
         Self::with_backend(
-            Arc::new(LocalWal::new(fs, root)),
+            Arc::new(Local::wal(fs, root)),
             written_sender,
             wal_complete_sender,
         )
     }
 
     pub fn with_backend(
-        backend: Arc<dyn WalBackend>,
+        backend: Arc<dyn Backend>,
         written_sender: mpsc::UnboundedSender<(QueueId, UintN)>,
         wal_complete_sender: mpsc::UnboundedSender<WalFile>,
     ) -> Self {
@@ -188,7 +191,7 @@ impl WalStore {
         }
     }
 
-    pub fn backend(&self) -> &Arc<dyn WalBackend> {
+    pub fn backend(&self) -> &Arc<dyn Backend> {
         &self.backend
     }
 
@@ -226,7 +229,7 @@ impl WalStore {
         }
     }
 
-    /// The whole file into `slot` when it fits; see [`WalBackend::read_into`].
+    /// The whole file into `slot` when it fits; see [`Backend::read_into`].
     pub async fn read_into(
         &self,
         queue_id: &QueueId,
@@ -248,7 +251,7 @@ impl WalStore {
             file_id
         );
 
-        let content = self.backend.read(queue_id, file_id).await?;
+        let content = self.backend.get(queue_id, file_id).await?;
         let content = reader::get_wal_content_from(content, file_id)?;
 
         log::debug!(
@@ -422,7 +425,11 @@ impl WalStore {
             current_file_id
         );
 
-        let file_ids = self.backend.list(queue).await.map_err(paths::PathError::Io);
+        let file_ids = self
+            .backend
+            .list(queue)
+            .await
+            .map_err(|e| paths::PathError::Io(e.into()));
         match file_ids {
             Ok(file_ids) => {
                 let mut sent_count = 0;
@@ -724,7 +731,7 @@ impl WalStore {
             file_id
         );
 
-        let bytes = self.backend.read(queue_id, file_id).await?;
+        let bytes = self.backend.get(queue_id, file_id).await?;
         log::debug!(
             "WalStore: read {:?} bytes for queue '{}', file {}",
             bytes.as_ref().map(Bytes::len),

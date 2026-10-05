@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use normfs_cloud::{CloudSettings, S3Client};
-use normfs_store::{Body, End, StoreBackend};
+use normfs_store::{Backend, Body, End};
 use std::env;
 
 /// Helper function to get cloud settings from standard AWS environment variables

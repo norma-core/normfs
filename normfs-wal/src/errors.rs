@@ -91,6 +91,12 @@ impl From<std::io::Error> for WalError {
     }
 }
 
+impl From<crate::backend::BackendError> for WalError {
+    fn from(e: crate::backend::BackendError) -> Self {
+        WalError::IoError(e.into())
+    }
+}
+
 impl From<normfs_fs::FsError> for WalError {
     fn from(e: normfs_fs::FsError) -> Self {
         WalError::IoError(e.into())

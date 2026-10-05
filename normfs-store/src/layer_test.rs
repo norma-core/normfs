@@ -1,4 +1,4 @@
-use crate::backend::{Body, LocalStore, StoreBackend};
+use crate::backend::{Backend, Body, local_store};
 use crate::header::{CompressionType, EncryptionType};
 use crate::layer::Layer;
 use crate::{DiskUsage, store_file};
@@ -8,14 +8,9 @@ use normfs_types::QueueIdResolver;
 use std::sync::Arc;
 use uintn::UintN;
 
-fn local(root: &std::path::Path) -> Arc<dyn StoreBackend> {
+fn local(root: &std::path::Path) -> Arc<dyn Backend> {
     let fs = normfs_fs::Fs::new(normfs_fs::FsConfig::default()).unwrap();
-    Arc::new(LocalStore::new(
-        fs,
-        root,
-        false,
-        Arc::new(DiskUsage::default()),
-    ))
+    Arc::new(local_store(fs, root, false, Arc::new(DiskUsage::default())))
 }
 
 #[tokio::test]

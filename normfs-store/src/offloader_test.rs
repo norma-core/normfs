@@ -1,5 +1,5 @@
 use crate::DiskUsage;
-use crate::backend::{BackendError, BackendFuture, Body, End, LocalStore, StoreBackend};
+use crate::backend::{Backend, BackendError, BackendFuture, Body, End, local_store};
 use crate::header::{CompressionType, EncryptionType};
 use crate::layer::Layer;
 use crate::offloader::QueueOffloader;
@@ -24,7 +24,7 @@ struct Memory {
     lose: Mutex<u32>,
 }
 
-impl StoreBackend for Memory {
+impl Backend for Memory {
     fn source(&self) -> DataSource {
         DataSource::Cloud
     }
@@ -124,7 +124,7 @@ async fn a_file_moves_to_the_next_layer_once_it_accepts_it() {
     let temp = tempfile::TempDir::new().unwrap();
     let fs = normfs_fs::Fs::new(normfs_fs::FsConfig::default()).unwrap();
     let usage = Arc::new(DiskUsage::default());
-    let local: Arc<dyn StoreBackend> = Arc::new(LocalStore::new(fs, temp.path(), false, usage));
+    let local: Arc<dyn Backend> = Arc::new(local_store(fs, temp.path(), false, usage));
     let queue = QueueIdResolver::new("inst").resolve("cam");
     let file_id = UintN::from(1u64);
     let data = Bytes::from_static(b"a store file");
@@ -173,8 +173,8 @@ async fn a_file_kept_by_a_put_that_failed_is_reported_landed() {
     let crypto = CryptoContext::open(temp.path()).unwrap();
     let fs = normfs_fs::Fs::new(normfs_fs::FsConfig::default()).unwrap();
     let usage = Arc::new(DiskUsage::default());
-    let local: Arc<dyn StoreBackend> =
-        Arc::new(LocalStore::new(fs, temp.path().join("store"), false, usage));
+    let local: Arc<dyn Backend> =
+        Arc::new(local_store(fs, temp.path().join("store"), false, usage));
     let queue = QueueIdResolver::new("inst").resolve("cam");
     let file_id = UintN::from(7u64);
     let file = store_file::build(

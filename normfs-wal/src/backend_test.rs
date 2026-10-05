@@ -1,4 +1,4 @@
-use crate::backend::{AppendTarget, Appended, Fill, LocalWal, WalBackend, WalFuture, WalReader};
+use crate::backend::{AppendTarget, Appended, Backend, BackendFuture, Body, Fill, Local, Reader};
 use crate::{PackSlot, WalHeader, WalSettings, WalStore};
 use bytes::Bytes;
 use normfs_types::{DataSource, End, QueueId, QueueIdResolver};
@@ -9,7 +9,7 @@ use uintn::UintN;
 
 /// A backend that counts appends and hands everything else to the local one.
 struct Counting {
-    inner: LocalWal,
+    inner: Local,
     appends: Arc<AtomicU64>,
 }
 
@@ -23,22 +23,72 @@ impl AppendTarget for CountingTarget {
         self.inner.name()
     }
 
-    fn append(&self, at: u64, runs: Vec<Bytes>, sync: bool) -> WalFuture<'_, Appended> {
+    fn append(&self, at: u64, runs: Vec<Bytes>, sync: bool) -> BackendFuture<'_, Appended> {
         self.appends.fetch_add(1, Ordering::Relaxed);
         self.inner.append(at, runs, sync)
     }
 
-    fn restore(&self, at: u64) -> WalFuture<'_, ()> {
+    fn restore(&self, at: u64) -> BackendFuture<'_, ()> {
         self.inner.restore(at)
     }
 
-    fn size(&self) -> WalFuture<'_, u64> {
+    fn size(&self) -> BackendFuture<'_, u64> {
         self.inner.size()
     }
 }
 
-impl WalBackend for Counting {
-    fn prepare<'a>(&'a self, queue: &'a QueueId) -> WalFuture<'a, ()> {
+impl Backend for Counting {
+    fn source(&self) -> DataSource {
+        self.inner.source()
+    }
+
+    fn key(&self, queue: &QueueId, file_id: &UintN) -> String {
+        self.inner.key(queue, file_id)
+    }
+
+    fn put<'a>(&'a self, q: &'a QueueId, id: &'a UintN, body: Body) -> BackendFuture<'a, ()> {
+        self.inner.put(q, id, body)
+    }
+
+    fn get<'a>(&'a self, q: &'a QueueId, id: &'a UintN) -> BackendFuture<'a, Option<Bytes>> {
+        self.inner.get(q, id)
+    }
+
+    fn body<'a>(&'a self, q: &'a QueueId, id: &'a UintN) -> BackendFuture<'a, Option<Body>> {
+        self.inner.body(q, id)
+    }
+
+    fn get_range<'a>(
+        &'a self,
+        q: &'a QueueId,
+        id: &'a UintN,
+        offset: u64,
+        len: u64,
+    ) -> BackendFuture<'a, Option<Bytes>> {
+        self.inner.get_range(q, id, offset, len)
+    }
+
+    fn size<'a>(&'a self, q: &'a QueueId, id: &'a UintN) -> BackendFuture<'a, Option<u64>> {
+        self.inner.size(q, id)
+    }
+
+    fn find<'a>(&'a self, queue: &'a QueueId, end: End) -> BackendFuture<'a, Option<UintN>> {
+        self.inner.find(queue, end)
+    }
+
+    fn list<'a>(&'a self, queue: &'a QueueId) -> BackendFuture<'a, Vec<UintN>> {
+        self.inner.list(queue)
+    }
+
+    fn delete<'a>(&'a self, queue: &'a QueueId, file_id: &'a UintN) -> BackendFuture<'a, ()> {
+        self.inner.delete(queue, file_id)
+    }
+
+    fn clear<'a>(&'a self, queue: &'a QueueId) -> BackendFuture<'a, ()> {
+        self.inner.clear(queue)
+    }
+
+    fn prepare<'a>(&'a self, queue: &'a QueueId) -> BackendFuture<'a, ()> {
         self.inner.prepare(queue)
     }
 
@@ -48,7 +98,7 @@ impl WalBackend for Counting {
         file_id: &'a UintN,
         header: Bytes,
         sync: bool,
-    ) -> WalFuture<'a, Arc<dyn AppendTarget>> {
+    ) -> BackendFuture<'a, Arc<dyn AppendTarget>> {
         Box::pin(async move {
             let inner = self.inner.create(queue, file_id, header, sync).await?;
             let target: Arc<dyn AppendTarget> = Arc::new(CountingTarget {
@@ -63,7 +113,7 @@ impl WalBackend for Counting {
         &'a self,
         queue: &'a QueueId,
         file_id: &'a UintN,
-    ) -> WalFuture<'a, Arc<dyn AppendTarget>> {
+    ) -> BackendFuture<'a, Arc<dyn AppendTarget>> {
         self.inner.reopen(queue, file_id)
     }
 
@@ -71,12 +121,8 @@ impl WalBackend for Counting {
         &'a self,
         queue: &'a QueueId,
         file_id: &'a UintN,
-    ) -> WalFuture<'a, Option<(WalReader, u64)>> {
+    ) -> BackendFuture<'a, Option<(Reader, u64)>> {
         self.inner.open_read(queue, file_id)
-    }
-
-    fn read<'a>(&'a self, queue: &'a QueueId, file_id: &'a UintN) -> WalFuture<'a, Option<Bytes>> {
-        self.inner.read(queue, file_id)
     }
 
     fn read_into<'a>(
@@ -85,24 +131,8 @@ impl WalBackend for Counting {
         file_id: &'a UintN,
         slot: PackSlot,
         cap: usize,
-    ) -> WalFuture<'a, (PackSlot, Fill)> {
+    ) -> BackendFuture<'a, (PackSlot, Fill)> {
         self.inner.read_into(queue, file_id, slot, cap)
-    }
-
-    fn find<'a>(&'a self, queue: &'a QueueId, end: End) -> WalFuture<'a, Option<UintN>> {
-        self.inner.find(queue, end)
-    }
-
-    fn list<'a>(&'a self, queue: &'a QueueId) -> WalFuture<'a, Vec<UintN>> {
-        self.inner.list(queue)
-    }
-
-    fn delete<'a>(&'a self, queue: &'a QueueId, file_id: &'a UintN) -> WalFuture<'a, ()> {
-        self.inner.delete(queue, file_id)
-    }
-
-    fn clear<'a>(&'a self, queue: &'a QueueId) -> WalFuture<'a, ()> {
-        self.inner.clear(queue)
     }
 }
 
@@ -112,7 +142,7 @@ async fn a_wal_store_writes_batches_through_its_backend() {
     let fs = normfs_fs::Fs::new(normfs_fs::FsConfig::default()).unwrap();
     let appends = Arc::new(AtomicU64::new(0));
     let backend = Arc::new(Counting {
-        inner: LocalWal::new(fs, dir.path()),
+        inner: Local::wal(fs, dir.path()),
         appends: appends.clone(),
     });
     let (written_tx, _) = mpsc::unbounded_channel();

@@ -29,7 +29,7 @@ pub mod store_file;
 pub mod store_header_v1;
 mod writer;
 
-pub use backend::{BackendError, Body, End, LocalStore, StoreBackend};
+pub use backend::{Backend, BackendError, Body, End, Local, local_store};
 pub use layer::Layer;
 pub use page_writer::{PageStoreWriter, PageWriterSettings};
 pub use sink::{AfterLanding, LandedIndex, LayerSink, SealedFileSink};
@@ -232,7 +232,7 @@ impl PersistStore {
         let (store_done_tx, store_done_rx) = mpsc::unbounded_channel();
 
         let disk_usage = Arc::new(DiskUsage::default());
-        let backend = LocalStore::new(fs.clone(), &root_path, true, disk_usage.clone());
+        let backend = local_store(fs.clone(), &root_path, true, disk_usage.clone());
         let verify = config.verify_signatures.then(|| crypto_ctx.clone());
 
         Self {
@@ -331,7 +331,7 @@ impl PersistStore {
 
     /// The local layer as a page writer's sink, with the queue's own fsync.
     pub fn local_sink(&self, fsync: bool) -> Arc<LayerSink> {
-        let put = LocalStore::new(self.fs.clone(), &self.root, fsync, self.disk_usage.clone());
+        let put = local_store(self.fs.clone(), &self.root, fsync, self.disk_usage.clone());
         let after = AfterLanding::Announce(self.store_done_tx.clone());
         Arc::new(
             LayerSink::new(self.local.clone(), after, self.events.clone()).with_put(Arc::new(put)),

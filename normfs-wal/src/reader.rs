@@ -2,7 +2,7 @@ use bytes::{Buf, Bytes, BytesMut};
 use normfs_types::{DataSource, ReadEntry};
 use std::path::Path;
 
-use crate::backend::WalReader;
+use crate::backend::Reader;
 use tokio::io::{AsyncRead, AsyncReadExt, BufReader};
 use tokio::sync::mpsc;
 use uintn::{UintN, varint};
@@ -146,7 +146,7 @@ async fn open(
     fs: &normfs_fs::Fs,
     base_path: &Path,
     file_id: &UintN,
-) -> Result<Option<(WalReader, u64)>, WalError> {
+) -> Result<Option<(Reader, u64)>, WalError> {
     let file_path = file_id.to_file_path(base_path.to_str().unwrap(), "wal");
     match fs.open_read(&file_path).await {
         Ok(file) => {
@@ -167,7 +167,7 @@ pub async fn read_wal_header(
 }
 
 pub(crate) async fn read_wal_header_from(
-    file: Option<(WalReader, u64)>,
+    file: Option<(Reader, u64)>,
     file_id: &UintN,
 ) -> Result<WalHeader, WalError> {
     log::debug!("WAL reader: reading header from file {}", file_id);
@@ -214,7 +214,7 @@ pub async fn get_wal_range(
 }
 
 pub(crate) async fn get_wal_range_from(
-    file: Option<(WalReader, u64)>,
+    file: Option<(Reader, u64)>,
     file_id: &UintN,
 ) -> Result<(WalHeader, Option<(UintN, UintN)>), WalError> {
     log::debug!("WAL reader: getting entry range from file {}", file_id);
@@ -566,7 +566,7 @@ pub async fn read_wal_file_range(
 }
 
 pub(crate) async fn read_wal_file_range_from(
-    file: Option<(WalReader, u64)>,
+    file: Option<(Reader, u64)>,
     file_id: &UintN,
     from_id: &UintN,
     until_id: &Option<UintN>,

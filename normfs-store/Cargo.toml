@@ -22,7 +22,6 @@ tokio = { version = "1", features = ["full"] }
 bytes = "1"
 normfs-wal = { version = "0.3.5", path = "../normfs-wal" }
 normfs-fs = { version = "0.3.5", path = "../normfs-fs" }
-uuid = { version = "1", features = ["v4", "fast-rng"] }
 
 # Compression libraries - C bindings (default, faster for zstd)
 zstd = { version = "0.13.1", optional = true, default-features = false }
@@ -39,6 +38,7 @@ lzma-rust2 = "0.16"
 cc = "1"
 
 [dev-dependencies]
+uuid = { version = "1", features = ["v4", "fast-rng"] }
 criterion = { version = "0.4", features = ["async_tokio"] }
 tempfile = "3"
 

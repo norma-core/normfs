@@ -1,5 +1,5 @@
 use bytes::{Bytes, BytesMut};
-use normfs_store::backend::{BackendError, BackendFuture, Body, End, StoreBackend};
+use normfs_store::backend::{Backend, BackendError, BackendFuture, Body, End};
 use normfs_types::{DataSource, QueueId};
 use std::sync::Arc;
 use uintn::UintN;
@@ -8,10 +8,10 @@ use crate::client::S3Client;
 use crate::errors::CloudError;
 use crate::paths;
 
-/// The bucket as a [`StoreBackend`]. A put is a PUT of the whole key and a
+/// The bucket as a [`Backend`]. A put is a PUT of the whole key and a
 /// HEAD that reads its size back; S3 and its lookalikes are read-after-write
 /// consistent for a new key, so the HEAD is the verification and nothing has
-/// to wait for it.
+/// to wait for it. Appending, deleting and listing answer `Unsupported`.
 pub struct S3Store {
     client: Arc<S3Client>,
     prefix: String,
@@ -57,7 +57,7 @@ impl From<CloudError> for BackendError {
     }
 }
 
-impl StoreBackend for S3Store {
+impl Backend for S3Store {
     fn source(&self) -> DataSource {
         DataSource::Cloud
     }

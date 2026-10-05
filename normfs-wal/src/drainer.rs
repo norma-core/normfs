@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use uintn::UintN;
 
 use crate::WalFile;
-use crate::backend::{Appended, WalBackend};
+use crate::backend::{Appended, Backend};
 use crate::page_pool::{PagePool, Stranded};
 use std::sync::Arc;
 
@@ -43,7 +43,7 @@ pub(crate) enum DrainRequest {
 /// queued after the sender drops -- so a close that reports itself incomplete
 /// can be followed by one that succeeds.
 pub(crate) fn spawn(
-    backend: Arc<dyn WalBackend>,
+    backend: Arc<dyn Backend>,
     pool: Arc<PagePool>,
     wal_complete_sender: mpsc::UnboundedSender<WalFile>,
     written_sender: mpsc::UnboundedSender<(QueueId, UintN)>,
@@ -74,7 +74,7 @@ pub(crate) fn spawn(
 }
 
 /// False only for a failure no retry can pass, never for giving up on one.
-async fn land(backend: &dyn WalBackend, file: &StrandedFile) -> bool {
+async fn land(backend: &dyn Backend, file: &StrandedFile) -> bool {
     let mut attempt: u32 = 0;
     loop {
         match attempt_once(backend, file).await {
@@ -120,7 +120,7 @@ enum Failure {
     Fatal,
 }
 
-async fn attempt_once(backend: &dyn WalBackend, file: &StrandedFile) -> Result<(), Failure> {
+async fn attempt_once(backend: &dyn Backend, file: &StrandedFile) -> Result<(), Failure> {
     // Never `create`: a close usually fails on a full disk, which is when the
     // offload monitor deletes WAL files oldest-first, and this is the oldest
     // survivor. Creating it would pair the truncate with an empty file and
@@ -129,24 +129,28 @@ async fn attempt_once(backend: &dyn WalBackend, file: &StrandedFile) -> Result<(
         .reopen(&file.queue_id, &file.file_id)
         .await
         .map_err(|e| {
+            let e = std::io::Error::from(e);
             if e.kind() == std::io::ErrorKind::NotFound {
                 Fatal
             } else {
                 Transient(e)
             }
         })?;
-    if target.size().await.map_err(Transient)? < file.valid_len {
+    if target.size().await.map_err(|e| Transient(e.into()))? < file.valid_len {
         return Err(Fatal);
     }
 
     // Before every attempt: a previous one may have left bytes behind, and V1
     // derives ids from position, so a stray frame renumbers what follows.
-    target.restore(file.valid_len).await.map_err(Transient)?;
+    target
+        .restore(file.valid_len)
+        .await
+        .map_err(|e| Transient(e.into()))?;
 
     let runs = file.stranded.runs.iter().map(|(_, b)| b.clone()).collect();
     match target.append(file.valid_len, runs, file.fsync).await {
         Ok(Appended::Committed) => Ok(()),
         Ok(Appended::Failed { err, .. }) => Err(Transient(err)),
-        Err(e) => Err(Transient(e)),
+        Err(e) => Err(Transient(e.into())),
     }
 }

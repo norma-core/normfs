@@ -4,7 +4,7 @@ use normfs_types::{BoundedMap, DataSource, QueueId};
 use std::sync::{Arc, RwLock};
 use uintn::{Error as UintNError, UintN};
 
-use crate::backend::{BackendError, End, StoreBackend};
+use crate::backend::{Backend, BackendError, End};
 use crate::header::{FileAuthentication, StoreHeaderError};
 use crate::store_file::HEAD_LEN;
 use crate::store_header_v1::{AnyStoreHeader, AnyStoreHeaderError};
@@ -14,7 +14,7 @@ const RANGE_CACHE_CAP: usize = 4096;
 /// One place a queue's store files live, with what is known about them: the
 /// entry range of each file, cached so a lookup reads a header once.
 pub struct Layer {
-    backend: Arc<dyn StoreBackend>,
+    backend: Arc<dyn Backend>,
     ranges: RwLock<BoundedMap<String, (UintN, UintN)>>,
     verify_headers: Option<Arc<CryptoContext>>,
     verify_bodies: bool,
@@ -81,7 +81,7 @@ impl Layer {
     /// `verify_headers` checks the header signature on every range read;
     /// `verify_bodies` asks readers to check whole files they take from here.
     pub fn new(
-        backend: Arc<dyn StoreBackend>,
+        backend: Arc<dyn Backend>,
         verify_headers: Option<Arc<CryptoContext>>,
         verify_bodies: bool,
     ) -> Self {
@@ -93,7 +93,7 @@ impl Layer {
         }
     }
 
-    pub fn backend(&self) -> &Arc<dyn StoreBackend> {
+    pub fn backend(&self) -> &Arc<dyn Backend> {
         &self.backend
     }
 

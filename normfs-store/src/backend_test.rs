@@ -1,13 +1,13 @@
 use crate::DiskUsage;
-use crate::backend::{Body, End, LocalStore, StoreBackend};
+use crate::backend::{Backend, Body, End, Local, local_store};
 use bytes::Bytes;
 use normfs_types::{DataSource, QueueIdResolver};
 use std::sync::Arc;
 use uintn::UintN;
 
-fn local(root: &std::path::Path, usage: Arc<DiskUsage>) -> LocalStore {
+fn local(root: &std::path::Path, usage: Arc<DiskUsage>) -> Local {
     let fs = normfs_fs::Fs::new(normfs_fs::FsConfig::default()).unwrap();
-    LocalStore::new(fs, root, false, usage)
+    local_store(fs, root, false, usage)
 }
 
 #[tokio::test]

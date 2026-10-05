@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 use uintn::UintN;
 
-use crate::backend::{Body, StoreBackend};
+use crate::backend::{Backend, Body};
 use crate::layer::Layer;
 use crate::store_file::{self, SealedFile};
 
@@ -54,7 +54,7 @@ pub enum AfterLanding {
 /// local layer it is moved on to the next by the offloader.
 pub struct LayerSink {
     layer: Arc<Layer>,
-    put: Arc<dyn StoreBackend>,
+    put: Arc<dyn Backend>,
     after: AfterLanding,
     events: EventSink,
 }
@@ -71,7 +71,7 @@ impl LayerSink {
 
     /// The layer's files written through another backend over the same place,
     /// as for a queue whose fsync setting differs from the layer's.
-    pub fn with_put(mut self, put: Arc<dyn StoreBackend>) -> Self {
+    pub fn with_put(mut self, put: Arc<dyn Backend>) -> Self {
         self.put = put;
         self
     }

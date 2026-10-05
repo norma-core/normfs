@@ -3,7 +3,7 @@ use std::time::Duration;
 use std::sync::Arc;
 
 use crate::ack_file_writer::{AckFileWriter, AckFileWriterSettings};
-use crate::backend::WalBackend;
+use crate::backend::Backend;
 use crate::page_pool::{PagePool, Placement, RotateHint};
 use crate::wal_entry_v1::{self, WalEntryV1, WalEntryV1Error};
 use crate::wal_header::WalHeader;
@@ -30,7 +30,7 @@ pub struct WalWriter {
 }
 
 struct WriterState {
-    backend: Arc<dyn WalBackend>,
+    backend: Arc<dyn Backend>,
     queue_id: QueueId,
     file_id: UintN,
     header: WalHeader,
@@ -68,7 +68,7 @@ struct WriterState {
 
 impl WalWriter {
     pub async fn new(
-        backend: Arc<dyn WalBackend>,
+        backend: Arc<dyn Backend>,
         queue: &QueueId,
         file_id: &UintN,
         header: WalHeader,
@@ -800,7 +800,7 @@ const ROTATE_RETRY_DELAY: Duration = Duration::from_millis(10);
 const ROTATE_WARN_EVERY: u32 = 500;
 
 async fn new_file_writer(
-    backend: &dyn WalBackend,
+    backend: &dyn Backend,
     queue: &QueueId,
     file_id: &UintN,
     header: &WalHeader,
