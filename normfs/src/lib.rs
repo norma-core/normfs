@@ -51,6 +51,8 @@ pub struct NormFS {
     store: Arc<PersistStore>,
     mem: Arc<mem::MemStore>,
     disk_monitor: Option<Arc<DiskMonitor>>,
+    /// `None` without a bucket.
+    offloaders: Option<Arc<offload::offloaders::Offloaders>>,
     cloud: Option<Arc<Layer>>,
     /// `None` without cloud settings; `new` refuses any rule that asks for cloud then.
     cloud_sink: Option<Arc<normfs_store::LayerSink>>,
@@ -535,14 +537,9 @@ impl NormFS {
             let store = store_arc.clone();
             let forget_range: offload::disk_monitor::ForgetRange =
                 Arc::new(move |queue, file_id| store.forget_file_range(queue, file_id));
-            let offload = cloud.clone().map(|to| offload::disk_monitor::Offload {
-                from: store_arc.local().clone(),
-                to,
-            });
             match DiskMonitor::new(
                 fs.clone(),
                 &path,
-                offload,
                 Some(forget_range),
                 store_arc.disk_usage(),
                 events.clone(),
@@ -560,22 +557,21 @@ impl NormFS {
             None
         };
 
+        let offloaders = cloud.clone().map(|to| {
+            Arc::new(offload::offloaders::Offloaders::new(
+                store_arc.local().clone(),
+                to,
+                events.clone(),
+            ))
+        });
+
         // Always consume store completions to prevent SendError on the sender side
-        // Forward to offload queue if disk monitor is enabled
-        let monitor_opt = disk_monitor.clone();
+        let offloaders_rx = offloaders.clone();
         tokio::spawn(async move {
             let mut store_done_rx = store_done_rx;
             while let Some((queue_id, file_id)) = store_done_rx.recv().await {
-                if let Some(ref monitor) = monitor_opt {
-                    log::debug!(target: "normfs",
-                        "Received store completion for queue: {}, file_id: {:?}",
-                        queue_id, file_id);
-
-                    if let Err(e) = monitor.store_file_done(&queue_id, file_id.clone()).await {
-                        log::error!(target: "normfs",
-                            "Failed to forward store completion: queue={}, file_id={:?}, error={}",
-                            queue_id, file_id, e);
-                    }
+                if let Some(offloaders) = &offloaders_rx {
+                    offloaders.file_landed(&queue_id, file_id).await;
                 }
             }
             log::info!(target: "normfs", "Store completion forwarding task ended");
@@ -617,6 +613,7 @@ impl NormFS {
             store: store_arc,
             mem,
             disk_monitor,
+            offloaders,
             cloud,
             cloud_sink,
             memory_pointers,
@@ -1466,6 +1463,11 @@ impl NormFS {
             });
         }
 
+        let offloader = match (&self.offloaders, persist.store && persist.cloud) {
+            (Some(offloaders), true) => Some(offloaders.start(queue).await),
+            _ => None,
+        };
+
         // The disk monitor watches local store files; a cloud-direct queue
         // has none.
         if let (Some(disk_monitor), Some(max_size), true) = (
@@ -1480,7 +1482,7 @@ impl NormFS {
                 offload: persist.cloud,
             };
 
-            disk_monitor.add_queue(queue, config).await?;
+            disk_monitor.add_queue(queue, config, offloader).await?;
             log::info!(target: "normfs", "Added queue '{}' to disk monitor with max_size: {}", queue, max_size);
         }
 

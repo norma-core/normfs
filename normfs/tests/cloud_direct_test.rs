@@ -476,7 +476,6 @@ async fn each_offloaded_store_file_is_recorded_in_the_system_queue() {
     let fs = open(
         temp.path(),
         NormFsSettings {
-            // The offloader runs under the disk monitor.
             max_disk_usage_per_queue: Some(1 << 30),
             ..settings_with(cloud.clone(), persist)
         },
@@ -489,5 +488,30 @@ async fn each_offloaded_store_file_is_recorded_in_the_system_queue() {
 
     let landed = landed_records(&fs, 2).await;
     assert_landed(&cloud, &queue, &landed, 2).await;
+    fs.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_store_queue_with_cloud_is_offloaded_without_a_disk_limit() {
+    let Some(cloud) = s3().await else { return };
+    let temp = tempfile::TempDir::new().unwrap();
+    let persist = Persist {
+        wal: false,
+        store: true,
+        cloud: true,
+    };
+    let settings = settings_with(cloud.clone(), persist);
+    assert!(settings.max_disk_usage_per_queue.is_none());
+    let fs = open(temp.path(), settings).await;
+    let queue = fs.resolve("cam0");
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    write(&fs, &queue, 2 * PER_PAGE).await;
+    fs.flush_queue(&queue).await.unwrap();
+
+    let landed = landed_records(&fs, 2).await;
+    assert_landed(&cloud, &queue, &landed, 2).await;
+    assert!(queue
+        .to_store_path(temp.path(), &UintN::from(1u64))
+        .exists());
     fs.close().await.unwrap();
 }
