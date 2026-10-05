@@ -206,7 +206,7 @@ impl MemoryPointers {
     }
 }
 
-impl normfs_cloud::LandedIndex for MemoryPointers {
+impl normfs_store::LandedIndex for MemoryPointers {
     fn mark_landed<'a>(
         &'a self,
         queue: &'a QueueId,

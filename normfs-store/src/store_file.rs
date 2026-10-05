@@ -57,6 +57,14 @@ impl SealedFile {
         self.len() == 0
     }
 
+    /// The file as runs to write or send; one when it was built in one buffer.
+    pub fn runs(&self) -> Vec<Bytes> {
+        match &self.whole {
+            Some(whole) => vec![whole.clone()],
+            None => vec![self.auth.clone(), self.header.clone(), self.body.clone()],
+        }
+    }
+
     pub fn to_bytes(&self) -> Bytes {
         if let Some(whole) = &self.whole {
             return whole.clone();
@@ -227,23 +235,10 @@ fn compress_and_encrypt(
     Ok(out)
 }
 
-/// Writes `file` under `root` as `queue`'s store file `file_id`: temp file,
+/// Writes `runs` under `root` as `queue`'s store file `file_id`: temp file,
 /// sync, rename, then the directory synced so the name survives a crash too.
 /// The fs layer's PUBLISH plan is that sequence, and its proof is what says
 /// the name never resolves to a torn file.
-pub async fn land_local(
-    fs: &Fs,
-    root: &Path,
-    queue: &QueueId,
-    file_id: &UintN,
-    file: &SealedFile,
-    fsync: bool,
-    usage: &DiskUsage,
-) -> io::Result<()> {
-    let runs = vec![file.auth.clone(), file.header.clone(), file.body.clone()];
-    publish_local(fs, root, queue, file_id, runs, fsync, usage).await
-}
-
 pub(crate) async fn publish_local(
     fs: &Fs,
     root: &Path,

@@ -147,6 +147,13 @@ pub trait StoreBackend: Send + Sync {
         file_id: &'a UintN,
     ) -> BackendFuture<'a, Option<Bytes>>;
 
+    /// The whole file as a body another backend can take.
+    fn body<'a>(
+        &'a self,
+        queue: &'a QueueId,
+        file_id: &'a UintN,
+    ) -> BackendFuture<'a, Option<Body>>;
+
     /// Up to `len` bytes from `offset`; fewer when the file is shorter.
     fn get_range<'a>(
         &'a self,
@@ -183,13 +190,6 @@ impl LocalStore {
 
     pub fn path(&self, queue: &QueueId, file_id: &UintN) -> PathBuf {
         queue.to_store_path(&self.root, file_id)
-    }
-
-    /// The file to stream out, and its length.
-    pub async fn open(&self, queue: &QueueId, file_id: &UintN) -> io::Result<(ReadFile, u64)> {
-        let file = self.fs.open_read(&self.path(queue, file_id)).await?;
-        let len = file.metadata().await?.len();
-        Ok((file, len))
     }
 }
 
@@ -247,6 +247,20 @@ impl StoreBackend for LocalStore {
         Box::pin(async move {
             let read = self.fs.read_whole(&self.path(queue, file_id)).await;
             absent(read.map_err(io::Error::from))
+        })
+    }
+
+    fn body<'a>(
+        &'a self,
+        queue: &'a QueueId,
+        file_id: &'a UintN,
+    ) -> BackendFuture<'a, Option<Body>> {
+        Box::pin(async move {
+            let Some(file) = absent(self.fs.open_read(&self.path(queue, file_id)).await)? else {
+                return Ok(None);
+            };
+            let len = file.metadata().await?.len();
+            Ok(Some(Body::Stream { file, len }))
         })
     }
 

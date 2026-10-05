@@ -53,7 +53,7 @@ pub struct NormFS {
     disk_monitor: Option<Arc<DiskMonitor>>,
     cloud: Option<Arc<Layer>>,
     /// `None` without cloud settings; `new` refuses any rule that asks for cloud then.
-    cloud_sink: Option<Arc<normfs_cloud::CloudSink>>,
+    cloud_sink: Option<Arc<normfs_store::LayerSink>>,
     memory_pointers: Arc<memory_pointers::MemoryPointers>,
     memory_pointer_task: JoinHandle<()>,
     crypto_ctx: Arc<CryptoContext>,
@@ -535,11 +535,14 @@ impl NormFS {
             let store = store_arc.clone();
             let forget_range: offload::disk_monitor::ForgetRange =
                 Arc::new(move |queue, file_id| store.forget_file_range(queue, file_id));
+            let offload = cloud.clone().map(|to| offload::disk_monitor::Offload {
+                from: store_arc.local().clone(),
+                to,
+            });
             match DiskMonitor::new(
                 fs.clone(),
                 &path,
-                cloud_client.clone(),
-                cloud_prefix.clone(),
+                offload,
                 Some(forget_range),
                 store_arc.disk_usage(),
                 events.clone(),
@@ -582,10 +585,13 @@ impl NormFS {
             if settings.max_disk_usage_per_queue.is_some() { "enabled" } else { "disabled" },
             if cloud.is_some() { "enabled" } else { "disabled" });
 
+        // A queue whose first layer is the bucket keeps nothing local to list
+        // on restart, so its landings are recorded.
         let cloud_sink = cloud.as_ref().map(|cloud| {
-            Arc::new(normfs_cloud::CloudSink::new(
+            let after = normfs_store::AfterLanding::Record(memory_pointers.clone());
+            Arc::new(normfs_store::LayerSink::new(
                 cloud.clone(),
-                memory_pointers.clone(),
+                after,
                 events.clone(),
             ))
         });
@@ -1395,6 +1401,8 @@ impl NormFS {
                 }
                 Drainer::Page => {
                     let pool = self.mem.pool(queue).ok_or(Error::QueueNotFound)?;
+                    // A sealed page lands in the queue's first layer: the local
+                    // store when it keeps one, else the bucket.
                     let sink: Arc<dyn normfs_store::SealedFileSink> = if persist.store {
                         // `continue_queue` may hand back the latest WAL file
                         // for reuse when it is header-only. This writer never

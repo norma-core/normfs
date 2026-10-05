@@ -18,6 +18,7 @@ mod compression;
 mod disk_usage;
 pub use disk_usage::{DiskUsage, QueueBytes};
 pub mod header;
+pub mod offloader;
 mod pack;
 pub use pack::{PackError, Packer};
 pub mod layer;
@@ -31,11 +32,13 @@ mod writer;
 pub use backend::{BackendError, Body, End, LocalStore, StoreBackend};
 pub use layer::Layer;
 pub use page_writer::{PageStoreWriter, PageWriterSettings};
-pub use sink::{LocalStoreSink, SealedFileSink};
+pub use sink::{AfterLanding, LandedIndex, LayerSink, SealedFileSink};
 pub use store_file::SealedFile;
 
 #[cfg(test)]
 mod backend_test;
+#[cfg(test)]
+mod offloader_test;
 #[cfg(test)]
 mod page_writer_test;
 #[cfg(test)]
@@ -293,11 +296,9 @@ impl PersistStore {
             .expect("start_writers is called once");
 
         let worker = Arc::new(writer::StoreWriteWorker::new(
-            self.root.clone(),
             self.crypto_ctx.clone(),
             self.wal_store.clone(),
             self.local.clone(),
-            self.disk_usage.clone(),
             self.wal_packer.clone(),
             self.events.clone(),
         ));
@@ -327,16 +328,13 @@ impl PersistStore {
         &self.fs
     }
 
-    pub fn local_sink(&self, fsync: bool) -> Arc<LocalStoreSink> {
-        Arc::new(LocalStoreSink::new(
-            self.fs.clone(),
-            self.root.clone(),
-            self.local.clone(),
-            self.disk_usage.clone(),
-            self.store_done_tx.clone(),
-            self.events.clone(),
-            fsync,
-        ))
+    /// The local layer as a page writer's sink, with the queue's own fsync.
+    pub fn local_sink(&self, fsync: bool) -> Arc<LayerSink> {
+        let put = LocalStore::new(self.fs.clone(), &self.root, fsync, self.disk_usage.clone());
+        let after = AfterLanding::Announce(self.store_done_tx.clone());
+        Arc::new(
+            LayerSink::new(self.local.clone(), after, self.events.clone()).with_put(Arc::new(put)),
+        )
     }
 
     pub fn start_page_writer(

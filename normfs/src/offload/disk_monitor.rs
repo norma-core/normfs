@@ -10,10 +10,9 @@ use tokio::time;
 use uintn::UintN;
 
 use crate::Error;
-use normfs_cloud::offloader::QueueOffloader;
-use normfs_cloud::S3Client;
 use normfs_fs::Fs;
-use normfs_store::{DiskUsage, QueueBytes, StoreError};
+use normfs_store::offloader::QueueOffloader;
+use normfs_store::{DiskUsage, Layer, QueueBytes, StoreError};
 use normfs_types::events::{self, EventSink, EvictionBlock, SystemEvent};
 use normfs_types::QueueId;
 use normfs_wal::WalSettings;
@@ -458,24 +457,15 @@ impl QueueMonitor {
         queue_id: QueueId,
         config: DiskMonitorConfig,
         root_path: PathBuf,
-        client: Option<Arc<S3Client>>,
-        prefix: Option<&str>,
+        offload: Option<Offload>,
         forget_range: Option<ForgetRange>,
         disk_usage: Arc<DiskUsage>,
         events: EventSink,
     ) -> Result<Self, Error> {
-        let offloader = match (client, prefix) {
-            (Some(client), Some(prefix)) if config.offload => Some(
-                QueueOffloader::new(
-                    fs.clone(),
-                    queue_id.clone(),
-                    root_path.clone(),
-                    client,
-                    prefix,
-                    events.clone(),
-                )
-                .await,
-            ),
+        let offloader = match offload {
+            Some(Offload { from, to }) if config.offload => {
+                Some(QueueOffloader::new(from, to, queue_id.clone(), events.clone()).await)
+            }
             _ => None,
         };
 
@@ -758,19 +748,25 @@ pub struct DiskMonitor {
     monitors: Arc<RwLock<std::collections::HashMap<QueueId, QueueMonitor>>>,
     root_path: PathBuf,
     _handle: Option<tokio::task::JoinHandle<()>>,
-    client: Option<Arc<S3Client>>,
-    prefix: Option<String>,
+    offload: Option<Offload>,
     forget_range: Option<ForgetRange>,
     disk_usage: Arc<DiskUsage>,
     events: EventSink,
+}
+
+/// The layer a monitored queue's files are moved from, and the one they are
+/// moved to before eviction may delete them.
+#[derive(Clone)]
+pub struct Offload {
+    pub from: Arc<Layer>,
+    pub to: Arc<Layer>,
 }
 
 impl DiskMonitor {
     pub async fn new(
         fs: Fs,
         root_path: impl AsRef<Path>,
-        client: Option<Arc<S3Client>>,
-        prefix: Option<String>,
+        offload: Option<Offload>,
         forget_range: Option<ForgetRange>,
         disk_usage: Arc<DiskUsage>,
         events: EventSink,
@@ -811,8 +807,7 @@ impl DiskMonitor {
             monitors,
             root_path: root_path.as_ref().to_path_buf(),
             _handle: Some(handle),
-            client,
-            prefix,
+            offload,
             forget_range,
             disk_usage,
             events,
@@ -861,8 +856,7 @@ impl DiskMonitor {
             queue_id.clone(),
             config,
             self.root_path.clone(),
-            self.client.clone(),
-            self.prefix.as_deref(),
+            self.offload.clone(),
             self.forget_range.clone(),
             self.disk_usage.clone(),
             self.events.clone(),

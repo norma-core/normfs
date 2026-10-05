@@ -43,7 +43,6 @@ async fn the_tracked_size_follows_completions_and_deletions() {
         test_fs(),
         root,
         None,
-        None,
         Some(forget),
         Arc::new(DiskUsage::default()),
         events::discard(),
@@ -172,7 +171,6 @@ async fn delayed_and_duplicate_completions_do_not_count_scanned_files_again() {
         root,
         None,
         None,
-        None,
         usage.clone(),
         events::discard(),
     )
@@ -247,7 +245,6 @@ async fn concurrent_rescans_and_out_of_order_publications_preserve_usage() {
         root.to_path_buf(),
         None,
         None,
-        None,
         usage.clone(),
         events::discard(),
     )
@@ -306,7 +303,6 @@ async fn seeded_monitor_with(
             offload: false,
         },
         root.to_path_buf(),
-        None,
         None,
         None,
         Arc::new(DiskUsage::default()),

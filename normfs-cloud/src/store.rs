@@ -104,6 +104,17 @@ impl StoreBackend for S3Store {
         Box::pin(async move { Ok(self.client.get_object(&self.key(queue, file_id)).await?) })
     }
 
+    fn body<'a>(
+        &'a self,
+        queue: &'a QueueId,
+        file_id: &'a UintN,
+    ) -> BackendFuture<'a, Option<Body>> {
+        Box::pin(async move {
+            let data = self.client.get_object(&self.key(queue, file_id)).await?;
+            Ok(data.map(|data| Body::Runs(vec![data])))
+        })
+    }
+
     fn get_range<'a>(
         &'a self,
         queue: &'a QueueId,
