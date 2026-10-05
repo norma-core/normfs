@@ -907,3 +907,30 @@ async fn failed_restore_blocks_later_batches_until_the_tail_is_repaired() {
     assert_eq!(std::fs::read(&path).unwrap(), b"new");
     assert!(!tail.needs_restore);
 }
+
+#[tokio::test]
+async fn a_pooled_writer_reserves_no_entry_buffer() {
+    use crate::page_pool::PagePool;
+    use std::sync::Arc;
+
+    let dir = tempdir().unwrap();
+    let (ack_sender, _ack_receiver) = mpsc::unbounded_channel();
+    let settings = AckFileWriterSettings {
+        max_buffer_size: 128 * 1024 * 1024,
+        ..Default::default()
+    };
+    let mut writer = AckFileWriter::new(
+        test_fs(),
+        dir.path().join("pooled.wal"),
+        settings,
+        ack_sender,
+        Bytes::from_static(b"HDR!"),
+        Some(Arc::new(PagePool::new(4, 4096, 0))),
+        0,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(writer.buffer_capacity().await, 0);
+    writer.close().await.unwrap();
+}
