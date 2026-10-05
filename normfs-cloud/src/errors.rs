@@ -6,7 +6,6 @@ pub enum CloudError {
     Xml(quick_xml::DeError),
     UintN(uintn::Error),
     NoFilesFound,
-    StoreHeader(normfs_store::StoreError),
     Io(std::io::Error),
     InvalidUrl(url::ParseError),
     InvalidStatusCode(u16),
@@ -20,7 +19,6 @@ impl fmt::Display for CloudError {
             CloudError::Xml(e) => write!(f, "XML parsing error: {}", e),
             CloudError::UintN(e) => write!(f, "UintN error: {}", e),
             CloudError::NoFilesFound => write!(f, "No files found"),
-            CloudError::StoreHeader(e) => write!(f, "Store header error: {}", e),
             CloudError::Io(e) => write!(f, "IO error: {}", e),
             CloudError::InvalidUrl(e) => write!(f, "Invalid URL: {}", e),
             CloudError::InvalidStatusCode(code) => write!(f, "Invalid status code: {}", code),
@@ -38,7 +36,6 @@ impl std::error::Error for CloudError {
             CloudError::Xml(e) => Some(e),
             CloudError::UintN(e) => Some(e),
             CloudError::NoFilesFound => None,
-            CloudError::StoreHeader(e) => Some(e),
             CloudError::Io(e) => Some(e),
             CloudError::InvalidUrl(e) => Some(e),
             CloudError::InvalidStatusCode(_) | CloudError::TruncatedListingWithoutToken => None,
@@ -67,12 +64,6 @@ impl From<url::ParseError> for CloudError {
 impl From<uintn::Error> for CloudError {
     fn from(err: uintn::Error) -> Self {
         CloudError::UintN(err)
-    }
-}
-
-impl From<normfs_store::StoreError> for CloudError {
-    fn from(err: normfs_store::StoreError) -> Self {
-        CloudError::StoreHeader(err)
     }
 }
 

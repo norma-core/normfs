@@ -58,6 +58,11 @@ only its last id survives a restart. `cloud` sends that queue's store files to
 the bucket: offloaded from the local store when there is one, landed there
 directly from the sealed page when there is not.
 
+The local store and the bucket are one interface, `StoreBackend`
+(`normfs-store/src/backend.rs`), so these stages are a queue's file layers in
+order: a sealed file lands in the first, one offloader moves it to the next,
+and reads ask each layer for a file's range and bytes the same way.
+
 NormFS records its own work in the queue `normfs/system`, one
 `normfs.system.Event` (`normfs/proto/normfs_system.proto`) per record: each
 store file once it is on the local disk (`ET_FILE_ON_DISK`) and once it is in

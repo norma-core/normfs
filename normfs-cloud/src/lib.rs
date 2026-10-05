@@ -1,12 +1,9 @@
-mod cache;
 mod client;
-pub mod downloader;
 pub mod errors;
 mod paths;
 pub mod store;
 
 pub use client::S3Client;
-pub use downloader::CloudDownloader;
 pub use paths::is_id_component;
 pub use store::S3Store;
 

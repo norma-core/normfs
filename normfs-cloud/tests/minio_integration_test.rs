@@ -1,5 +1,6 @@
 use bytes::Bytes;
 use normfs_cloud::{CloudSettings, S3Client};
+use normfs_store::{Body, End, StoreBackend};
 use std::env;
 
 /// Helper function to get cloud settings from standard AWS environment variables
@@ -524,13 +525,13 @@ async fn test_create_bucket_is_idempotent() {
     client.create_bucket().await.expect("second create");
 }
 
-/// A downloader over a prefix no other run shares, and the queue under it.
+/// The bucket under a prefix no other run shares, and a queue under it.
 async fn fresh_queue(
     settings: &CloudSettings,
     list_page_size: Option<usize>,
 ) -> (
     std::sync::Arc<S3Client>,
-    normfs_cloud::CloudDownloader,
+    normfs_cloud::S3Store,
     normfs_types::QueueId,
 ) {
     let mut client = create_client(settings).unwrap();
@@ -540,21 +541,21 @@ async fn fresh_queue(
     client.create_bucket().await.unwrap();
     let client = std::sync::Arc::new(client);
     let prefix = format!("{}/ids-{}", settings.prefix, uuid::Uuid::new_v4());
-    let downloader = normfs_cloud::CloudDownloader::new(client.clone(), &prefix);
+    let store = normfs_cloud::S3Store::new(client.clone(), &prefix);
     let queue = normfs_types::QueueIdResolver::new("0123456789abcdef").resolve("q");
-    (client, downloader, queue)
+    (client, store, queue)
 }
 
 async fn put_ids(
     client: &S3Client,
-    downloader: &normfs_cloud::CloudDownloader,
+    store: &normfs_cloud::S3Store,
     queue: &normfs_types::QueueId,
     ids: impl IntoIterator<Item = u64>,
 ) {
     for id in ids {
         let status = client
             .put_object(
-                &downloader.key(queue, &uintn::UintN::from(id)),
+                &store.key(queue, &uintn::UintN::from(id)),
                 Bytes::from_static(b"x"),
             )
             .await
@@ -568,41 +569,35 @@ async fn test_find_ids_across_directory_levels() {
     let Some(settings) = skip_if_no_s3() else {
         return;
     };
-    let (client, downloader, queue) = fresh_queue(&settings, None).await;
+    let (client, store, queue) = fresh_queue(&settings, None).await;
 
     // fff.store, 001/000.store, 002/fff.store, 001/000/000.store
-    put_ids(
-        &client,
-        &downloader,
-        &queue,
-        [0xfff, 0x1000, 0x2fff, 0x1000000],
-    )
-    .await;
+    put_ids(&client, &store, &queue, [0xfff, 0x1000, 0x2fff, 0x1000000]).await;
     assert_eq!(
-        downloader.find_max_id(&queue).await.unwrap(),
+        store.find(&queue, End::Max).await.unwrap(),
         Some(uintn::UintN::from(0x1000000u64))
     );
     assert_eq!(
-        downloader.find_min_id(&queue).await.unwrap(),
+        store.find(&queue, End::Min).await.unwrap(),
         Some(uintn::UintN::from(0xfffu64))
     );
 
-    let (client, downloader, queue) = fresh_queue(&settings, None).await;
-    put_ids(&client, &downloader, &queue, [0x2fff, 0x1000]).await;
+    let (client, store, queue) = fresh_queue(&settings, None).await;
+    put_ids(&client, &store, &queue, [0x2fff, 0x1000]).await;
     assert_eq!(
-        downloader.find_min_id(&queue).await.unwrap(),
+        store.find(&queue, End::Min).await.unwrap(),
         Some(uintn::UintN::from(0x1000u64))
     );
     assert_eq!(
-        downloader.find_max_id(&queue).await.unwrap(),
+        store.find(&queue, End::Max).await.unwrap(),
         Some(uintn::UintN::from(0x2fffu64))
     );
 
     // 001/000/000.store sorts before 002/000.store but is the larger id.
-    let (client, downloader, queue) = fresh_queue(&settings, None).await;
-    put_ids(&client, &downloader, &queue, [0x1000000, 0x2000]).await;
+    let (client, store, queue) = fresh_queue(&settings, None).await;
+    put_ids(&client, &store, &queue, [0x1000000, 0x2000]).await;
     assert_eq!(
-        downloader.find_min_id(&queue).await.unwrap(),
+        store.find(&queue, End::Min).await.unwrap(),
         Some(uintn::UintN::from(0x2000u64))
     );
 }
@@ -612,10 +607,10 @@ async fn test_find_ids_ignores_keys_outside_the_layout() {
     let Some(settings) = skip_if_no_s3() else {
         return;
     };
-    let (client, downloader, queue) = fresh_queue(&settings, None).await;
+    let (client, store, queue) = fresh_queue(&settings, None).await;
 
-    put_ids(&client, &downloader, &queue, [5]).await;
-    let key = downloader.key(&queue, &uintn::UintN::from(5u64));
+    put_ids(&client, &store, &queue, [5]).await;
+    let key = store.key(&queue, &uintn::UintN::from(5u64));
     let queue_prefix = key.strip_suffix("005.store").unwrap();
     for stray in [
         "ffff.store",
@@ -630,7 +625,7 @@ async fn test_find_ids_ignores_keys_outside_the_layout() {
             .unwrap();
     }
     assert_eq!(
-        downloader.find_max_id(&queue).await.unwrap(),
+        store.find(&queue, End::Max).await.unwrap(),
         Some(uintn::UintN::from(5u64))
     );
 }
@@ -640,16 +635,16 @@ async fn test_find_ids_follows_every_listing_page() {
     let Some(settings) = skip_if_no_s3() else {
         return;
     };
-    let (client, downloader, queue) = fresh_queue(&settings, Some(4)).await;
+    let (client, store, queue) = fresh_queue(&settings, Some(4)).await;
 
-    put_ids(&client, &downloader, &queue, 1..=11).await;
-    put_ids(&client, &downloader, &queue, (1..=11).map(|d| d << 12)).await;
+    put_ids(&client, &store, &queue, 1..=11).await;
+    put_ids(&client, &store, &queue, (1..=11).map(|d| d << 12)).await;
     assert_eq!(
-        downloader.find_max_id(&queue).await.unwrap(),
+        store.find(&queue, End::Max).await.unwrap(),
         Some(uintn::UintN::from(11u64 << 12))
     );
     assert_eq!(
-        downloader.find_min_id(&queue).await.unwrap(),
+        store.find(&queue, End::Min).await.unwrap(),
         Some(uintn::UintN::from(1u64))
     );
 }
@@ -660,28 +655,25 @@ async fn test_find_ids_under_a_prefix_the_server_would_encode() {
         return;
     };
     settings.prefix = format!("{} with space+plus", settings.prefix);
-    let (client, downloader, queue) = fresh_queue(&settings, None).await;
+    let (client, store, queue) = fresh_queue(&settings, None).await;
 
-    put_ids(&client, &downloader, &queue, [1, 0x1000]).await;
+    put_ids(&client, &store, &queue, [1, 0x1000]).await;
     assert_eq!(
-        downloader.find_max_id(&queue).await.unwrap(),
+        store.find(&queue, End::Max).await.unwrap(),
         Some(uintn::UintN::from(0x1000u64))
     );
     assert_eq!(
-        downloader.find_min_id(&queue).await.unwrap(),
+        store.find(&queue, End::Min).await.unwrap(),
         Some(uintn::UintN::from(1u64))
     );
 }
 
 #[tokio::test]
 async fn test_s3_store_reads_back_what_it_put() {
-    use normfs_store::{Body, End, StoreBackend};
     let Some(settings) = skip_if_no_s3() else {
         return;
     };
-    let (client, _, queue) = fresh_queue(&settings, None).await;
-    let prefix = format!("{}/store-{}", settings.prefix, uuid::Uuid::new_v4());
-    let store = normfs_cloud::S3Store::new(client, &prefix);
+    let (_, store, queue) = fresh_queue(&settings, None).await;
     let id = uintn::UintN::from(0x1001u64);
 
     assert!(store.get(&queue, &id).await.unwrap().is_none());

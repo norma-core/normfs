@@ -1485,11 +1485,8 @@ version = "0.3.5"
 dependencies = [
  "bytes",
  "env_logger",
- "log",
- "normfs-fs",
  "normfs-store",
  "normfs-types",
- "normfs-wal",
  "quick-xml 0.37.5",
  "reqwest",
  "rusty-s3",
