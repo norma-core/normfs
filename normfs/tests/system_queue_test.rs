@@ -157,7 +157,11 @@ async fn the_record_survives_a_restart() {
 #[tokio::test]
 async fn an_instance_without_a_disk_keeps_its_record_in_memory() {
     let dir = tempfile::tempdir().unwrap();
-    let fs = NormFS::new(dir.path().to_path_buf(), NormFsSettings::memory_only())
+    let settings = NormFsSettings {
+        queue_settings: QueueSettings::default().with_default_persist(Persist::MEMORY),
+        ..NormFsSettings::default()
+    };
+    let fs = NormFS::new(dir.path().to_path_buf(), settings)
         .await
         .unwrap();
     let cam = fs.resolve("cam");

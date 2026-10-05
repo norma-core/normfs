@@ -304,16 +304,6 @@ impl NormFsSettings {
             ..Self::default()
         }
     }
-
-    /// Every queue in memory only: nothing reaches disk but each queue's
-    /// last id, so ids continue across a restart and the data does not.
-    pub fn memory_only() -> Self {
-        Self {
-            queue_settings: QueueSettings::default().with_default_persist(Persist::MEMORY),
-            max_disk_usage_per_queue: None,
-            ..Self::default()
-        }
-    }
 }
 
 /// The steps of an append that follow the id, apart from the queue they

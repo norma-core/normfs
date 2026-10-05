@@ -64,7 +64,8 @@ store file written and each object landed in the bucket, with its id range,
 sizes and content signature; failed uploads; files the disk monitor deleted or
 could not delete; page stalls; queue starts and closes. Clients can read it
 and cannot write it. It keeps its files locally, offloaded like any store
-queue when cloud is configured, and in memory on a memory-only instance.
+queue when cloud is configured, and in memory when queues keep nothing on disk
+by default.
 `NormFsSettings::system_queue` turns it off.
 
 ## 🎯 Use Cases
