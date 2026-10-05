@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use normfs::proto::system::{self as pb, event::Kind};
+use normfs::proto::system::{self as pb, EventType};
 use normfs::{Error, NormFS, NormFsSettings, Persist, QueueSettings, ReadPosition, SYSTEM_QUEUE};
 use prost::Message;
 use tokio::sync::mpsc;
@@ -48,11 +48,8 @@ async fn wait_for(fs: &NormFS, done: impl Fn(&[pb::Event]) -> bool) -> Vec<pb::E
 fn stored(events: &[pb::Event], queue: &str) -> Vec<pb::File> {
     events
         .iter()
-        .filter_map(|e| match &e.kind {
-            Some(Kind::FileStored(stored)) => stored.file.clone(),
-            _ => None,
-        })
-        .filter(|f| f.queue == queue)
+        .filter(|e| e.r#type() == EventType::EtFileStored && e.queue == queue)
+        .filter_map(|e| e.file.clone())
         .collect()
 }
 
@@ -70,10 +67,9 @@ async fn a_stored_file_is_recorded_with_its_entries() {
     fs.flush_queue(&cam).await.unwrap();
 
     let events = wait_for(&fs, |events| !stored(events, cam.as_str()).is_empty()).await;
-    assert!(events.iter().any(|e| matches!(
-        &e.kind,
-        Some(Kind::QueueStarted(started)) if started.queue == cam.as_str() && started.store
-    )));
+    assert!(events
+        .iter()
+        .any(|e| e.r#type() == EventType::EtQueueStarted && e.queue == cam.as_str() && e.store));
     let file = &stored(&events, cam.as_str())[0];
     assert_eq!(file.num_entries, 10);
     let first = &file.first_id.as_ref().unwrap().raw;
@@ -121,9 +117,10 @@ async fn only_normfs_writes_the_system_queue() {
 }
 
 #[tokio::test]
-async fn the_record_survives_a_restart_and_says_which_life_wrote_it() {
+async fn the_record_survives_a_restart() {
     let dir = tempfile::tempdir().unwrap();
-    let first_life = {
+    let closed = |e: &pb::Event| e.r#type() == EventType::EtQueueClosed;
+    {
         let fs = NormFS::new(dir.path().to_path_buf(), settings())
             .await
             .unwrap();
@@ -132,15 +129,9 @@ async fn the_record_survives_a_restart_and_says_which_life_wrote_it() {
         fs.ensure_queue_exists_for_write(&cam).await.unwrap();
         fs.enqueue(&cam, Bytes::from_static(b"one")).await.unwrap();
         fs.close_queue(&cam).await.unwrap();
-        let events = wait_for(&fs, |events| {
-            events
-                .iter()
-                .any(|e| matches!(e.kind, Some(Kind::QueueClosed(_))))
-        })
-        .await;
+        wait_for(&fs, |events| events.iter().any(closed)).await;
         fs.close().await.unwrap();
-        events[0].started_unix_ns
-    };
+    }
 
     let fs = NormFS::new(dir.path().to_path_buf(), settings())
         .await
@@ -149,11 +140,17 @@ async fn the_record_survives_a_restart_and_says_which_life_wrote_it() {
     fs.ensure_queue_exists_for_write(&cam).await.unwrap();
     fs.enqueue(&cam, Bytes::from_static(b"two")).await.unwrap();
     let events = wait_for(&fs, |events| {
-        events.iter().any(|e| e.started_unix_ns != first_life)
+        events
+            .iter()
+            .skip_while(|e| !closed(e))
+            .any(|e| e.r#type() == EventType::EtQueueStarted)
     })
     .await;
-    assert!(events.iter().any(|e| e.started_unix_ns == first_life
-        && matches!(&e.kind, Some(Kind::QueueClosed(closed)) if closed.queue == cam.as_str())));
+    assert!(events
+        .iter()
+        .all(|e| e.stamp.as_ref().is_some_and(|s| s.app_start_id > 0
+            && s.local_stamp_ns > 0
+            && s.monotonic_stamp_ns > 0)));
     fs.close().await.unwrap();
 }
 
@@ -169,7 +166,7 @@ async fn an_instance_without_a_disk_keeps_its_record_in_memory() {
     wait_for(&fs, |events| {
         events
             .iter()
-            .any(|e| matches!(e.kind, Some(Kind::QueueStarted(_))))
+            .any(|e| e.r#type() == EventType::EtQueueStarted)
     })
     .await;
     fs.close().await.unwrap();

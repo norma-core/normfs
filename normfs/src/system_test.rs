@@ -36,7 +36,9 @@ async fn a_full_backlog_is_counted_on_the_next_recorded_event() {
     assert_eq!(first.dropped_before, 3);
     let second = decode(system.encode(rx.try_recv().unwrap()).0);
     assert_eq!(second.dropped_before, 0);
-    assert_eq!(second.started_unix_ns, first.started_unix_ns);
+    let (first, second) = (first.stamp.unwrap(), second.stamp.unwrap());
+    assert_eq!(second.app_start_id, first.app_start_id);
+    assert!(second.monotonic_stamp_ns >= first.monotonic_stamp_ns);
 }
 
 #[tokio::test]
@@ -64,17 +66,15 @@ fn a_landed_file_keeps_its_ids_and_signature() {
         encryption: EncryptionType::Aes,
         content_signature: [0xAB; 64],
     };
-    let event = SystemEvent::FileLanded {
+    let landed = event(SystemEvent::FileLanded {
         file: facts,
         key: "prefix/inst/cam/000/012/34.store".to_string(),
         took: Duration::from_millis(250),
         landed_through: UintN::from(0x1234u64),
-    };
-    let pb::event::Kind::FileLanded(landed) = kind(event) else {
-        panic!("wrong kind");
-    };
+    });
+    assert_eq!(landed.r#type(), pb::EventType::EtFileLanded);
+    assert_eq!(landed.queue, "/inst/cam");
     let file = landed.file.unwrap();
-    assert_eq!(file.queue, "/inst/cam");
     assert_eq!(file.file_id, Some(id(&UintN::from(0x1234u64))));
     assert_eq!(file.first_id, Some(id(&UintN::from(1000u64))));
     assert_eq!(file.num_entries, 50);
@@ -88,16 +88,15 @@ fn a_landed_file_keeps_its_ids_and_signature() {
 
 #[test]
 fn an_upload_failure_carries_its_status_and_a_bounded_message() {
-    let event = SystemEvent::UploadFailed {
+    let failed = event(SystemEvent::UploadFailed {
         queue: queue("cam"),
         file_id: UintN::from(3u64),
         failure: UploadFailure::Status(503),
         message: "ж".repeat(MAX_MESSAGE),
-    };
-    let pb::event::Kind::UploadFailed(failed) = kind(event) else {
-        panic!("wrong kind");
-    };
-    assert_eq!(failed.reason, pb::upload_failed::Reason::RHttpStatus as i32);
+    });
+    assert_eq!(failed.r#type(), pb::EventType::EtUploadFailed);
+    assert_eq!(failed.failed_file_id, Some(id(&UintN::from(3u64))));
+    assert_eq!(failed.upload_failure(), pb::UploadFailure::UfHttpStatus);
     assert_eq!(failed.http_status, 503);
-    assert!(failed.message.len() <= MAX_MESSAGE);
+    assert!(failed.error.len() <= MAX_MESSAGE);
 }

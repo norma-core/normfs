@@ -2,11 +2,12 @@ use bytes::{Bytes, BytesMut};
 use normfs_types::events::{
     self, EventSink, EvictionBlock, FileFacts, SystemEvent, SystemEvents, UploadFailure,
 };
+use normfs_types::stamp::Stamp;
 use normfs_types::{CompressionType, EncryptionType, QueueId};
 use prost::Message;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tokio::sync::{mpsc, Notify};
 use tokio::task::JoinHandle;
 use uintn::UintN;
@@ -51,14 +52,13 @@ pub(crate) fn queue_config(default: &QueueConfig, cloud: bool) -> QueueConfig {
 }
 
 pub(crate) struct Stamped {
-    unix_ns: u64,
+    stamp: Stamp,
     event: SystemEvent,
 }
 
 /// The emitting side, handed to every component as an [`EventSink`].
 pub(crate) struct SystemQueue {
     queue: QueueId,
-    started_unix_ns: u64,
     tx: mpsc::Sender<Stamped>,
     dropped: AtomicU64,
 }
@@ -68,7 +68,6 @@ impl SystemQueue {
         let (tx, rx) = mpsc::channel(BACKLOG);
         let queue = Arc::new(Self {
             queue,
-            started_unix_ns: unix_ns(),
             tx,
             dropped: AtomicU64::new(0),
         });
@@ -92,10 +91,9 @@ impl SystemQueue {
     fn encode(&self, stamped: Stamped) -> (Bytes, u64) {
         let dropped_before = self.dropped.swap(0, Ordering::Relaxed);
         let event = pb::Event {
-            unix_ns: stamped.unix_ns,
-            started_unix_ns: self.started_unix_ns,
+            stamp: Some(stamp(stamped.stamp)),
             dropped_before,
-            kind: Some(kind(stamped.event)),
+            ..event(stamped.event)
         };
         (Bytes::from(event.encode_to_vec()), dropped_before)
     }
@@ -108,7 +106,7 @@ impl SystemEvents for SystemQueue {
             return;
         }
         let stamped = Stamped {
-            unix_ns: unix_ns(),
+            stamp: Stamp::now(),
             event,
         };
         if self.tx.try_send(stamped).is_err() {
@@ -193,10 +191,12 @@ impl Drop for Writer {
     }
 }
 
-fn unix_ns() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos().min(u64::MAX as u128) as u64)
+fn stamp(s: Stamp) -> crate::proto::Stamp {
+    crate::proto::Stamp {
+        monotonic_stamp_ns: s.monotonic_ns,
+        local_stamp_ns: s.local_ns,
+        app_start_id: s.app_start_id,
+    }
 }
 
 fn id(value: &UintN) -> Id {
@@ -238,7 +238,6 @@ fn encryption(e: EncryptionType) -> pb::Encryption {
 
 fn file(f: FileFacts) -> pb::File {
     pb::File {
-        queue: f.queue.to_string(),
         file_id: Some(id(&f.file_id)),
         first_id: Some(id(&f.first_id)),
         num_entries: f.num_entries.to_u64().unwrap_or(u64::MAX),
@@ -250,122 +249,122 @@ fn file(f: FileFacts) -> pb::File {
     }
 }
 
-fn kind(event: SystemEvent) -> pb::event::Kind {
-    use pb::event::Kind;
-    match event {
-        SystemEvent::FileStored(f) => Kind::FileStored(pb::FileStored {
-            file: Some(file(f)),
-        }),
+fn event(event: SystemEvent) -> pb::Event {
+    use pb::EventType as T;
+    let mut out = pb::Event {
+        queue: event.queue().to_string(),
+        ..Default::default()
+    };
+    let kind = match event {
+        SystemEvent::FileStored(f) => {
+            out.file = Some(file(f));
+            T::EtFileStored
+        }
         SystemEvent::FileLanded {
             file: f,
             key,
             took,
             landed_through,
-        } => Kind::FileLanded(pb::FileLanded {
-            file: Some(file(f)),
-            key,
-            duration_ms: millis(took),
-            landed_through: Some(id(&landed_through)),
-        }),
+        } => {
+            out.file = Some(file(f));
+            out.key = key;
+            out.duration_ms = millis(took);
+            out.landed_through = Some(id(&landed_through));
+            T::EtFileLanded
+        }
         SystemEvent::UploadFailed {
-            queue,
             file_id,
             failure,
             message,
+            ..
         } => {
-            use pb::upload_failed::Reason;
-            let mut out = pb::UploadFailed {
-                queue: queue.to_string(),
-                file_id: Some(id(&file_id)),
-                message: truncated(message),
-                ..Default::default()
-            };
-            let reason = match failure {
-                UploadFailure::Network => Reason::RNetwork,
+            out.failed_file_id = Some(id(&file_id));
+            out.error = truncated(message);
+            let failure = match failure {
+                UploadFailure::Network => pb::UploadFailure::UfNetwork,
                 UploadFailure::Status(status) => {
                     out.http_status = u32::from(status);
-                    Reason::RHttpStatus
+                    pb::UploadFailure::UfHttpStatus
                 }
-                UploadFailure::Missing => Reason::RMissing,
+                UploadFailure::Missing => pb::UploadFailure::UfMissing,
                 UploadFailure::SizeMismatch { local, remote } => {
                     out.local_bytes = local;
                     out.remote_bytes = remote;
-                    Reason::RSizeMismatch
+                    pb::UploadFailure::UfSizeMismatch
                 }
-                UploadFailure::LocalRead => Reason::RLocalRead,
+                UploadFailure::LocalRead => pb::UploadFailure::UfLocalRead,
             };
-            out.reason = reason as i32;
-            Kind::UploadFailed(out)
+            out.upload_failure = failure as i32;
+            T::EtUploadFailed
         }
         SystemEvent::FileEvicted {
-            queue,
             kind,
             file_id,
             file_bytes,
             queue_bytes,
             in_cloud,
-        } => Kind::FileEvicted(pb::FileEvicted {
-            queue: queue.to_string(),
-            kind: match kind {
+            ..
+        } => {
+            out.evicted_kind = match kind {
                 events::FileKind::Wal => pb::FileKind::FkWal,
                 events::FileKind::Store => pb::FileKind::FkStore,
-            } as i32,
-            file_id: Some(id(&file_id)),
-            file_bytes,
-            queue_bytes,
-            in_cloud,
-        }),
+            } as i32;
+            out.evicted_file_id = Some(id(&file_id));
+            out.evicted_bytes = file_bytes;
+            out.queue_bytes = queue_bytes;
+            out.in_cloud = in_cloud;
+            T::EtFileEvicted
+        }
         SystemEvent::EvictionBlocked {
-            queue,
             reason,
             held_at,
             queue_bytes,
             limit_bytes,
+            ..
         } => {
-            use pb::eviction_blocked::Reason;
-            Kind::EvictionBlocked(pb::EvictionBlocked {
-                queue: queue.to_string(),
-                reason: match reason {
-                    EvictionBlock::NotOffloaded => Reason::RNotOffloaded,
-                    EvictionBlock::DeleteFailed => Reason::RDeleteFailed,
-                    EvictionBlock::NothingFound => Reason::RNothingFound,
-                } as i32,
-                held_at: held_at.as_ref().map(id),
-                queue_bytes,
-                limit_bytes,
-            })
+            out.eviction_block = match reason {
+                EvictionBlock::NotOffloaded => pb::EvictionBlock::EbNotOffloaded,
+                EvictionBlock::DeleteFailed => pb::EvictionBlock::EbDeleteFailed,
+                EvictionBlock::NothingFound => pb::EvictionBlock::EbNothingFound,
+            } as i32;
+            out.held_at = held_at.as_ref().map(id);
+            out.queue_bytes = queue_bytes;
+            out.limit_bytes = limit_bytes;
+            T::EtEvictionBlocked
         }
         SystemEvent::PoolStalled {
-            queue,
             waits,
             stalled_for,
             resumed,
-        } => Kind::PoolStalled(pb::PoolStalled {
-            queue: queue.to_string(),
-            waits,
-            stalled_for_ms: millis(stalled_for),
-            resumed,
-        }),
+            ..
+        } => {
+            out.waits = waits;
+            out.stalled_for_ms = millis(stalled_for);
+            out.resumed = resumed;
+            T::EtPoolStalled
+        }
         SystemEvent::QueueStarted {
-            queue,
             readonly,
             wal,
             store,
             cloud,
             last_id,
-        } => Kind::QueueStarted(pb::QueueStarted {
-            queue: queue.to_string(),
-            readonly,
-            wal,
-            store,
-            cloud,
-            last_id: last_id.as_ref().map(id),
-        }),
-        SystemEvent::QueueClosed { queue, last_id } => Kind::QueueClosed(pb::QueueClosed {
-            queue: queue.to_string(),
-            last_id: last_id.as_ref().map(id),
-        }),
-    }
+            ..
+        } => {
+            out.readonly = readonly;
+            out.wal = wal;
+            out.store = store;
+            out.cloud = cloud;
+            out.last_id = last_id.as_ref().map(id);
+            T::EtQueueStarted
+        }
+        SystemEvent::QueueClosed { last_id, .. } => {
+            out.last_id = last_id.as_ref().map(id);
+            T::EtQueueClosed
+        }
+    };
+    out.r#type = kind as i32;
+    out
 }
 
 #[cfg(test)]

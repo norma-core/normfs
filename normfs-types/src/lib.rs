@@ -236,8 +236,11 @@ impl ReadEntry {
 mod bounded_map;
 pub use bounded_map::BoundedMap;
 pub mod events;
+pub mod stamp;
 
 #[cfg(test)]
 mod bounded_map_test;
 #[cfg(test)]
 mod queue_id_test;
+#[cfg(test)]
+mod stamp_test;

@@ -889,6 +889,221 @@ func (s *Id) XXX_PbContentSize() int {
 }
 
 const (
+	wireStamp_MonotonicStampNs gremlin.ProtoWireNumber = 1
+	wireStamp_LocalStampNs gremlin.ProtoWireNumber = 2
+	wireStamp_AppStartId gremlin.ProtoWireNumber = 3
+)
+
+type StampReader struct {
+	buf *gremlin.Reader
+
+	dataMonotonicStampNs     uint64
+	dataLocalStampNs     uint64
+	dataAppStartId     uint64
+
+	offsetMonotonicStampNs   int
+	offsetLocalStampNs   int
+	offsetAppStartId   int
+
+	parsedMonotonicStampNs   bool
+	parsedLocalStampNs   bool
+	parsedAppStartId   bool
+}
+
+func NewStampReader() *StampReader {
+	return &StampReader{}
+}
+
+func (m *StampReader) GetMonotonicStampNs() uint64 {
+	if m == nil {
+		return 0
+	}
+	return m.readMonotonicStampNs()
+}
+
+func (m *StampReader) readMonotonicStampNs() uint64 {
+	if m.parsedMonotonicStampNs {
+		return m.dataMonotonicStampNs
+	}
+	wOffset := m.offsetMonotonicStampNs
+	
+	var entry uint64
+	if wOffset > 0 {
+		entry = m.buf.ReadUint64(wOffset)
+	}
+	
+	m.dataMonotonicStampNs = entry
+	m.parsedMonotonicStampNs = true
+	return entry
+}
+
+func (m *StampReader) GetLocalStampNs() uint64 {
+	if m == nil {
+		return 0
+	}
+	return m.readLocalStampNs()
+}
+
+func (m *StampReader) readLocalStampNs() uint64 {
+	if m.parsedLocalStampNs {
+		return m.dataLocalStampNs
+	}
+	wOffset := m.offsetLocalStampNs
+	
+	var entry uint64
+	if wOffset > 0 {
+		entry = m.buf.ReadUint64(wOffset)
+	}
+	
+	m.dataLocalStampNs = entry
+	m.parsedLocalStampNs = true
+	return entry
+}
+
+func (m *StampReader) GetAppStartId() uint64 {
+	if m == nil {
+		return 0
+	}
+	return m.readAppStartId()
+}
+
+func (m *StampReader) readAppStartId() uint64 {
+	if m.parsedAppStartId {
+		return m.dataAppStartId
+	}
+	wOffset := m.offsetAppStartId
+	
+	var entry uint64
+	if wOffset > 0 {
+		entry = m.buf.ReadUint64(wOffset)
+	}
+	
+	m.dataAppStartId = entry
+	m.parsedAppStartId = true
+	return entry
+}
+
+func (m *StampReader) Unmarshal(data []byte) error {
+	m.buf = gremlin.NewReader(data)
+	offset := 0
+	for m.buf.HasNext(offset, 0) {
+		tag, wire, tagSize, err := m.buf.ReadTagAt(offset)
+		if err != nil {
+			return err
+		}
+
+		offset += tagSize
+		switch tag {
+		case wireStamp_MonotonicStampNs:
+			m.offsetMonotonicStampNs = offset
+		case wireStamp_LocalStampNs:
+			m.offsetLocalStampNs = offset
+		case wireStamp_AppStartId:
+			m.offsetAppStartId = offset
+		}
+
+		offset, err = m.buf.SkipData(offset, wire)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *StampReader) ToStruct() *Stamp {
+	if m == nil {
+		return nil
+	}
+	res := &Stamp{}
+	res.MonotonicStampNs = m.GetMonotonicStampNs()
+	res.LocalStampNs = m.GetLocalStampNs()
+	res.AppStartId = m.GetAppStartId()
+
+	return res
+}
+
+func (s *StampReader) SourceBytes() []byte {
+	if s == nil {
+		return nil
+	}
+	return s.buf.Bytes()
+}
+
+type Stamp struct {
+	MonotonicStampNs	uint64	`json:"monotonic_stamp_ns,omitempty"`
+	LocalStampNs	uint64	`json:"local_stamp_ns,omitempty"`
+	AppStartId	uint64	`json:"app_start_id,omitempty"`
+}
+
+func (s *Stamp) Marshal() []byte {
+	if s == nil {
+		return nil
+	}
+	size := s.XXX_PbContentSize()
+	if size == 0 {
+		return nil
+	}
+	res := gremlin.NewWriter(size)
+	s.MarshalTo(res)
+	return res.Bytes()
+}
+
+func (s *Stamp) MarshalTo(res *gremlin.Writer) {
+	if s == nil {
+		return
+	}
+
+	if s.MonotonicStampNs != 0 {
+		res.AppendUint64(wireStamp_MonotonicStampNs, s.MonotonicStampNs)
+	}
+	if s.LocalStampNs != 0 {
+		res.AppendUint64(wireStamp_LocalStampNs, s.LocalStampNs)
+	}
+	if s.AppStartId != 0 {
+		res.AppendUint64(wireStamp_AppStartId, s.AppStartId)
+	}
+}
+
+func (s *Stamp) Copy() *Stamp {
+	if s == nil {
+		return nil
+	}
+	res := &Stamp{}
+	res.MonotonicStampNs = s.MonotonicStampNs
+	res.LocalStampNs = s.LocalStampNs
+	res.AppStartId = s.AppStartId
+
+	return res
+}
+
+func (s *Stamp) XXX_PbContentSize() int {
+	if s == nil {
+		return 0
+	}
+	var size = 0
+
+	if s.MonotonicStampNs != 0 {
+		var entrySize = 0
+		entrySize = gremlin.SizeTag(wireStamp_MonotonicStampNs) + gremlin.SizeUint64(s.MonotonicStampNs)
+		size += entrySize
+	}
+
+	if s.LocalStampNs != 0 {
+		var entrySize = 0
+		entrySize = gremlin.SizeTag(wireStamp_LocalStampNs) + gremlin.SizeUint64(s.LocalStampNs)
+		size += entrySize
+	}
+
+	if s.AppStartId != 0 {
+		var entrySize = 0
+		entrySize = gremlin.SizeTag(wireStamp_AppStartId) + gremlin.SizeUint64(s.AppStartId)
+		size += entrySize
+	}
+
+	return size
+}
+
+const (
 	wireOffset_Id gremlin.ProtoWireNumber = 1
 	wireOffset_Type gremlin.ProtoWireNumber = 2
 )

@@ -388,8 +388,8 @@ async fn a_cloud_queue_named_like_a_parents_file_ids_is_refused() {
     fs.close().await.unwrap();
 }
 
-async fn landed_records(fs: &NormFS, want: usize) -> Vec<normfs::proto::system::FileLanded> {
-    use normfs::proto::system::{self as pb, event::Kind};
+async fn landed_records(fs: &NormFS, want: usize) -> Vec<normfs::proto::system::Event> {
+    use normfs::proto::system::{self as pb, EventType};
     use prost::Message;
 
     let system = fs.resolve(normfs::SYSTEM_QUEUE);
@@ -408,8 +408,9 @@ async fn landed_records(fs: &NormFS, want: usize) -> Vec<normfs::proto::system::
         .unwrap();
         landed.clear();
         while let Ok(entry) = rx.try_recv() {
-            if let Some(Kind::FileLanded(file)) = pb::Event::decode(entry.data).unwrap().kind {
-                landed.push(file);
+            let event = pb::Event::decode(entry.data).unwrap();
+            if event.r#type() == EventType::EtFileLanded {
+                landed.push(event);
             }
         }
         if landed.len() >= want {
@@ -429,7 +430,7 @@ fn id_of(id: &Option<normfs::proto::Id>) -> UintN {
 async fn assert_landed(
     cloud: &CloudSettings,
     queue: &normfs::QueueId,
-    landed: &[normfs::proto::system::FileLanded],
+    landed: &[normfs::proto::system::Event],
     files: u64,
 ) {
     assert_eq!(landed.len() as u64, files, "one record per object");

@@ -1560,6 +1560,7 @@ name = "normfs-types"
 version = "0.3.5"
 dependencies = [
  "bytes",
+ "libc",
  "uintn",
 ]
 

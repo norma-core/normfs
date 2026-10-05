@@ -22,6 +22,14 @@ message Id {
     bytes raw = 1;
 }
 
+// Station's time: monotonic (CLOCK_BOOTTIME on Linux, CLOCK_MONOTONIC_RAW on
+// macOS), wall clock, and the unix second the process started.
+message Stamp {
+    uint64 monotonic_stamp_ns = 1;
+    uint64 local_stamp_ns     = 2;
+    uint64 app_start_id       = 3;
+}
+
 enum OffsetType {
     OT_ABSOLUTE = 0;
     OT_SHIFT_FROM_TAIL = 1;

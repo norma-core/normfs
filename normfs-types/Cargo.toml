@@ -10,4 +10,5 @@ description = "Core type definitions and serialization for NormFS"
 
 [dependencies]
 bytes = "1.5"
+libc = "0.2"
 uintn = { version = "0.3.5", path = "../uintn-rs" }
