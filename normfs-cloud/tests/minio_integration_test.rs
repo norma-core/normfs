@@ -672,3 +672,46 @@ async fn test_find_ids_under_a_prefix_the_server_would_encode() {
         Some(uintn::UintN::from(1u64))
     );
 }
+
+#[tokio::test]
+async fn test_s3_store_reads_back_what_it_put() {
+    use normfs_store::{Body, End, StoreBackend};
+    let Some(settings) = skip_if_no_s3() else {
+        return;
+    };
+    let (client, _, queue) = fresh_queue(&settings, None).await;
+    let prefix = format!("{}/store-{}", settings.prefix, uuid::Uuid::new_v4());
+    let store = normfs_cloud::S3Store::new(client, &prefix);
+    let id = uintn::UintN::from(0x1001u64);
+
+    assert!(store.get(&queue, &id).await.unwrap().is_none());
+    assert!(store.size(&queue, &id).await.unwrap().is_none());
+    assert!(store.find(&queue, End::Max).await.unwrap().is_none());
+
+    let runs = vec![Bytes::from_static(b"head"), Bytes::from_static(b"-body")];
+    store.put(&queue, &id, Body::Runs(runs)).await.unwrap();
+    let body = Body::Runs(vec![Bytes::from_static(b"x")]);
+    store
+        .put(&queue, &uintn::UintN::from(2u64), body)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store.get(&queue, &id).await.unwrap().unwrap(),
+        &b"head-body"[..]
+    );
+    assert_eq!(
+        store.get_range(&queue, &id, 2, 4).await.unwrap().unwrap(),
+        &b"ad-b"[..]
+    );
+    assert_eq!(
+        store.get_range(&queue, &id, 6, 100).await.unwrap().unwrap(),
+        &b"ody"[..]
+    );
+    assert_eq!(store.size(&queue, &id).await.unwrap(), Some(9));
+    assert_eq!(
+        store.find(&queue, End::Min).await.unwrap(),
+        Some(uintn::UintN::from(2u64))
+    );
+    assert_eq!(store.find(&queue, End::Max).await.unwrap(), Some(id));
+}
