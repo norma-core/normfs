@@ -94,7 +94,9 @@ async fn test_put_get_basic() {
     let test_data = b"Hello MinIO from normfs-cloud!";
 
     println!("Putting object to key: {}", test_key);
-    let put_result = client.put_object(&test_key, test_data).await;
+    let put_result = client
+        .put_object(&test_key, Bytes::from_static(test_data))
+        .await;
     assert!(put_result.is_ok(), "Put failed: {:?}", put_result.err());
     let status = put_result.unwrap();
     println!("✓ Put successful (status: {})", status);
@@ -144,7 +146,9 @@ async fn test_put_get_large_file() {
     let test_data = vec![42u8; data_size];
 
     println!("Putting {} MB file...", data_size / (1024 * 1024));
-    let put_result = client.put_object(&test_key, &test_data).await;
+    let put_result = client
+        .put_object(&test_key, Bytes::from(test_data.clone()))
+        .await;
     assert!(put_result.is_ok(), "Put failed: {:?}", put_result.err());
     println!("✓ Put successful");
 
@@ -166,6 +170,36 @@ async fn test_put_get_large_file() {
         "Downloaded data doesn't match"
     );
     println!("✓ Get successful, {} bytes verified", downloaded_data.len());
+}
+
+#[tokio::test]
+async fn test_put_object_stream_sends_every_chunk() {
+    let Some(settings) = skip_if_no_s3() else {
+        return;
+    };
+    let client = create_client(&settings).unwrap();
+    let key = format!(
+        "{}/test-stream-{}.dat",
+        settings.prefix,
+        uuid::Uuid::new_v4()
+    );
+
+    // Not a multiple of the read size, so the last chunk is a short one.
+    let data: Vec<u8> = (0..3 * 1024 * 1024 + 4321u32)
+        .map(|i| (i % 251) as u8)
+        .collect();
+    let status = client
+        .put_object_stream(&key, std::io::Cursor::new(data.clone()), data.len() as u64)
+        .await
+        .unwrap();
+    assert_eq!(status, 200);
+
+    assert_eq!(
+        client.head_object(&key).await.unwrap(),
+        Some(data.len() as u64)
+    );
+    let got = client.get_object(&key).await.unwrap().expect("object");
+    assert_eq!(got, Bytes::from(data));
 }
 
 #[tokio::test]
@@ -193,7 +227,7 @@ async fn test_put_get_multiple_files() {
         );
         let data = format!("Test data for file {}", i);
 
-        let put_result = client.put_object(&key, data.as_bytes()).await;
+        let put_result = client.put_object(&key, Bytes::from(data.clone())).await;
         assert!(
             put_result.is_ok(),
             "Put {} failed: {:?}",
@@ -281,7 +315,10 @@ async fn test_head_object() {
 
     // Put object first
     println!("Putting object...");
-    client.put_object(&test_key, test_data).await.unwrap();
+    client
+        .put_object(&test_key, Bytes::from_static(test_data))
+        .await
+        .unwrap();
     println!("✓ Put successful");
 
     // Head object to check size
@@ -348,7 +385,9 @@ async fn test_put_with_special_characters() {
     let test_data = b"Data with special chars in key";
 
     println!("Putting object with special chars in key: {}", test_key);
-    let put_result = client.put_object(&test_key, test_data).await;
+    let put_result = client
+        .put_object(&test_key, Bytes::from_static(test_data))
+        .await;
     assert!(put_result.is_ok(), "Put failed: {:?}", put_result.err());
     println!("✓ Put successful");
 
@@ -388,7 +427,10 @@ async fn test_concurrent_puts() {
             );
             let data = format!("Concurrent put {}", i);
 
-            client.put_object(&key, data.as_bytes()).await.unwrap();
+            client
+                .put_object(&key, Bytes::from(data.clone()))
+                .await
+                .unwrap();
             (key, data)
         });
 
@@ -437,7 +479,10 @@ async fn test_get_object_range() {
 
     // Put object
     println!("Putting object ({} bytes)...", test_data.len());
-    client.put_object(&test_key, test_data).await.unwrap();
+    client
+        .put_object(&test_key, Bytes::from_static(test_data))
+        .await
+        .unwrap();
     println!("✓ Put successful");
 
     // Get partial range
@@ -508,7 +553,10 @@ async fn put_ids(
 ) {
     for id in ids {
         let status = client
-            .put_object(&downloader.key(queue, &uintn::UintN::from(id)), b"x")
+            .put_object(
+                &downloader.key(queue, &uintn::UintN::from(id)),
+                Bytes::from_static(b"x"),
+            )
             .await
             .unwrap();
         assert_eq!(status, 200);
@@ -577,7 +625,7 @@ async fn test_find_ids_ignores_keys_outside_the_layout() {
         "g01/000.store",
     ] {
         client
-            .put_object(&format!("{queue_prefix}{stray}"), b"x")
+            .put_object(&format!("{queue_prefix}{stray}"), Bytes::from_static(b"x"))
             .await
             .unwrap();
     }

@@ -2,7 +2,7 @@ use crate::header::{CompressionType, EncryptionType};
 use crate::page_writer::{PageStoreWriter, PageWriterSettings, seal_through};
 use crate::sink::SealedFileSink;
 use crate::store_file::SealedFile;
-use crate::{PersistStore, StoreWriteConfig};
+use crate::{Packer, PersistStore, StoreWriteConfig};
 use normfs_crypto::CryptoContext;
 use normfs_types::{QueueId, QueueIdResolver};
 use normfs_wal::{AnyWalHeader, PagePool, WAL_HEADER_V1_MAX_SIZE, WalHeader, WalStore};
@@ -110,13 +110,29 @@ fn start(f: &Fixture, sink: Arc<dyn SealedFileSink>, close_max_attempts: u32) ->
         settings(close_max_attempts),
         f.pool.clone(),
         sink,
+        packer(1),
         f.crypto.clone(),
         f.store.written_sender_for_tests(),
     )
 }
 
+fn packer(slots: usize) -> Arc<Packer> {
+    Arc::new(Packer::new(slots, WAL_HEADER_V1_MAX_SIZE + PAGE_SIZE).unwrap())
+}
+
 async fn settle() {
     tokio::time::sleep(Duration::from_millis(30)).await;
+}
+
+/// For a landing that follows a permit: the writer has been retrying with a
+/// doubling delay, so the next attempt can be further off than `settle`.
+async fn eventually(done: impl Fn() -> bool) {
+    for _ in 0..200 {
+        if done() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 }
 
 async fn next_id(rx: &mut mpsc::UnboundedReceiver<(QueueId, UintN)>) -> UintN {
@@ -149,7 +165,7 @@ async fn nothing_is_reported_durable_before_the_sink_returns() {
     );
 
     sink.permits.add_permits(1);
-    settle().await;
+    eventually(|| f.pool.durable_before() == 2).await;
     assert_eq!(sink.landed(), vec![(UintN::one(), Some(UintN::from(1u64)))]);
     assert_eq!(f.pool.durable_before(), 2);
     assert_eq!(next_id(&mut f.written_rx).await, UintN::from(1u64));
@@ -169,7 +185,7 @@ async fn a_sink_that_does_not_land_is_back_pressure_not_loss() {
     assert!(f.pool.try_place_now(4, &RECORD).unwrap().is_none());
 
     sink.permits.add_permits(1);
-    settle().await;
+    eventually(|| f.pool.durable_before() == 2).await;
     assert!(f.pool.try_place_now(4, &RECORD).unwrap().is_some());
     assert_eq!(next_id(&mut f.written_rx).await, UintN::from(1u64));
 }
@@ -203,7 +219,7 @@ async fn close_reports_a_file_that_did_not_land_and_keeps_trying() {
     assert!(!f.pool.is_fully_durable());
 
     sink.permits.add_permits(1);
-    settle().await;
+    eventually(|| f.pool.is_fully_durable()).await;
     assert_eq!(sink.landed().len(), 1);
     assert!(f.pool.is_fully_durable(), "the background retry landed it");
 }
@@ -298,6 +314,7 @@ async fn a_file_that_cannot_be_built_fails_every_later_flush() {
         },
         f.pool.clone(),
         sink.clone(),
+        packer(1),
         f.crypto.clone(),
         f.store.written_sender_for_tests(),
     );
@@ -335,4 +352,53 @@ async fn a_seal_takes_the_file_an_append_closed_before_it() {
         .collect();
     assert_eq!(ranges, [(0, 1), (2, 2)]);
     assert_eq!(next_epoch, 2);
+}
+
+#[tokio::test]
+async fn a_file_that_will_not_land_does_not_keep_the_slot_from_other_queues() {
+    let mut f = fixture(2);
+    let packer = packer(1);
+    let stuck = GatedSink::new();
+    let _stuck = PageStoreWriter::start(
+        &f.queue,
+        &UintN::one(),
+        WalHeader::default(),
+        settings(1),
+        f.pool.clone(),
+        stuck.clone(),
+        packer.clone(),
+        f.crypto.clone(),
+        f.store.written_sender_for_tests(),
+    );
+    for i in 0..3u64 {
+        f.pool.place(i, &RECORD).await.unwrap();
+    }
+
+    let other = QueueIdResolver::new(f.crypto.instance_id_hex()).resolve("other");
+    let other_pool = Arc::new(PagePool::new(2, PAGE_SIZE, 0));
+    let landing = GatedSink::new();
+    landing.permits.add_permits(1);
+    let _landing = PageStoreWriter::start(
+        &other,
+        &UintN::one(),
+        WalHeader::default(),
+        settings(1),
+        other_pool.clone(),
+        landing.clone(),
+        packer,
+        f.crypto.clone(),
+        f.store.written_sender_for_tests(),
+    );
+    for i in 0..3u64 {
+        other_pool.place(i, &RECORD).await.unwrap();
+    }
+
+    eventually(|| other_pool.durable_before() == 2).await;
+    assert_eq!(
+        landing.landed(),
+        vec![(UintN::one(), Some(UintN::from(1u64)))]
+    );
+    assert!(stuck.landed().is_empty());
+    assert_eq!(f.pool.durable_before(), 0);
+    assert_eq!(next_id(&mut f.written_rx).await, UintN::from(1u64));
 }

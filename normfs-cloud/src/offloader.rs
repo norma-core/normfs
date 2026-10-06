@@ -1,12 +1,16 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
+use bytes::Bytes;
 use log::{error, info, warn};
 use normfs_fs::{Fs, Scan, ScanResult};
 use normfs_types::QueueId;
+use normfs_types::events::{EventSink, FileFacts, SystemEvent, UploadFailure};
 use tokio::sync::{RwLock, mpsc};
+use tokio::time::Instant;
 use uintn::UintN;
 
 use crate::client::S3Client;
+use crate::errors::CloudError;
 
 const RETRY_DELAY: Duration = Duration::from_secs(1);
 
@@ -27,32 +31,89 @@ impl std::fmt::Display for OffloadError {
 
 impl std::error::Error for OffloadError {}
 
+#[derive(Debug)]
+pub enum PutError {
+    Request(CloudError),
+    Status(u16),
+    /// HEAD found nothing right after the PUT.
+    Missing,
+    SizeMismatch {
+        local: u64,
+        remote: u64,
+    },
+}
+
+impl PutError {
+    pub fn failure(&self) -> UploadFailure {
+        match self {
+            PutError::Request(CloudError::InvalidStatusCode(code)) | PutError::Status(code) => {
+                UploadFailure::Status(*code)
+            }
+            PutError::Request(_) => UploadFailure::Network,
+            PutError::Missing => UploadFailure::Missing,
+            PutError::SizeMismatch { local, remote } => UploadFailure::SizeMismatch {
+                local: *local,
+                remote: *remote,
+            },
+        }
+    }
+}
+
+impl std::fmt::Display for PutError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PutError::Request(e) => write!(f, "S3 request failed: {}", e),
+            PutError::Status(code) => write!(f, "Failed to upload to S3, response code: {}", code),
+            PutError::Missing => write!(f, "Not found after upload"),
+            PutError::SizeMismatch { local, remote } => write!(
+                f,
+                "Size mismatch after upload: local={}, s3={}",
+                local, remote
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PutError {}
+
+impl From<PutError> for OffloadError {
+    fn from(e: PutError) -> Self {
+        OffloadError::RemoteError(e.to_string())
+    }
+}
+
 /// Puts `data` at `key` and reads its size back. S3 and its lookalikes are
 /// read-after-write consistent for a new key, so the HEAD is the verification
 /// and nothing has to wait for it.
-pub async fn put_verified(client: &S3Client, key: &str, data: &[u8]) -> Result<(), OffloadError> {
+pub async fn put_verified(client: &S3Client, key: &str, data: Bytes) -> Result<(), PutError> {
+    let local = data.len() as u64;
     let status_code = client
         .put_object(key, data)
         .await
-        .map_err(|e| OffloadError::RemoteError(format!("S3 put_object failed: {}", e)))?;
+        .map_err(PutError::Request)?;
+    verify_put(client, key, local, status_code).await
+}
+
+async fn verify_put(
+    client: &S3Client,
+    key: &str,
+    local: u64,
+    status_code: u16,
+) -> Result<(), PutError> {
     if status_code != 200 {
-        return Err(OffloadError::RemoteError(format!(
-            "Failed to upload to S3, response code: {}",
-            status_code
-        )));
+        return Err(PutError::Status(status_code));
     }
 
     let s3_size = client
         .head_object(key)
         .await
-        .map_err(|e| OffloadError::RemoteError(format!("S3 head_object failed: {}", e)))?
-        .ok_or_else(|| OffloadError::RemoteError(format!("Not found after upload: {}", key)))?;
-    if s3_size != data.len() as u64 {
-        return Err(OffloadError::RemoteError(format!(
-            "Size mismatch after upload: local={}, s3={}",
-            data.len(),
-            s3_size
-        )));
+        .map_err(PutError::Request)?
+        .ok_or(PutError::Missing)?;
+    if s3_size != local {
+        return Err(PutError::SizeMismatch {
+            local,
+            remote: s3_size,
+        });
     }
     Ok(())
 }
@@ -81,29 +142,23 @@ impl QueueOffloader {
         root_path: PathBuf,
         client: Arc<S3Client>,
         prefix: &str,
+        events: EventSink,
     ) -> Self {
         let queue_path = queue_id.to_store_dir(&root_path);
         let (offload_sender, offload_receiver) = mpsc::channel::<UintN>(1000);
         let latest_offloaded_id = Arc::new(RwLock::new(None));
 
-        let worker_queue_id = queue_id.clone();
-        let worker_queue_path = queue_path.clone();
+        let worker = QueueOffloaderWorker {
+            fs: fs.clone(),
+            queue_id: queue_id.clone(),
+            queue_path: queue_path.clone(),
+            client,
+            prefix: prefix.to_string(),
+            events,
+        };
         let worker_latest_id = latest_offloaded_id.clone();
-
-        let prefix = prefix.to_string();
-
-        let worker_fs = fs.clone();
         tokio::spawn(async move {
-            Self::offload_worker(
-                worker_fs,
-                worker_queue_id,
-                worker_queue_path,
-                client,
-                prefix,
-                offload_receiver,
-                worker_latest_id,
-            )
-            .await;
+            Self::offload_worker(worker, offload_receiver, worker_latest_id).await;
         });
 
         let init_sender = offload_sender.clone();
@@ -195,38 +250,18 @@ impl QueueOffloader {
     }
 
     async fn offload_worker(
-        fs: Fs,
-        queue_id: QueueId,
-        queue_path: PathBuf,
-        client: Arc<S3Client>,
-        prefix: String,
+        worker: QueueOffloaderWorker,
         mut receiver: mpsc::Receiver<UintN>,
         latest_offloaded_id: Arc<RwLock<Option<UintN>>>,
     ) {
-        info!("Starting offload worker for queue_id: {}", queue_id);
+        info!("Starting offload worker for queue_id: {}", worker.queue_id);
 
         while let Some(file_id) = receiver.recv().await {
-            let temp_offloader = QueueOffloaderWorker {
-                fs: fs.clone(),
-                queue_id: queue_id.clone(),
-                queue_path: queue_path.clone(),
-                client: client.clone(),
-                prefix: prefix.clone(),
-            };
-
+            let mut attempt: u32 = 0;
             loop {
-                match temp_offloader.is_file_offloaded(&file_id).await {
+                match worker.is_file_offloaded(&file_id).await {
                     Ok(true) => {
-                        let mut latest = latest_offloaded_id.write().await;
-                        match &*latest {
-                            None => *latest = Some(file_id.clone()),
-                            Some(current) => {
-                                if file_id > *current {
-                                    *latest = Some(file_id.clone());
-                                }
-                            }
-                        }
-
+                        advance(&latest_offloaded_id, &file_id).await;
                         break;
                     }
                     Ok(false) => {}
@@ -244,20 +279,19 @@ impl QueueOffloader {
                     }
                 }
 
-                match temp_offloader.upload_file(&file_id).await {
-                    Ok(()) => {
+                attempt = attempt.saturating_add(1);
+                match worker.upload_file(&file_id, attempt).await {
+                    Ok(uploaded) => {
                         info!("Successfully uploaded file {:?}", file_id);
-
-                        let mut latest = latest_offloaded_id.write().await;
-                        match &*latest {
-                            None => *latest = Some(file_id.clone()),
-                            Some(current) => {
-                                if file_id > *current {
-                                    *latest = Some(file_id.clone());
-                                }
-                            }
+                        let landed_through = advance(&latest_offloaded_id, &file_id).await;
+                        if let Some(file) = uploaded.facts {
+                            worker.events.emit(SystemEvent::FileLanded {
+                                file,
+                                key: uploaded.key,
+                                took: uploaded.took,
+                                landed_through,
+                            });
                         }
-
                         break;
                     }
                     Err(OffloadError::LocalFileError(e)) => {
@@ -276,8 +310,27 @@ impl QueueOffloader {
             }
         }
 
-        info!("Offload worker stopped for queue_id: {}", queue_id);
+        info!("Offload worker stopped for queue_id: {}", worker.queue_id);
     }
+}
+
+/// Raises the offloaded bound to `file_id` and returns the bound.
+async fn advance(latest: &RwLock<Option<UintN>>, file_id: &UintN) -> UintN {
+    let mut latest = latest.write().await;
+    match &*latest {
+        Some(current) if current >= file_id => current.clone(),
+        _ => {
+            *latest = Some(file_id.clone());
+            file_id.clone()
+        }
+    }
+}
+
+struct Uploaded {
+    /// `None` when the file's own blocks do not parse; it is uploaded anyway.
+    facts: Option<FileFacts>,
+    key: String,
+    took: Duration,
 }
 
 struct QueueOffloaderWorker {
@@ -286,6 +339,7 @@ struct QueueOffloaderWorker {
     queue_path: PathBuf,
     client: Arc<S3Client>,
     prefix: String,
+    events: EventSink,
 }
 
 impl QueueOffloaderWorker {
@@ -315,20 +369,74 @@ impl QueueOffloaderWorker {
         }
     }
 
-    async fn upload_file(&self, file_id: &UintN) -> Result<(), OffloadError> {
+    /// Failures are reported on attempts 1, 2, 4, 8...: the worker retries
+    /// every second for as long as the bucket is unreachable.
+    async fn upload_file(&self, file_id: &UintN, attempt: u32) -> Result<Uploaded, OffloadError> {
+        let report = attempt.is_power_of_two();
         let local_path = file_id.to_file_path(&self.queue_path.to_string_lossy(), "store");
         let s3_key = self.queue_id.to_cloud_key(&self.prefix, file_id);
 
         info!("Uploading file {:?} to S3 key: {}", file_id, s3_key);
 
-        let file_data = self
-            .fs
-            .read_whole(&local_path)
-            .await
-            .map_err(|e| OffloadError::from(std::io::Error::from(e)))?;
+        let (file, len, head) = match self.open_for_upload(&local_path).await {
+            Ok(opened) => opened,
+            Err(e) => {
+                let e = OffloadError::from(e);
+                if report {
+                    self.report_failure(file_id, UploadFailure::LocalRead, &e);
+                }
+                return Err(e);
+            }
+        };
 
-        put_verified(&self.client, &s3_key, &file_data).await?;
+        let started = Instant::now();
+        let put = match self.client.put_object_stream(&s3_key, file, len).await {
+            Ok(status_code) => verify_put(&self.client, &s3_key, len, status_code).await,
+            Err(e) => Err(PutError::Request(e)),
+        };
+        if let Err(e) = put {
+            if report {
+                self.report_failure(file_id, e.failure(), &e);
+            }
+            return Err(e.into());
+        }
+        let took = started.elapsed();
 
-        Ok(())
+        let facts = normfs_store::store_file::facts_of_head(&self.queue_id, file_id, &head, len)
+            .inspect_err(|e| {
+                warn!(
+                    "Uploaded file {:?} of {} but its blocks do not parse: {}",
+                    file_id, self.queue_id, e
+                )
+            })
+            .ok();
+        Ok(Uploaded {
+            facts,
+            key: s3_key,
+            took,
+        })
+    }
+
+    /// The file to stream, its length, and its first bytes for the facts.
+    async fn open_for_upload(
+        &self,
+        path: &std::path::Path,
+    ) -> std::io::Result<(normfs_fs::ReadFile, u64, Vec<u8>)> {
+        use tokio::io::AsyncReadExt;
+        let mut file = self.fs.open_read(path).await?;
+        let len = file.metadata().await?.len();
+        let mut head = vec![0u8; (len as usize).min(normfs_store::store_file::HEAD_LEN)];
+        file.read_exact(&mut head).await?;
+        file.seek(std::io::SeekFrom::Start(0)).await?;
+        Ok((file, len, head))
+    }
+
+    fn report_failure(&self, file_id: &UintN, failure: UploadFailure, e: &dyn std::fmt::Display) {
+        self.events.emit(SystemEvent::UploadFailed {
+            queue: self.queue_id.clone(),
+            file_id: file_id.clone(),
+            failure,
+            message: e.to_string(),
+        });
     }
 }

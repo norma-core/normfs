@@ -290,8 +290,15 @@ impl AckFileWriter {
 
         let path = path.as_ref().to_path_buf();
 
+        // Pooled records live in the pool's pages; reserving max_buffer_size
+        // per open file would make memory grow with the number of queues.
+        let buffer = if pool.is_some() {
+            BytesMut::new()
+        } else {
+            BytesMut::with_capacity(settings.max_buffer_size)
+        };
         let state = Arc::new(Mutex::new(WriterState {
-            buffer: BytesMut::with_capacity(settings.max_buffer_size),
+            buffer,
             acks: Vec::new(),
             current_size: initial_size,
         }));
@@ -388,6 +395,11 @@ impl AckFileWriter {
         if state.buffer.len() >= self.settings.max_buffer_size {
             self.buffer_full_notify.notify_one();
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn buffer_capacity(&self) -> usize {
+        self.state.lock().await.buffer.capacity()
     }
 
     pub async fn close(&mut self) -> std::io::Result<()> {

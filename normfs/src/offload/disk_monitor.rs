@@ -14,6 +14,7 @@ use normfs_cloud::offloader::QueueOffloader;
 use normfs_cloud::S3Client;
 use normfs_fs::Fs;
 use normfs_store::{DiskUsage, QueueBytes, StoreError};
+use normfs_types::events::{self, EventSink, EvictionBlock, SystemEvent};
 use normfs_types::QueueId;
 use normfs_wal::WalSettings;
 
@@ -129,6 +130,15 @@ impl FileKind {
                 "unknown file kind {} from the C disk layer",
                 other
             ))),
+        }
+    }
+}
+
+impl From<FileKind> for events::FileKind {
+    fn from(kind: FileKind) -> Self {
+        match kind {
+            FileKind::Store => events::FileKind::Store,
+            FileKind::Wal => events::FileKind::Wal,
         }
     }
 }
@@ -429,6 +439,10 @@ struct QueueMonitor {
     /// cleanup starts here instead of walking the store for its oldest file.
     cursor: std::sync::Mutex<Option<UintN>>,
     forget_range: Option<ForgetRange>,
+    events: EventSink,
+    /// The last block reported, so a queue stuck over its limit reports once
+    /// per reason rather than on every check.
+    blocked: std::sync::Mutex<Option<EvictionBlock>>,
 }
 
 fn earliest(a: Option<UintN>, b: Option<UintN>) -> Option<UintN> {
@@ -448,6 +462,7 @@ impl QueueMonitor {
         prefix: Option<&str>,
         forget_range: Option<ForgetRange>,
         disk_usage: Arc<DiskUsage>,
+        events: EventSink,
     ) -> Result<Self, Error> {
         let offloader = match (client, prefix) {
             (Some(client), Some(prefix)) if config.offload => Some(
@@ -457,6 +472,7 @@ impl QueueMonitor {
                     root_path.clone(),
                     client,
                     prefix,
+                    events.clone(),
                 )
                 .await,
             ),
@@ -477,9 +493,24 @@ impl QueueMonitor {
             store_bytes,
             cursor: std::sync::Mutex::new(None),
             forget_range,
+            events,
+            blocked: std::sync::Mutex::new(None),
         };
         monitor.rescan_store().await?;
         Ok(monitor)
+    }
+
+    fn report_blocked(&self, reason: EvictionBlock, held_at: Option<UintN>, queue_bytes: u64) {
+        if self.blocked.lock().unwrap().replace(reason) == Some(reason) {
+            return;
+        }
+        self.events.emit(SystemEvent::EvictionBlocked {
+            queue: self.queue_id.clone(),
+            reason,
+            held_at,
+            queue_bytes,
+            limit_bytes: self.config.max_size as u64,
+        });
     }
 
     async fn scan_dir(&self, dir: &Path, kind: FileKind) -> Result<DirScan, Error> {
@@ -579,6 +610,7 @@ impl QueueMonitor {
                         "Queue '{}' over its limit but nothing is offloaded to S3 yet; deleting nothing",
                         self.queue_id
                     );
+                    self.report_blocked(EvictionBlock::NotOffloaded, None, current_size);
                     return Ok(());
                 }
             },
@@ -598,6 +630,7 @@ impl QueueMonitor {
                     "No files found to delete for queue '{}'",
                     self.queue_id
                 );
+                self.report_blocked(EvictionBlock::NothingFound, None, current_size);
                 return Ok(());
             };
             let eviction = match self.evict_from(from, bound.clone(), wal_scan.total).await {
@@ -622,6 +655,8 @@ impl QueueMonitor {
         };
         *self.cursor.lock().unwrap() = Some(eviction.next.clone());
 
+        let left = current_size.saturating_sub(eviction.events.last().map_or(0, |e| e.freed));
+
         for event in eviction.events {
             match event.result {
                 Ok(()) => {
@@ -630,6 +665,15 @@ impl QueueMonitor {
                             forget(&self.queue_id, &event.id);
                         }
                     }
+                    self.events.emit(SystemEvent::FileEvicted {
+                        queue: self.queue_id.clone(),
+                        kind: event.kind.into(),
+                        file_id: event.id.clone(),
+                        file_bytes: event.size,
+                        queue_bytes: current_size.saturating_sub(event.freed),
+                        // With an offloader, eviction stops at the offloaded bound.
+                        in_cloud: event.kind == FileKind::Store && self.offloader.is_some(),
+                    });
                     log::info!(
                         target: "normfs::disk_monitor",
                         "Deleted {} file {} ({} bytes) of queue '{}', size now: {} bytes",
@@ -652,25 +696,34 @@ impl QueueMonitor {
         }
 
         match eviction.stop {
-            Stop::Freed => {}
-            Stop::Gap => log::info!(
-                target: "normfs::disk_monitor",
-                "No more files to delete for queue '{}', stopping cleanup at id {}",
-                self.queue_id,
-                eviction.next
-            ),
-            Stop::Bound => log::warn!(
-                target: "normfs::disk_monitor",
-                "Skipping deletion of file {} of queue '{}' - not yet offloaded to S3",
-                eviction.next,
-                self.queue_id
-            ),
-            Stop::Error => log::warn!(
-                target: "normfs::disk_monitor",
-                "Cleanup of queue '{}' holds at id {} until it can be deleted",
-                self.queue_id,
-                eviction.next
-            ),
+            Stop::Freed => *self.blocked.lock().unwrap() = None,
+            Stop::Gap => {
+                log::info!(
+                    target: "normfs::disk_monitor",
+                    "No more files to delete for queue '{}', stopping cleanup at id {}",
+                    self.queue_id,
+                    eviction.next
+                );
+                self.report_blocked(EvictionBlock::NothingFound, Some(eviction.next), left);
+            }
+            Stop::Bound => {
+                log::warn!(
+                    target: "normfs::disk_monitor",
+                    "Skipping deletion of file {} of queue '{}' - not yet offloaded to S3",
+                    eviction.next,
+                    self.queue_id
+                );
+                self.report_blocked(EvictionBlock::NotOffloaded, Some(eviction.next), left);
+            }
+            Stop::Error => {
+                log::warn!(
+                    target: "normfs::disk_monitor",
+                    "Cleanup of queue '{}' holds at id {} until it can be deleted",
+                    self.queue_id,
+                    eviction.next
+                );
+                self.report_blocked(EvictionBlock::DeleteFailed, Some(eviction.next), left);
+            }
         }
 
         Ok(())
@@ -686,6 +739,7 @@ impl QueueMonitor {
         if current_size > self.config.max_size as u64 {
             self.cleanup_oldest_files(current_size, wal_scan).await?;
         } else {
+            *self.blocked.lock().unwrap() = None;
             log::debug!(
                 target: "normfs::disk_monitor",
                 "Queue '{}' size {} is within limit {}",
@@ -708,6 +762,7 @@ pub struct DiskMonitor {
     prefix: Option<String>,
     forget_range: Option<ForgetRange>,
     disk_usage: Arc<DiskUsage>,
+    events: EventSink,
 }
 
 impl DiskMonitor {
@@ -718,6 +773,7 @@ impl DiskMonitor {
         prefix: Option<String>,
         forget_range: Option<ForgetRange>,
         disk_usage: Arc<DiskUsage>,
+        events: EventSink,
     ) -> Result<Self, Error> {
         let monitors: Arc<RwLock<std::collections::HashMap<QueueId, QueueMonitor>>> =
             Arc::new(RwLock::new(std::collections::HashMap::new()));
@@ -759,6 +815,7 @@ impl DiskMonitor {
             prefix,
             forget_range,
             disk_usage,
+            events,
         })
     }
 
@@ -808,6 +865,7 @@ impl DiskMonitor {
             self.prefix.as_deref(),
             self.forget_range.clone(),
             self.disk_usage.clone(),
+            self.events.clone(),
         )
         .await?;
 

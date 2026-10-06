@@ -2,14 +2,15 @@ use bytes::{Bytes, BytesMut};
 use normfs_crypto::CryptoContext;
 use normfs_fs::{Fs, PublishSpec, Runs, TmpMode};
 use normfs_types::QueueId;
+use normfs_types::events::{FileFacts, SystemEvent, SystemEvents};
 use std::io;
 use std::path::Path;
 use uintn::UintN;
 use uuid::Uuid;
 
-use crate::DiskUsage;
 use crate::header::{CompressionType, EncryptionType, FileAuthentication, StoreHeader};
-use crate::store_header_v1::StoreHeaderV1;
+use crate::store_header_v1::{AnyStoreHeader, StoreHeaderV1};
+use crate::{DiskUsage, StoreError};
 
 /// A store file's bytes before they go anywhere: `auth ++ header ++ body`.
 ///
@@ -21,9 +22,33 @@ pub struct SealedFile {
     pub body: Bytes,
     pub entries_before: UintN,
     pub num_entries: UintN,
+    /// Length of the WAL bytes the body was built from.
+    pub raw_len: usize,
+    /// `auth ++ header ++ body` in one buffer, when they were built that way.
+    whole: Option<Bytes>,
 }
 
 impl SealedFile {
+    /// A file whose three parts lie back to back in `whole`.
+    pub(crate) fn contiguous(
+        whole: Bytes,
+        header_len: usize,
+        entries_before: UintN,
+        num_entries: UintN,
+        raw_len: usize,
+    ) -> Self {
+        let auth_len = FileAuthentication::SIZE;
+        SealedFile {
+            auth: whole.slice(..auth_len),
+            header: whole.slice(auth_len..auth_len + header_len),
+            body: whole.slice(auth_len + header_len..),
+            entries_before,
+            num_entries,
+            raw_len,
+            whole: Some(whole),
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.auth.len() + self.header.len() + self.body.len()
     }
@@ -33,6 +58,9 @@ impl SealedFile {
     }
 
     pub fn to_bytes(&self) -> Bytes {
+        if let Some(whole) = &self.whole {
+            return whole.clone();
+        }
         let mut out = BytesMut::with_capacity(self.len());
         out.extend_from_slice(&self.auth);
         out.extend_from_slice(&self.header);
@@ -46,6 +74,70 @@ impl SealedFile {
         }
         let minus_one = self.num_entries.sub(&UintN::one()).ok()?;
         Some(self.entries_before.add(&minus_one))
+    }
+
+    pub fn facts(&self, queue: &QueueId, file_id: &UintN) -> Result<FileFacts, StoreError> {
+        let (auth, _) = FileAuthentication::from_bytes(&self.auth)?;
+        let (header, _) = AnyStoreHeader::from_bytes(&self.header)?;
+        Ok(FileFacts {
+            raw_bytes: Some(self.raw_len as u64),
+            ..facts_of(queue, file_id, &auth, &header, self.len() as u64)
+        })
+    }
+}
+
+/// Records a file that reached the local store.
+pub fn report_stored(
+    events: &dyn SystemEvents,
+    queue: &QueueId,
+    file_id: &UintN,
+    file: &SealedFile,
+) {
+    match file.facts(queue, file_id) {
+        Ok(facts) => events.emit(SystemEvent::FileStored(facts)),
+        Err(e) => log::warn!(target: "normfs-store",
+            "queue {queue}: store file {file_id} landed but its blocks do not parse: {e}"),
+    }
+}
+
+/// Enough of a store file's start for [`facts_of_head`]: the auth block and
+/// a header of either version.
+pub const HEAD_LEN: usize = 512;
+
+/// [`SealedFile::facts`] for a whole store file read back from disk.
+pub fn facts(queue: &QueueId, file_id: &UintN, file: &[u8]) -> Result<FileFacts, StoreError> {
+    facts_of_head(queue, file_id, file, file.len() as u64)
+}
+
+/// [`facts`] from the first [`HEAD_LEN`] bytes of a file of `file_len`.
+pub fn facts_of_head(
+    queue: &QueueId,
+    file_id: &UintN,
+    head: &[u8],
+    file_len: u64,
+) -> Result<FileFacts, StoreError> {
+    let (auth, auth_size) = FileAuthentication::from_bytes(head)?;
+    let (header, _) = AnyStoreHeader::from_bytes(&head[auth_size..])?;
+    Ok(facts_of(queue, file_id, &auth, &header, file_len))
+}
+
+fn facts_of(
+    queue: &QueueId,
+    file_id: &UintN,
+    auth: &FileAuthentication,
+    header: &AnyStoreHeader,
+    file_bytes: u64,
+) -> FileFacts {
+    FileFacts {
+        queue: queue.clone(),
+        file_id: file_id.clone(),
+        first_id: header.num_entries_before(),
+        num_entries: header.num_entries(),
+        file_bytes,
+        raw_bytes: None,
+        compression: header.compression(),
+        encryption: header.encryption(),
+        content_signature: auth.content_signature,
     }
 }
 
@@ -90,6 +182,8 @@ pub fn build(
         body,
         entries_before,
         num_entries,
+        raw_len: wal_bytes.len(),
+        whole: None,
     })
 }
 

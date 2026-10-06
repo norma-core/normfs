@@ -10,7 +10,7 @@ description = "Compressed and encrypted persistent storage for NormFS"
 
 [features]
 default = ["c-libs"]
-c-libs = ["dep:zstd"]
+c-libs = ["dep:zstd", "dep:zstd-sys"]
 pure-rust = ["dep:ruzstd"]
 
 [dependencies]
@@ -26,6 +26,8 @@ uuid = { version = "1", features = ["v4", "fast-rng"] }
 
 # Compression libraries - C bindings (default, faster for zstd)
 zstd = { version = "0.13.1", optional = true, default-features = false }
+# For a compression context that lives in memory allocated up front.
+zstd-sys = { version = "2.0.16", optional = true, default-features = false, features = ["experimental"] }
 
 # Compression libraries - Pure Rust (for platforms like FreeBSD)
 ruzstd = { version = "0.8", optional = true }

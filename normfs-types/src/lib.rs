@@ -235,6 +235,7 @@ impl ReadEntry {
 
 mod bounded_map;
 pub use bounded_map::BoundedMap;
+pub mod events;
 
 #[cfg(test)]
 mod bounded_map_test;

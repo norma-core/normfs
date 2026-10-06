@@ -9,8 +9,9 @@ use uintn::UintN;
 
 use crate::StoreError;
 use crate::header::{CompressionType, EncryptionType};
+use crate::pack::Packer;
 use crate::sink::SealedFileSink;
-use crate::store_file::{self, SealedFile};
+use crate::store_file::SealedFile;
 
 /// Attempts between complaints while a file will not land: about every five
 /// seconds at the default delay.
@@ -61,6 +62,7 @@ impl PageStoreWriter {
         settings: PageWriterSettings,
         pool: Arc<PagePool>,
         sink: Arc<dyn SealedFileSink>,
+        packer: Arc<Packer>,
         crypto: Arc<CryptoContext>,
         written_sender: mpsc::UnboundedSender<(QueueId, UintN)>,
     ) -> Self {
@@ -83,6 +85,7 @@ impl PageStoreWriter {
             settings,
             pool,
             sink,
+            packer,
             crypto,
             written_sender,
             closing: close_requested,
@@ -138,14 +141,16 @@ struct Task {
     settings: PageWriterSettings,
     pool: Arc<PagePool>,
     sink: Arc<dyn SealedFileSink>,
+    packer: Arc<Packer>,
     crypto: Arc<CryptoContext>,
     written_sender: mpsc::UnboundedSender<(QueueId, UintN)>,
     closing: watch::Receiver<bool>,
     done: watch::Sender<Option<bool>>,
 }
 
-/// A file built from the pool but not yet landed. The pool's cursors have
-/// already moved past its bytes, so this is the only copy.
+/// A file built from the pool but not yet landed. It holds a pack slot; the
+/// records stay on their pinned pages, so a failed attempt drops it and the
+/// next one builds it again.
 struct Built {
     sealed: SealedFile,
     header: WalHeader,
@@ -201,18 +206,17 @@ impl Task {
     }
 
     async fn land(&mut self, runs: FileRuns) {
-        let first = runs.first_entry_id;
-        if let Some(built) = self.build(runs).await {
-            self.try_land(&built.sealed).await;
-            self.finish(built);
-        } else {
-            self.durable_floor.get_or_insert(first);
+        match self.try_land(&runs).await {
+            Some(built) => self.finish(built),
+            None => {
+                self.durable_floor.get_or_insert(runs.first_entry_id);
+            }
         }
     }
 
     /// Off the runtime: three queues sealing at once on a four-core box
     /// starved everything else, including the appenders whose pages this frees.
-    async fn build(&self, runs: FileRuns) -> Option<Built> {
+    async fn build(&self, runs: &FileRuns) -> Result<Built, String> {
         let first = UintN::from(runs.first_entry_id);
         let last = UintN::from(runs.last_entry_id);
         let num_entries = UintN::from(runs.last_entry_id - runs.first_entry_id + 1);
@@ -220,98 +224,109 @@ impl Task {
         let mut header = self.header.resize(&last, self.pool.page_size());
         header.num_entries_before = first.clone();
 
-        let mut wal_bytes = BytesMut::new();
-        let written = WalHeaderV1::from_v0(&header)
-            .and_then(|h| h.write_to_bytes(&mut wal_bytes))
-            .map_err(|e| e.to_string());
-        for (_, bytes) in &runs.runs {
-            wal_bytes.extend_from_slice(bytes);
+        let mut header_bytes = BytesMut::new();
+        WalHeaderV1::from_v0(&header)
+            .and_then(|h| h.write_to_bytes(&mut header_bytes))
+            .map_err(|e| e.to_string())?;
+        let len = header_bytes.len() + runs.len();
+        if len > self.packer.input_cap() {
+            return Err(format!(
+                "{len} bytes exceed the {} a pack slot holds",
+                self.packer.input_cap()
+            ));
         }
 
-        let sealed = match written {
-            Ok(_) => {
-                let (queue, file_id, crypto) = (
-                    self.queue.clone(),
-                    self.file_id.clone(),
-                    self.crypto.clone(),
-                );
-                let (compression, encryption) =
-                    (self.settings.compression, self.settings.encryption);
-                let wal_bytes = wal_bytes.freeze();
-                tokio::task::spawn_blocking(move || {
-                    store_file::build(
-                        &queue,
-                        &file_id,
-                        compression,
-                        encryption,
-                        first,
-                        num_entries,
-                        &wal_bytes,
-                        &crypto,
-                    )
-                })
-                .await
-                .map_err(|e| e.to_string())
-                .and_then(|r| r.map_err(|e| e.to_string()))
-            }
-            Err(e) => Err(e),
-        };
-        match sealed {
-            Ok(sealed) => Some(Built {
-                sealed,
-                header,
-                first_entry_id: runs.first_entry_id,
-                last_entry_id: runs.last_entry_id,
-            }),
-            Err(e) => {
-                // Deterministic, so a retry would fail the same way. The
-                // records stay in memory, held there by `durable_floor`.
-                log::error!(target: "normfs-store",
-                    "cannot build store file {} for queue {} (entries {}..={}): {e}; \
-                     these records reach no file",
-                    self.file_id, self.queue, runs.first_entry_id, runs.last_entry_id);
-                None
-            }
-        }
+        let mut slot = self.packer.take().await;
+        let buf = slot.buf();
+        buf[..header_bytes.len()].copy_from_slice(&header_bytes);
+        self.pool.copy_file(runs, &mut buf[header_bytes.len()..len]);
+
+        let (packer, queue, file_id, crypto) = (
+            self.packer.clone(),
+            self.queue.clone(),
+            self.file_id.clone(),
+            self.crypto.clone(),
+        );
+        let (compression, encryption) = (self.settings.compression, self.settings.encryption);
+        let sealed = tokio::task::spawn_blocking(move || {
+            packer.seal(
+                slot,
+                len,
+                &queue,
+                &file_id,
+                compression,
+                encryption,
+                first,
+                num_entries,
+                &crypto,
+            )
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+        Ok(Built {
+            sealed,
+            header,
+            first_entry_id: runs.first_entry_id,
+            last_entry_id: runs.last_entry_id,
+        })
     }
 
-    async fn try_land(&self, sealed: &SealedFile) {
+    /// Builds and lands `runs` until it is in, or `None` when it cannot be
+    /// built: that is deterministic, so a retry would fail the same way, and
+    /// the records stay in memory, held there by `durable_floor`.
+    async fn try_land(&self, runs: &FileRuns) -> Option<Built> {
         let mut closing = self.closing.clone();
         let mut close_attempts = 0u32;
         let mut delay = self.settings.retry_delay;
         let mut attempt: u32 = 0;
         loop {
-            match self.sink.land(&self.queue, &self.file_id, sealed).await {
-                Ok(()) => return,
+            let built = match self.build(runs).await {
+                Ok(built) => built,
                 Err(e) => {
-                    attempt = attempt.saturating_add(1);
-                    if *closing.borrow_and_update() {
-                        if close_attempts == 0 {
-                            delay = self.settings.retry_delay;
-                        }
-                        close_attempts = close_attempts.saturating_add(1);
-                        if close_attempts >= self.settings.close_max_attempts {
-                            self.done.send_replace(Some(false));
-                        }
-                    }
-                    if attempt == 1 || attempt.is_multiple_of(LAND_WARN_EVERY) {
-                        log::warn!(target: "normfs-store",
-                            "store file {} for queue {} did not land (attempt {attempt}): {e}",
-                            self.file_id, self.queue);
-                    }
-                    if *closing.borrow() || closing.has_changed().is_err() {
-                        tokio::time::sleep(delay).await;
-                    } else {
-                        tokio::select! {
-                            _ = tokio::time::sleep(delay) => {},
-                            _ = closing.changed() => {
-                                delay = self.settings.retry_delay;
-                            },
-                        }
-                    }
-                    delay = (delay * 2).min(MAX_RETRY_DELAY);
+                    log::error!(target: "normfs-store",
+                        "cannot build store file {} for queue {} (entries {}..={}): {e}; \
+                         these records reach no file",
+                        self.file_id, self.queue, runs.first_entry_id, runs.last_entry_id);
+                    return None;
+                }
+            };
+            let landed = self
+                .sink
+                .land(&self.queue, &self.file_id, &built.sealed)
+                .await;
+            let e = match landed {
+                Ok(()) => return Some(built),
+                Err(e) => e,
+            };
+            // The slot goes back while this waits.
+            drop(built);
+            attempt = attempt.saturating_add(1);
+            if *closing.borrow_and_update() {
+                if close_attempts == 0 {
+                    delay = self.settings.retry_delay;
+                }
+                close_attempts = close_attempts.saturating_add(1);
+                if close_attempts >= self.settings.close_max_attempts {
+                    self.done.send_replace(Some(false));
                 }
             }
+            if attempt == 1 || attempt.is_multiple_of(LAND_WARN_EVERY) {
+                log::warn!(target: "normfs-store",
+                    "store file {} for queue {} did not land (attempt {attempt}): {e}",
+                    self.file_id, self.queue);
+            }
+            if *closing.borrow() || closing.has_changed().is_err() {
+                tokio::time::sleep(delay).await;
+            } else {
+                tokio::select! {
+                    _ = tokio::time::sleep(delay) => {},
+                    _ = closing.changed() => {
+                        delay = self.settings.retry_delay;
+                    },
+                }
+            }
+            delay = (delay * 2).min(MAX_RETRY_DELAY);
         }
     }
 
@@ -339,7 +354,7 @@ impl Task {
 /// looked. An append can open a page between `catch_up` reading the epoch and
 /// the seal taking the lock; sealing alone would then skip the file it closed,
 /// and the next landing would report that file's records durable.
-pub(crate) fn seal_through(pool: &PagePool, next_epoch: &mut u64) -> Vec<FileRuns> {
+pub(crate) fn seal_through(pool: &Arc<PagePool>, next_epoch: &mut u64) -> Vec<FileRuns> {
     let Some((sealed_epoch, sealed)) = pool.seal_open_file() else {
         return Vec::new();
     };

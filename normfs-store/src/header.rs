@@ -136,6 +136,8 @@ pub struct FileAuthentication {
 }
 
 impl FileAuthentication {
+    pub const SIZE: usize = 152;
+
     pub fn new(header_signature: [u8; 64], content_signature: [u8; 64]) -> Self {
         Self {
             version: FileAuthVersion::V0,

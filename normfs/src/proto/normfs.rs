@@ -29,6 +29,18 @@ pub struct Id {
     #[prost(bytes = "bytes", tag = "1")]
     pub raw: ::prost::bytes::Bytes,
 }
+/// Station's time: monotonic (CLOCK_BOOTTIME on Linux, CLOCK_MONOTONIC_RAW on
+/// macOS), wall clock, and the unix second the process started.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Stamp {
+    #[prost(uint64, tag = "1")]
+    pub monotonic_stamp_ns: u64,
+    #[prost(uint64, tag = "2")]
+    pub local_stamp_ns: u64,
+    #[prost(uint64, tag = "3")]
+    pub app_start_id: u64,
+}
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Offset {

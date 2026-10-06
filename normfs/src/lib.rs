@@ -3,6 +3,9 @@ mod mem;
 pub mod server;
 pub mod proto {
     include!("proto/normfs.rs");
+    pub mod system {
+        include!("proto/normfs.system.rs");
+    }
 }
 mod config;
 mod memory_pointers;
@@ -10,6 +13,7 @@ mod memory_pointers;
 mod memory_pointers_test;
 mod offload;
 pub(crate) mod reader_fsm;
+mod system;
 
 use bytes::Bytes;
 use core::time::Duration;
@@ -17,6 +21,7 @@ use normfs_cloud::CloudDownloader;
 use normfs_crypto::CryptoContext;
 use normfs_fs::{Fs, FsConfig, Runs, TmpMode};
 use normfs_store::PersistStore;
+use normfs_types::events::{EventSink, SystemEvent};
 use normfs_wal::{WalFile, WalSettings, WalStore};
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -36,6 +41,7 @@ pub use crate::config::{
     ConfigError, Drainer, Persist, PoolKind, QueueConfig, QueueMode, QueueSettings,
 };
 
+pub use system::SYSTEM_QUEUE;
 pub use uintn::{Error as UintNError, UintN, UintNType};
 
 pub struct NormFS {
@@ -55,6 +61,10 @@ pub struct NormFS {
     reader_fsm: reader_fsm::ReaderFSM,
     queue_resolver: normfs_types::QueueIdResolver,
     queue_init_locks: RwLock<HashMap<QueueId, Arc<Mutex<()>>>>,
+    placer: Placer,
+    system_queue: QueueId,
+    events: EventSink,
+    system_writer: system::Writer,
 }
 
 #[derive(Debug)]
@@ -77,6 +87,9 @@ pub enum Error {
     /// The queue is closed ([`NormFS::close_queue`]): writes are refused
     /// until it is started for write again. The data stays readable.
     QueueClosed,
+    /// The queue is NormFS's own ([`SYSTEM_QUEUE`]): it can be read, but
+    /// only NormFS writes or closes it.
+    ReservedQueue,
     /// `max_memory_usage` cannot hold the two pages a single queue needs to
     /// work. Refused at construction rather than rounded up: rounding up would
     /// mean the process quietly using more memory than it was configured for.
@@ -113,6 +126,7 @@ impl std::fmt::Display for Error {
                 write!(f, "No page became free within the wait the caller allowed")
             }
             Error::QueueClosed => write!(f, "Queue is closed and accepts no more writes"),
+            Error::ReservedQueue => write!(f, "Queue is written by NormFS itself"),
             Error::MemoryBelowFloor {
                 max_memory_usage,
                 page_size,
@@ -147,6 +161,7 @@ impl std::error::Error for Error {
             Error::RecordTooLarge(_) => None,
             Error::WouldBlock => None,
             Error::QueueClosed => None,
+            Error::ReservedQueue => None,
             Error::MemoryBelowFloor { .. } => None,
             Error::PageBelowMinimum { .. } => None,
         }
@@ -252,6 +267,9 @@ pub struct NormFsSettings {
     pub cloud_settings: Option<CloudSettings>,
     pub queue_settings: QueueSettings,
     pub memory_pointers_flush_interval: Duration,
+    /// Record cloud uploads, file metadata and failures in [`SYSTEM_QUEUE`].
+    /// The path stays reserved when this is off.
+    pub system_queue: bool,
 }
 
 impl Default for NormFsSettings {
@@ -273,6 +291,7 @@ impl Default for NormFsSettings {
             cloud_settings: None,
             queue_settings: Default::default(),
             memory_pointers_flush_interval: Duration::from_secs(5),
+            system_queue: true,
         }
     }
 }
@@ -285,14 +304,61 @@ impl NormFsSettings {
             ..Self::default()
         }
     }
+}
 
-    /// Every queue in memory only: nothing reaches disk but each queue's
-    /// last id, so ids continue across a restart and the data does not.
-    pub fn memory_only() -> Self {
-        Self {
-            queue_settings: QueueSettings::default().with_default_persist(Persist::MEMORY),
-            max_disk_usage_per_queue: None,
-            ..Self::default()
+/// The steps of an append that follow the id, apart from the queue they
+/// belong to: what `NormFS` runs for a client and the system queue writer
+/// runs for itself.
+#[derive(Clone)]
+pub(crate) struct Placer {
+    mem: Arc<mem::MemStore>,
+    wal: Arc<WalStore>,
+    memory_pointers: Arc<memory_pointers::MemoryPointers>,
+    queue_settings: Arc<QueueSettings>,
+}
+
+impl Placer {
+    /// What a record needs once it is in a page: a memory queue acks it here,
+    /// a WAL queue tells its writer, a page-per-file queue nothing -- its
+    /// writer takes the page whole and the ack comes back from the sink.
+    fn after_place(
+        &self,
+        queue: &QueueId,
+        entry_id: &UintN,
+        data: Bytes,
+        placement: normfs_wal::Placement,
+    ) -> Result<(), Error> {
+        match self
+            .queue_settings
+            .get_config(queue.as_str())
+            .persist
+            .drainer()
+        {
+            Drainer::None => {
+                self.memory_pointers
+                    .mark(queue, entry_id)
+                    .map_err(Error::Io)?;
+                self.mem.ack(queue, entry_id);
+            }
+            Drainer::Wal => {
+                self.wal
+                    .enqueue_pooled(queue, entry_id.clone(), data, placement)?;
+            }
+            Drainer::Page => {}
+        }
+        Ok(())
+    }
+
+    /// Waits for a page. `None` when the queue is closed or not started, or
+    /// its drainer refused the record.
+    pub(crate) async fn append(&self, queue: &QueueId, data: Bytes) -> Option<UintN> {
+        let (id, placement) = self.mem.enqueue_awaiting(queue, data.clone()).await?;
+        match self.after_place(queue, &id, data, placement) {
+            Ok(()) => Some(id),
+            Err(e) => {
+                log::warn!(target: "normfs", "queue '{queue}': record {id} placed but not handed on: {e}");
+                None
+            }
         }
     }
 }
@@ -300,7 +366,7 @@ impl NormFsSettings {
 impl NormFS {
     pub async fn new<P: AsRef<Path> + Send + 'static>(
         path: P,
-        settings: NormFsSettings,
+        mut settings: NormFsSettings,
     ) -> Result<Self, Error> {
         let path = path.as_ref().to_path_buf();
         log::debug!(target: "normfs", "Creating new NormFS at path: {:?}", path);
@@ -321,6 +387,12 @@ impl NormFS {
         let instance_id = crypto_ctx.instance_id_hex();
 
         let queue_resolver = normfs_types::QueueIdResolver::new(instance_id);
+        let (system, system_rx) = system::SystemQueue::new(queue_resolver.resolve(SYSTEM_QUEUE));
+        let events = if settings.system_queue {
+            system.sink()
+        } else {
+            normfs_types::events::discard()
+        };
 
         let mem = Arc::new(mem::MemStore::with_pools(
             settings.max_memory_usage,
@@ -338,6 +410,16 @@ impl NormFS {
                 }
                 .into());
             }
+        }
+        if settings.system_queue {
+            let config = system::queue_config(
+                &settings.queue_settings.default_config,
+                settings.cloud_settings.is_some(),
+            );
+            settings.queue_settings = settings
+                .queue_settings
+                .clone()
+                .with_override(system.queue().as_str(), config);
         }
 
         let memory_pointers = Arc::new(
@@ -361,13 +443,32 @@ impl NormFS {
             fs.clone(),
         ));
 
+        // Page-per-file queues pack one page at a time, so a slot holds the
+        // larger page; one slot per store worker caps packs in flight.
+        let packer = normfs_store::Packer::new(
+            settings.store_cfg.num_workers,
+            normfs_wal::WAL_HEADER_V1_MAX_SIZE
+                + settings.mem_page_size.max(settings.mem_passive_page_size),
+        )
+        .map_err(Error::Io)?;
+        // A WAL file overshoots `max_file_size` by at most the tail of a page.
+        let wal_packer = normfs_store::Packer::new(
+            settings.store_cfg.num_workers,
+            normfs_wal::WAL_HEADER_V1_MAX_SIZE
+                + settings.wal_settings.max_file_size
+                + settings.mem_page_size.max(settings.mem_passive_page_size),
+        )
+        .map_err(Error::Io)?;
         let store = PersistStore::new(
             &path,
             settings.store_cfg.clone(),
             crypto_ctx.clone(),
             wal.clone(),
             wal_entry_send.clone(),
-        );
+        )
+        .with_events(events.clone())
+        .with_packer(Arc::new(packer))
+        .with_wal_packer(Arc::new(wal_packer));
 
         store.recover().await?;
 
@@ -446,6 +547,7 @@ impl NormFS {
                 cloud_prefix.clone(),
                 Some(forget_range),
                 store_arc.disk_usage(),
+                events.clone(),
             )
             .await
             {
@@ -489,6 +591,7 @@ impl NormFS {
             Arc::new(normfs_cloud::CloudSink::new(
                 downloader.clone(),
                 memory_pointers.clone(),
+                events.clone(),
             ))
         });
         let reader_fsm = reader_fsm::ReaderFSM::new(
@@ -500,7 +603,13 @@ impl NormFS {
             memory_pointers.clone(),
         );
 
-        Ok(Self {
+        let placer = Placer {
+            mem: mem.clone(),
+            wal: wal.clone(),
+            memory_pointers: memory_pointers.clone(),
+            queue_settings: Arc::new(settings.queue_settings.clone()),
+        };
+        let normfs = Self {
             path: path.clone(),
             fs,
             wal,
@@ -516,7 +625,21 @@ impl NormFS {
             reader_fsm,
             queue_resolver,
             queue_init_locks: RwLock::new(HashMap::new()),
-        })
+            placer,
+            system_queue: system.queue().clone(),
+            events,
+            system_writer: system::Writer::idle(),
+        };
+        if normfs.settings.system_queue {
+            let queue = &normfs.system_queue;
+            normfs.ensure_queue_exists_for_write(queue).await?;
+            let max_record = normfs_wal::max_record_len(normfs.page_size_for(queue))
+                .min(normfs.settings.max_memory_usage);
+            normfs
+                .system_writer
+                .run(system, system_rx, max_record, normfs.placer.clone());
+        }
+        Ok(normfs)
     }
 
     pub fn get_instance_id(&self) -> &str {
@@ -641,6 +764,13 @@ impl NormFS {
             }
         }
         self.mem.reopen(queue);
+        Ok(())
+    }
+
+    fn refuse_reserved(&self, queue: &QueueId) -> Result<(), Error> {
+        if queue == &self.system_queue {
+            return Err(Error::ReservedQueue);
+        }
         Ok(())
     }
 
@@ -1157,6 +1287,23 @@ impl NormFS {
         Ok((file_id, header, last_id))
     }
 
+    fn report_started(
+        &self,
+        queue: &QueueId,
+        readonly: bool,
+        persist: Persist,
+        last_id: Option<UintN>,
+    ) {
+        self.events.emit(SystemEvent::QueueStarted {
+            queue: queue.clone(),
+            readonly,
+            wal: persist.wal,
+            store: persist.store,
+            cloud: persist.cloud,
+            last_id,
+        });
+    }
+
     async fn start_queue(&self, queue: &QueueId, mode: QueueMode) -> Result<(), Error> {
         log::info!(target: "normfs", "========================================");
         log::info!(target: "normfs", "Starting queue: '{}' (readonly={})", queue, mode.readonly);
@@ -1174,6 +1321,7 @@ impl NormFS {
                 true,
             );
             log::info!(target: "normfs", "Memory-only queue '{}' started, last_entry_id: {:?}", queue, last_entry_id);
+            self.report_started(queue, mode.readonly, persist, last_entry_id);
             return Ok(());
         }
 
@@ -1211,6 +1359,18 @@ impl NormFS {
         );
 
         if !mode.readonly {
+            if let Some(pool) = self.mem.pool(queue) {
+                let (events, queue) = (self.events.clone(), queue.clone());
+                pool.set_stall_listener(Arc::new(move |stall| {
+                    events.emit(SystemEvent::PoolStalled {
+                        queue: queue.clone(),
+                        waits: stall.waits,
+                        stalled_for: stall.stalled_for,
+                        resumed: stall.resumed,
+                    })
+                }));
+            }
+
             let mut wal_settings = self.settings.wal_settings.clone();
             wal_settings.enable_fsync = queue_config.enable_fsync;
             wal_settings.compression_type = queue_config.compression_type;
@@ -1317,6 +1477,7 @@ impl NormFS {
         }
 
         log::info!(target: "normfs", "Queue '{}' started successfully, last_entry_id: {:?}", queue, last_entry_id);
+        self.report_started(queue, mode.readonly, persist, last_entry_id);
 
         Ok(())
     }
@@ -1325,6 +1486,7 @@ impl NormFS {
     /// not yet on disk. That wait is the back-pressure: the queue declines to
     /// run ahead of the disk rather than dropping what it already took.
     pub async fn enqueue(&self, queue: &QueueId, data: Bytes) -> Result<UintN, Error> {
+        self.refuse_reserved(queue)?;
         if self.mem.is_closed(queue) {
             return Err(Error::QueueClosed);
         }
@@ -1358,6 +1520,7 @@ impl NormFS {
     /// a subscriber callback, which runs while its own queue holds the append
     /// gate. A refused record took no id.
     pub fn try_enqueue(&self, queue: &QueueId, data: Bytes) -> Result<UintN, Error> {
+        self.refuse_reserved(queue)?;
         if self.mem.is_closed(queue) {
             return Err(Error::QueueClosed);
         }
@@ -1401,6 +1564,7 @@ impl NormFS {
         queue: &QueueId,
         data: Vec<Bytes>,
     ) -> Result<Vec<UintN>, Error> {
+        self.refuse_reserved(queue)?;
         if data.is_empty() {
             return Ok(Vec::new());
         }
@@ -1434,9 +1598,6 @@ impl NormFS {
         Ok(entry_ids)
     }
 
-    /// What a record needs once it is in a page: a memory queue acks it here,
-    /// a WAL queue tells its writer, a page-per-file queue nothing -- its
-    /// writer takes the page whole and the ack comes back from the sink.
     fn after_place(
         &self,
         queue: &QueueId,
@@ -1444,20 +1605,7 @@ impl NormFS {
         data: Bytes,
         placement: normfs_wal::Placement,
     ) -> Result<(), Error> {
-        match self.persist_for(queue).drainer() {
-            Drainer::None => {
-                self.memory_pointers
-                    .mark(queue, entry_id)
-                    .map_err(Error::Io)?;
-                self.mem.ack(queue, entry_id);
-            }
-            Drainer::Wal => {
-                self.wal
-                    .enqueue_pooled(queue, entry_id.clone(), data, placement)?;
-            }
-            Drainer::Page => {}
-        }
-        Ok(())
+        self.placer.after_place(queue, entry_id, data, placement)
     }
 
     /// Lands everything a queue has accepted. On a page-per-file queue this
@@ -1516,6 +1664,7 @@ impl NormFS {
     /// and complete the file, then the marker, so a marker on disk implies
     /// the data reached it. Memory is released last.
     pub async fn close_queue(&self, queue: &QueueId) -> Result<(), Error> {
+        self.refuse_reserved(queue)?;
         let queue_lock = self.queue_init_lock(queue);
         let _guard = queue_lock.lock().await;
 
@@ -1571,12 +1720,20 @@ impl NormFS {
             .create_durable(&dir.join("closed"), Runs::default(), TmpMode::Trunc, true)
             .await?;
 
+        let last_id = self.mem.closed_last_id(queue);
         self.mem.close_queue(queue);
+        self.events.emit(SystemEvent::QueueClosed {
+            queue: queue.clone(),
+            last_id,
+        });
         Ok(())
     }
 
     pub async fn close(&self) -> Result<(), Error> {
         log::info!(target: "normfs", "Closing NormFS");
+
+        // Before the store closes, so what it holds lands with the rest.
+        self.system_writer.stop().await;
 
         self.memory_pointers
             .flush_if_dirty()

@@ -2720,6 +2720,9 @@ async fn pooled_rotation_reads_back_in_id_order() {
     settings.mem_page_size = 256 * 1024;
     // Below one page, so every page that opens rotates the file.
     settings.wal_settings.max_file_size = 1024;
+    // Its landing on close gives the migration time to take the WAL files
+    // this test counts.
+    settings.system_queue = false;
 
     // ~1.5 KiB each, so 600 records span several 256 KiB pages.
     let payload = |i: usize| Bytes::from(format!("entry-{i:04}-{}", "x".repeat(1500)));
@@ -2848,6 +2851,9 @@ async fn test_recovery_reports_a_gap_and_destroys_nothing() {
     let mut settings = NormFsSettings::all_active();
     settings.mem_page_size = 256 * 1024;
     settings.wal_settings.max_file_size = 1024;
+    // As in `pooled_rotation_reads_back_in_id_order`: the WAL files must
+    // still be there after close.
+    settings.system_queue = false;
 
     let payload = |i: usize| Bytes::from(format!("entry-{i:04}-{}", "x".repeat(1500)));
 

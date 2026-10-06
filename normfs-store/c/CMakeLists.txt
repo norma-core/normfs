@@ -10,7 +10,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(NORMFS_UINTN_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../../uintn-rs/c/include"
     CACHE PATH "Path to the uintn C include directory")
 
-add_library(normfs_store_c STATIC src/store_header.c)
+add_library(normfs_store_c STATIC src/store_header.c src/store_pack.c)
 target_include_directories(normfs_store_c PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<BUILD_INTERFACE:${NORMFS_UINTN_INCLUDE}>
@@ -67,6 +67,27 @@ if(FRAMAC)
             src/store_header.c
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
         COMMENT "WP: normfs V1 store header"
+        VERBATIM
+    )
+    add_custom_target(verify-store-pack
+        COMMAND ${FRAMAC}
+            -machdep gcc_x86_64
+            -wp-report-json ${CMAKE_CURRENT_BINARY_DIR}/verify-store-pack.json
+            -wp -wp-rte -wp-timeout 120
+            -wp-prover alt-ergo,z3
+            -wp-par ${NPROC}
+            -wp-cache none
+            -wp-cache-env
+            -wp-smoke-tests
+            -wp-msg-key shell
+            -kernel-warn-key annot:missing-spec=inactive
+            -wp-warn-key pedantic-assigns=inactive
+            -wp-no-warn-memory-model
+            -cpp-extra-args=-I${CMAKE_CURRENT_SOURCE_DIR}/include\ -I${NORMFS_UINTN_INCLUDE}
+            -wp-fct normfs_store_pack_compress_bound,normfs_store_pack_slot_size,normfs_store_pack_layout,normfs_store_pack_file_len,normfs_store_pack_fits_holds
+            src/store_pack.c
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "WP: normfs pack slot layout"
         VERBATIM
     )
 endif()

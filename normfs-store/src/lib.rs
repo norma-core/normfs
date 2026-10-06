@@ -1,6 +1,7 @@
 use normfs_crypto::CryptoContext;
 use normfs_fs::{Fs, Scan, ScanResult};
 use normfs_types::QueueId;
+use normfs_types::events::{self, EventSink};
 use normfs_wal::{AnyWalHeaderError, PagePool, WalError, WalFile, WalHeader, WalStore};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -16,6 +17,8 @@ mod compression;
 mod disk_usage;
 pub use disk_usage::{DiskUsage, QueueBytes};
 pub mod header;
+mod pack;
+pub use pack::{PackError, Packer};
 pub mod page_writer;
 pub mod parser;
 mod ranges;
@@ -30,6 +33,8 @@ pub use store_file::SealedFile;
 
 #[cfg(test)]
 mod page_writer_test;
+#[cfg(test)]
+mod writer_test;
 
 #[cfg(test)]
 mod disk_usage_test;
@@ -189,6 +194,9 @@ pub struct PersistStore {
     /// one, so a landed file and a synced file reach memory the same way.
     written_sender: mpsc::UnboundedSender<(QueueId, UintN)>,
     page_writers: std::sync::RwLock<HashMap<QueueId, PageStoreWriter>>,
+    packer: std::sync::OnceLock<Arc<Packer>>,
+    wal_packer: Option<Arc<Packer>>,
+    events: EventSink,
 }
 
 impl PersistStore {
@@ -218,10 +226,33 @@ impl PersistStore {
             store_done_rx: Mutex::new(Some(store_done_rx)),
             written_sender,
             page_writers: std::sync::RwLock::new(HashMap::new()),
+            packer: std::sync::OnceLock::new(),
+            wal_packer: None,
+            events: events::discard(),
             config,
             crypto_ctx,
             wal_store,
         }
+    }
+
+    /// Where landed store files are reported. Set before the writers start.
+    pub fn with_events(mut self, events: EventSink) -> Self {
+        self.events = events;
+        self
+    }
+
+    /// The slots page writers pack files in. Without one, the first page writer
+    /// sizes a pool for its own pages, one slot per worker.
+    pub fn with_packer(self, packer: Arc<Packer>) -> Self {
+        let _ = self.packer.set(packer);
+        self
+    }
+
+    /// The slots WAL files are packed in on their way to the store. Without
+    /// one, each file is read and packed in memory of its own.
+    pub fn with_wal_packer(mut self, packer: Arc<Packer>) -> Self {
+        self.wal_packer = Some(packer);
+        self
     }
 
     /// Starts the WAL migration workers and hands out the channel every landed
@@ -251,6 +282,8 @@ impl PersistStore {
             self.wal_store.clone(),
             self.range_store.clone(),
             self.disk_usage.clone(),
+            self.wal_packer.clone(),
+            self.events.clone(),
         ));
 
         for worker_id in 0..self.config.num_workers {
@@ -285,6 +318,7 @@ impl PersistStore {
             self.range_store.clone(),
             self.disk_usage.clone(),
             self.store_done_tx.clone(),
+            self.events.clone(),
             fsync,
         ))
     }
@@ -298,6 +332,21 @@ impl PersistStore {
         pool: Arc<PagePool>,
         sink: Arc<dyn SealedFileSink>,
     ) {
+        let file_cap = normfs_wal::WAL_HEADER_V1_MAX_SIZE + pool.page_size();
+        let packer = self
+            .packer
+            .get_or_init(|| {
+                Arc::new(
+                    Packer::new(self.config.num_workers, file_cap)
+                        .expect("a zstd context for one page"),
+                )
+            })
+            .clone();
+        if packer.input_cap() < file_cap {
+            log::error!(target: "normfs-store",
+                "queue {queue}: pages of {} bytes do not fit the {}-byte pack slots",
+                pool.page_size(), packer.input_cap());
+        }
         let writer = PageStoreWriter::start(
             queue,
             file_id,
@@ -305,6 +354,7 @@ impl PersistStore {
             settings,
             pool,
             sink,
+            packer,
             self.crypto_ctx.clone(),
             self.written_sender.clone(),
         );

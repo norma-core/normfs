@@ -10,6 +10,7 @@ use writer::WalWriter;
 mod ack_file_writer;
 mod drainer;
 mod errors;
+mod pack_pool;
 mod page_pool;
 mod reader;
 mod wal_arena;
@@ -25,12 +26,14 @@ pub use errors::*;
 #[cfg(any(test, feature = "fault-injection"))]
 pub use normfs_fs::fault::{fail_flushes, heal};
 pub use normfs_fs::{Fs, FsConfig, Scan, ScanResult};
+pub use pack_pool::{PackPool, PackSlot};
 pub use page_pool::{
-    FileRuns, MIN_PAGE_SIZE, PagePool, PendingWrite, Placement, PoolError, RotateHint, Stranded,
-    max_record_len,
+    FileRuns, MIN_PAGE_SIZE, PagePool, PendingWrite, Placement, PoolError, RotateHint,
+    StallListener, StallReport, Stranded, max_record_len,
 };
 pub use reader::{
-    ReadRangeResult, WalContent, get_wal_header, read_wal_file_range, read_wal_header,
+    ReadRangeResult, WalContent, count_entries, get_wal_header, read_wal_file_range,
+    read_wal_header,
 };
 pub use wal_arena::{POOL_FREE, SlotRange, WalArena};
 pub use wal_entry::{WAL_ENTRY_HEADER_FIXED_OVERHEAD, WalEntryHeader};
@@ -212,6 +215,11 @@ impl WalStore {
         } else {
             Ok(None)
         }
+    }
+
+    pub fn wal_file_path(&self, queue_id: &QueueId, file_id: &UintN) -> PathBuf {
+        let queue_path = queue_id.to_wal_dir(&self.root);
+        file_id.to_file_path(queue_path.to_str().unwrap(), "wal")
     }
 
     pub async fn get_wal_file_content(

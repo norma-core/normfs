@@ -1,7 +1,11 @@
+use bytes::Bytes;
 use rusty_s3::{Bucket, Credentials, S3Action, UrlStyle};
 use std::time::Duration;
 
 const PRESIGNED_URL_DURATION: Duration = Duration::from_secs(3600); // 1 hour
+
+/// Read size for a streamed upload body.
+const STREAM_CHUNK: usize = 256 * 1024;
 
 #[derive(Clone)]
 pub struct S3Client {
@@ -57,15 +61,36 @@ impl S3Client {
     pub async fn put_object(
         &self,
         key: &str,
-        data: &[u8],
+        data: Bytes,
     ) -> Result<u16, crate::errors::CloudError> {
         let action = self.bucket.put_object(Some(&self.credentials), key);
         let url = action.sign(PRESIGNED_URL_DURATION);
 
+        let response = self.http_client.put(url.as_str()).body(data).send().await?;
+
+        Ok(response.status().as_u16())
+    }
+
+    /// [`S3Client::put_object`] with the body read from `body` as it is sent,
+    /// so a file of any size takes a chunk of memory rather than its size.
+    pub async fn put_object_stream<R>(
+        &self,
+        key: &str,
+        body: R,
+        len: u64,
+    ) -> Result<u16, crate::errors::CloudError>
+    where
+        R: tokio::io::AsyncRead + Send + 'static,
+    {
+        let action = self.bucket.put_object(Some(&self.credentials), key);
+        let url = action.sign(PRESIGNED_URL_DURATION);
+        let stream = tokio_util::io::ReaderStream::with_capacity(body, STREAM_CHUNK);
+
         let response = self
             .http_client
             .put(url.as_str())
-            .body(data.to_vec())
+            .header(reqwest::header::CONTENT_LENGTH, len)
+            .body(reqwest::Body::wrap_stream(stream))
             .send()
             .await?;
 

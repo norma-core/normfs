@@ -387,3 +387,107 @@ async fn a_cloud_queue_named_like_a_parents_file_ids_is_refused() {
     }
     fs.close().await.unwrap();
 }
+
+async fn landed_records(fs: &NormFS, want: usize) -> Vec<normfs::proto::system::Event> {
+    use normfs::proto::system::{self as pb, EventType};
+    use prost::Message;
+
+    let system = fs.resolve(normfs::SYSTEM_QUEUE);
+    let mut landed = Vec::new();
+    for _ in 0..500 {
+        let last = fs.get_last_id(&system).unwrap().to_u64().unwrap();
+        let (tx, mut rx) = mpsc::channel(last as usize + 2);
+        fs.read(
+            &system,
+            ReadPosition::Absolute(UintN::zero()),
+            last + 1,
+            1,
+            tx,
+        )
+        .await
+        .unwrap();
+        landed.clear();
+        while let Ok(entry) = rx.try_recv() {
+            let event = pb::Event::decode(entry.data).unwrap();
+            if event.r#type() == EventType::EtFileInCloud {
+                landed.push(event);
+            }
+        }
+        if landed.len() >= want {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    landed
+}
+
+fn id_of(id: &Option<normfs::proto::Id>) -> UintN {
+    let raw = &id.as_ref().unwrap().raw;
+    UintN::read_value_from_slice(raw, raw.len()).unwrap()
+}
+
+/// Checks each record against the object it names.
+async fn assert_landed(
+    cloud: &CloudSettings,
+    queue: &normfs::QueueId,
+    landed: &[normfs::proto::system::Event],
+    files: u64,
+) {
+    assert_eq!(landed.len() as u64, files, "one record per object");
+    for (n, file) in landed.iter().enumerate() {
+        let facts = file.file.as_ref().unwrap();
+        let in_cloud = file.in_cloud.as_ref().unwrap();
+        let file_id = id_of(&facts.file_id);
+        assert_eq!(file_id, UintN::from(n as u64 + 1));
+        assert_eq!(id_of(&in_cloud.in_cloud_through), file_id);
+        assert_eq!(id_of(&facts.first_id), UintN::from(n as u64 * PER_PAGE));
+        assert_eq!(facts.num_entries, PER_PAGE);
+        let object = object(cloud, queue, n as u64 + 1).await.unwrap();
+        assert_eq!(in_cloud.key, queue.to_cloud_key(&cloud.prefix, &file_id));
+        assert_eq!(facts.file_bytes, object.len() as u64);
+        assert_eq!(facts.content_signature.as_ref(), &object[88..152]);
+    }
+}
+
+#[tokio::test]
+async fn each_landed_object_is_recorded_in_the_system_queue() {
+    let Some(cloud) = s3().await else { return };
+    let temp = tempfile::TempDir::new().unwrap();
+    let fs = open(temp.path(), settings(cloud.clone())).await;
+    let queue = fs.resolve("cam0");
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    write(&fs, &queue, 2 * PER_PAGE).await;
+    fs.flush_queue(&queue).await.unwrap();
+
+    let landed = landed_records(&fs, 2).await;
+    assert_landed(&cloud, &queue, &landed, 2).await;
+    fs.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn each_offloaded_store_file_is_recorded_in_the_system_queue() {
+    let Some(cloud) = s3().await else { return };
+    let temp = tempfile::TempDir::new().unwrap();
+    let persist = Persist {
+        wal: false,
+        store: true,
+        cloud: true,
+    };
+    let fs = open(
+        temp.path(),
+        NormFsSettings {
+            // The offloader runs under the disk monitor.
+            max_disk_usage_per_queue: Some(1 << 30),
+            ..settings_with(cloud.clone(), persist)
+        },
+    )
+    .await;
+    let queue = fs.resolve("cam0");
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    write(&fs, &queue, 2 * PER_PAGE).await;
+    fs.flush_queue(&queue).await.unwrap();
+
+    let landed = landed_records(&fs, 2).await;
+    assert_landed(&cloud, &queue, &landed, 2).await;
+    fs.close().await.unwrap();
+}

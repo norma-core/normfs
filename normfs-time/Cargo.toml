@@ -1,0 +1,12 @@
+[package]
+name = "normfs-time"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "The monotonic, wall-clock and process-start stamps NormFS and station records carry"
+
+[dependencies]
+libc = "0.2"

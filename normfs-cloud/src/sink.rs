@@ -1,9 +1,11 @@
 use normfs_store::{SealedFile, SealedFileSink};
 use normfs_types::QueueId;
+use normfs_types::events::{EventSink, SystemEvent};
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
+use tokio::time::Instant;
 use uintn::UintN;
 
 use crate::downloader::CloudDownloader;
@@ -29,11 +31,20 @@ pub trait LandedIndex: Send + Sync {
 pub struct CloudSink {
     downloader: Arc<CloudDownloader>,
     index: Arc<dyn LandedIndex>,
+    events: EventSink,
 }
 
 impl CloudSink {
-    pub fn new(downloader: Arc<CloudDownloader>, index: Arc<dyn LandedIndex>) -> Self {
-        Self { downloader, index }
+    pub fn new(
+        downloader: Arc<CloudDownloader>,
+        index: Arc<dyn LandedIndex>,
+        events: EventSink,
+    ) -> Self {
+        Self {
+            downloader,
+            index,
+            events,
+        }
     }
 }
 
@@ -46,9 +57,17 @@ impl SealedFileSink for CloudSink {
     ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>> {
         Box::pin(async move {
             let key = self.downloader.key(queue, file_id);
-            put_verified(self.downloader.client(), &key, &file.to_bytes())
-                .await
-                .map_err(io::Error::other)?;
+            let started = Instant::now();
+            if let Err(e) = put_verified(self.downloader.client(), &key, file.to_bytes()).await {
+                self.events.emit(SystemEvent::UploadFailed {
+                    queue: queue.clone(),
+                    file_id: file_id.clone(),
+                    failure: e.failure(),
+                    message: e.to_string(),
+                });
+                return Err(io::Error::other(e));
+            }
+            let took = started.elapsed();
             if let Some(last) = file.last_entry_id() {
                 // Reads consult this before they range-GET the object.
                 self.downloader
@@ -56,6 +75,18 @@ impl SealedFileSink for CloudSink {
                     .await
                     .map_err(io::Error::other)?;
                 self.index.mark_landed(queue, &last, file_id).await?;
+            }
+            // The writer lands a queue's files one at a time and in order.
+            match file.facts(queue, file_id) {
+                Ok(facts) => self.events.emit(SystemEvent::FileLanded {
+                    file: facts,
+                    key,
+                    took,
+                    landed_through: file_id.clone(),
+                }),
+                Err(e) => log::warn!(
+                    "queue {queue}: file {file_id} landed but its blocks do not parse: {e}"
+                ),
             }
             Ok(())
         })
