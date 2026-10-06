@@ -237,7 +237,7 @@ async fn concurrent_rescans_and_out_of_order_publications_preserve_usage() {
     let publish = async {
         for id in (1..=32u64).rev() {
             let temp_file = root.join("new-store-file");
-            tokio::fs::write(&temp_file, vec![0; 100]).await.unwrap();
+            std::fs::write(&temp_file, vec![0; 100]).unwrap();
             usage
                 .publish(
                     &test_fs(),

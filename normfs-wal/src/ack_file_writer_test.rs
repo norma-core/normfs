@@ -258,7 +258,7 @@ async fn test_writer_with_header() {
 
     writer.close().await.unwrap();
 
-    let file_content = tokio::fs::read(&file_path).await.unwrap();
+    let file_content = std::fs::read(&file_path).unwrap();
     assert_eq!(&file_content[..header.len()], header.as_ref());
     assert_eq!(&file_content[header.len()..], entry_data.as_ref());
 
@@ -486,7 +486,7 @@ async fn a_failed_commit_cuts_back_to_the_known_good_length() {
     let retry = vec![Bytes::from_static(b"RETRY")];
     assert!(commit(&mut tail, retry, &settings).await);
 
-    let content = tokio::fs::read(&path).await.unwrap();
+    let content = std::fs::read(&path).unwrap();
     assert_eq!(
         content, b"GOODRETRY",
         "the retry must start at the known-good length, with the torn prefix gone"

@@ -282,9 +282,7 @@ async fn test_v1_enqueue_read_and_scan() {
     let wal_dir = queue_id.to_wal_dir(tmp_dir.path());
 
     // The file is genuinely V1: the header version word (u64 LE) is 1.
-    let raw = tokio::fs::read(file_id.to_file_path(wal_dir.to_str().unwrap(), "wal"))
-        .await
-        .unwrap();
+    let raw = std::fs::read(file_id.to_file_path(wal_dir.to_str().unwrap(), "wal")).unwrap();
     assert_eq!(raw[0], 1, "new file must carry the V1 header version");
 
     // read_wal_file_range: ids are 0,1,2 derived from position, data intact.
@@ -390,10 +388,8 @@ async fn test_v1_truncated_tail_is_dropped() {
     // Lop 3 bytes off the end, corrupting the last entry's CRC/frame.
     let wal_dir = queue_id.to_wal_dir(tmp_dir.path());
     let path = file_id.to_file_path(wal_dir.to_str().unwrap(), "wal");
-    let bytes = tokio::fs::read(&path).await.unwrap();
-    tokio::fs::write(&path, &bytes[..bytes.len() - 3])
-        .await
-        .unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    std::fs::write(&path, &bytes[..bytes.len() - 3]).unwrap();
 
     // Only the first two entries survive; ids 0 and 1.
     let (_, range) = get_wal_range(&test_fs(), &wal_dir, &file_id).await.unwrap();
@@ -489,10 +485,8 @@ async fn test_v1_truncation_offsets_across_a_frame() {
         let tmp_dir = tempdir().unwrap();
         let (wal_dir, file_id) = build_v1_file(tmp_dir.path(), "v1_cut", 4, payload).await;
         let path = file_id.to_file_path(wal_dir.to_str().unwrap(), "wal");
-        let bytes = tokio::fs::read(&path).await.unwrap();
-        tokio::fs::write(&path, &bytes[..bytes.len() - cut])
-            .await
-            .unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::write(&path, &bytes[..bytes.len() - cut]).unwrap();
 
         // Either way the fourth entry is gone and the first three remain.
         let (_, range) = get_wal_range(&test_fs(), &wal_dir, &file_id).await.unwrap();
@@ -531,7 +525,7 @@ async fn test_mixed_v0_and_v1_files_in_one_queue() {
     // File 1: a legacy V0 file, entries 0 and 1, written by hand — the writer
     // only produces V1, so the file a running deployment would have left behind
     // has to be constructed here.
-    tokio::fs::create_dir_all(&wal_dir).await.unwrap();
+    std::fs::create_dir_all(&wal_dir).unwrap();
     let file1 = UintN::from(1u64);
     let header1 = WalHeader::new(8, 4, UintN::from(0u64)).unwrap();
     let mut v0_bytes = BytesMut::new();
@@ -545,11 +539,10 @@ async fn test_mixed_v0_and_v1_files_in_one_queue() {
             .unwrap();
         v0_bytes.extend_from_slice(&record);
     }
-    tokio::fs::write(
+    std::fs::write(
         file1.to_file_path(wal_dir.to_str().unwrap(), "wal"),
         &v0_bytes,
     )
-    .await
     .unwrap();
 
     // File 2: V1, entries 2 and 3 (num_entries_before = 2).
@@ -578,12 +571,8 @@ async fn test_mixed_v0_and_v1_files_in_one_queue() {
     store.close().await.unwrap();
 
     // Both files read back correctly via their own format.
-    let raw1 = tokio::fs::read(file1.to_file_path(wal_dir.to_str().unwrap(), "wal"))
-        .await
-        .unwrap();
-    let raw2 = tokio::fs::read(file2.to_file_path(wal_dir.to_str().unwrap(), "wal"))
-        .await
-        .unwrap();
+    let raw1 = std::fs::read(file1.to_file_path(wal_dir.to_str().unwrap(), "wal")).unwrap();
+    let raw2 = std::fs::read(file2.to_file_path(wal_dir.to_str().unwrap(), "wal")).unwrap();
     assert_eq!(raw1[0], 0, "file 1 must be V0");
     assert_eq!(raw2[0], 1, "file 2 must be V1");
 
@@ -678,7 +667,7 @@ async fn test_v1_rotates_on_file_size_not_field_width() {
 
     let file_2 = UintN::from(2u64).to_file_path(wal_dir.to_str().unwrap(), "wal");
     assert!(
-        tokio::fs::metadata(&file_2).await.is_err(),
+        std::fs::metadata(&file_2).is_err(),
         "no rotation should have happened, but file 2 exists"
     );
 
@@ -747,12 +736,12 @@ async fn a_rotation_that_cannot_open_its_file_waits_rather_than_desyncing() {
     };
 
     let wal_dir = queue_id.to_wal_dir(tmp_dir.path());
-    tokio::fs::create_dir_all(&wal_dir).await.unwrap();
+    std::fs::create_dir_all(&wal_dir).unwrap();
 
     // A directory where file 2 has to be created. `open` cannot write to it, so
     // the first rotation fails and has to retry.
     let blocked = UintN::from(2u64).to_file_path(wal_dir.to_str().unwrap(), "wal");
-    tokio::fs::create_dir_all(&blocked).await.unwrap();
+    std::fs::create_dir_all(&blocked).unwrap();
 
     store
         .start_writer_with_pool(
@@ -787,7 +776,7 @@ async fn a_rotation_that_cannot_open_its_file_waits_rather_than_desyncing() {
     );
 
     // Clear the way. The rotation must then complete on its own.
-    tokio::fs::remove_dir(&blocked).await.unwrap();
+    std::fs::remove_dir(&blocked).unwrap();
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while pool.durable_before() < COUNT {
@@ -857,12 +846,12 @@ async fn a_close_interrupts_a_rotation_that_is_stuck_retrying() {
     };
 
     let wal_dir = queue_id.to_wal_dir(tmp_dir.path());
-    tokio::fs::create_dir_all(&wal_dir).await.unwrap();
+    std::fs::create_dir_all(&wal_dir).unwrap();
 
     // A directory where file 2 has to be created, so the rotation retries.
     // It is never removed: the only way out of the retry is the close.
     let blocked = UintN::from(2u64).to_file_path(wal_dir.to_str().unwrap(), "wal");
-    tokio::fs::create_dir_all(&blocked).await.unwrap();
+    std::fs::create_dir_all(&blocked).unwrap();
 
     store
         .start_writer_with_pool(
@@ -1037,7 +1026,7 @@ async fn a_close_that_cannot_flush_hands_its_tail_to_a_retrier() {
         flush_retry_delay: Duration::from_millis(1),
     };
 
-    tokio::fs::create_dir_all(&wal_dir).await.unwrap();
+    std::fs::create_dir_all(&wal_dir).unwrap();
     let torn = first_file.to_file_path(wal_dir.to_str().unwrap(), "wal");
     crate::fail_flushes(&torn, u32::MAX);
 
