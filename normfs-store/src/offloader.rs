@@ -6,6 +6,7 @@ use normfs_types::events::{EventSink, FileFacts, SystemEvent, UploadFailure};
 use std::collections::BTreeSet;
 use std::sync::Mutex;
 use tokio::sync::Notify;
+use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use uintn::UintN;
 
@@ -56,6 +57,14 @@ impl From<BackendError> for OffloadError {
 #[derive(Debug)]
 pub struct QueueOffloader {
     shared: Arc<Shared>,
+    worker: JoinHandle<()>,
+}
+
+/// The worker holds the layers and backends; it ends with its handle.
+impl Drop for QueueOffloader {
+    fn drop(&mut self) {
+        self.worker.abort();
+    }
 }
 
 #[derive(Debug, Default)]
@@ -91,10 +100,10 @@ impl QueueOffloader {
             events,
         };
         let worker_shared = shared.clone();
-        tokio::spawn(async move {
+        let worker = tokio::spawn(async move {
             Self::offload_worker(worker, worker_shared).await;
         });
-        Self { shared }
+        Self { shared, worker }
     }
 
     /// `file_id` is in the first layer. Files may land in any order.

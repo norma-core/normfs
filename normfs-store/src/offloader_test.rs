@@ -454,3 +454,26 @@ async fn a_failed_wal_scan_does_not_let_the_bound_pass_a_file_still_there() {
         "the bound reached {bound:?} with file 1 still in the WAL"
     );
 }
+
+#[tokio::test]
+async fn dropping_an_idle_offloader_ends_its_worker() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let queue = QueueIdResolver::new("inst").resolve("cam");
+    let remote = Arc::new(Memory::default());
+    let offloader = QueueOffloader::new(
+        Arc::new(Layer::new(local_layer(&temp), None, false)),
+        Arc::new(Layer::new(remote.clone(), None, true)),
+        None,
+        queue,
+        events::discard(),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(Arc::strong_count(&remote) > 1);
+
+    drop(offloader);
+    wait_for("the worker to let go of the next layer", async || {
+        Arc::strong_count(&remote) == 1
+    })
+    .await;
+}
