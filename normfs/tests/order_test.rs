@@ -59,6 +59,7 @@ fn wal_dir(base: &std::path::Path, queue: &QueueId) -> std::path::PathBuf {
 /// derives each id from the header and the entry's position, exactly as
 /// recovery does.
 async fn entries_on_disk(dir: &std::path::Path) -> Vec<ReadEntry> {
+    let fs = normfs_fs::Fs::new(normfs_fs::FsConfig::default()).unwrap();
     let mut file_ids: Vec<UintN> = std::fs::read_dir(dir)
         .expect("wal directory")
         .filter_map(|e| e.ok())
@@ -80,16 +81,26 @@ async fn entries_on_disk(dir: &std::path::Path) -> Vec<ReadEntry> {
         // Where this file's ids start. A V1 file stores no ids, so asking it
         // for a range below its own first entry asks for nothing -- and the
         // first entry is exactly what its header says came before it.
-        let header = normfs_wal::read_wal_header(dir, &file_id)
+        let header = normfs_wal::read_wal_header(&fs, dir, &file_id)
             .await
             .expect("a wal file has a header");
         let (tx, mut rx) = mpsc::channel(4096);
         let dir = dir.to_path_buf();
         let id = file_id.clone();
         let from = header.num_entries_before.clone();
+        let fs = fs.clone();
         let reader = tokio::spawn(async move {
-            normfs_wal::read_wal_file_range(&dir, &id, &from, &None, 1, &tx, DataSource::DiskWal)
-                .await
+            normfs_wal::read_wal_file_range(
+                &fs,
+                &dir,
+                &id,
+                &from,
+                &None,
+                1,
+                &tx,
+                DataSource::DiskWal,
+            )
+            .await
         });
         while let Some(entry) = rx.recv().await {
             out.push(entry);

@@ -5,12 +5,12 @@
 //! queue carries on. On a card that never recovers this is back-pressure rather
 //! than loss: the pool fills and `enqueue` waits.
 
+use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use normfs_fs::{AppendOutcome, Fs, Runs};
 use normfs_types::QueueId;
-use tokio::fs::OpenOptions;
-use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use uintn::UintN;
 
@@ -46,6 +46,7 @@ pub(crate) enum DrainRequest {
 /// queued after the sender drops -- so a close that reports itself incomplete
 /// can be followed by one that succeeds.
 pub(crate) fn spawn(
+    fs: Fs,
     pool: Arc<PagePool>,
     wal_complete_sender: mpsc::UnboundedSender<WalFile>,
     written_sender: mpsc::UnboundedSender<(QueueId, UintN)>,
@@ -53,7 +54,7 @@ pub(crate) fn spawn(
     let (tx, mut rx) = mpsc::unbounded_channel();
     tokio::spawn(async move {
         while let Some(DrainRequest::Retry(file)) = rx.recv().await {
-            if !land(&file).await {
+            if !land(&fs, &file).await {
                 // Left owed on purpose: a close certifies that everything
                 // accepted is on disk, and saying "incomplete" for ever beats
                 // certifying the loss. A restart clears it.
@@ -76,10 +77,10 @@ pub(crate) fn spawn(
 }
 
 /// False only for a failure no retry can pass, never for giving up on one.
-async fn land(file: &StrandedFile) -> bool {
+async fn land(fs: &Fs, file: &StrandedFile) -> bool {
     let mut attempt: u32 = 0;
     loop {
-        match attempt_once(file).await {
+        match attempt_once(fs, file).await {
             Ok(()) => return true,
             Err(Fatal) => {
                 log::error!(
@@ -122,49 +123,47 @@ enum Failure {
     Fatal,
 }
 
-async fn attempt_once(file: &StrandedFile) -> Result<(), Failure> {
+async fn attempt_once(fs: &Fs, file: &StrandedFile) -> Result<(), Failure> {
     // Never `create`: a close usually fails on a full disk, which is when the
     // offload monitor deletes WAL files oldest-first, and this is the oldest
-    // survivor. Creating it would pair `set_len` with an empty file and write
-    // the tail after a run of NULs.
-    let mut handle = OpenOptions::new()
-        .write(true)
-        .open(&file.path)
+    // survivor. Creating it would pair the truncate with an empty file and
+    // write the tail after a run of NULs.
+    let path = file.path.clone();
+    let handle = fs
+        .run_blocking(move || std::fs::OpenOptions::new().write(true).open(&path))
         .await
         .map_err(|e| {
+            let e = std::io::Error::from(e);
             if e.kind() == std::io::ErrorKind::NotFound {
                 Fatal
             } else {
                 Transient(e)
             }
         })?;
+    let handle = Arc::new(handle);
 
-    let len = handle.metadata().await.map_err(Transient)?.len();
-    if len < file.valid_len {
+    let metadata = fs
+        .metadata(handle.clone())
+        .await
+        .map_err(|e| Transient(e.into()))?;
+    let inode = metadata.ino();
+    if metadata.len() < file.valid_len {
         return Err(Fatal);
     }
 
     // Before every attempt: a previous one may have left bytes behind, and V1
     // derives ids from position, so a stray frame renumbers what follows.
-    handle.set_len(file.valid_len).await.map_err(Transient)?;
-    handle
-        .seek(std::io::SeekFrom::Start(file.valid_len))
+    fs.restore_with_inode(handle.clone(), inode, &file.path, file.valid_len)
         .await
-        .map_err(Transient)?;
+        .map_err(|e| Transient(e.into()))?;
 
-    for (_, bytes) in &file.stranded.runs {
-        handle.write_all(bytes).await.map_err(Transient)?;
+    let runs = Runs(file.stranded.runs.iter().map(|(_, b)| b.clone()).collect());
+    match fs
+        .append_sync_with_inode(handle, inode, &file.path, file.valid_len, runs, file.fsync)
+        .await
+    {
+        Ok(AppendOutcome::Committed) => Ok(()),
+        Ok(AppendOutcome::Failed { err, .. }) => Err(Transient(err)),
+        Err(e) => Err(Transient(e.into())),
     }
-    // Its own handle, so without this an injected outage would stop at the
-    // closing flush and the retry would land on its first attempt.
-    if crate::fault::take_failure(&file.path) {
-        return Err(Transient(std::io::Error::other(
-            "injected failure landing a stranded tail",
-        )));
-    }
-    handle.flush().await.map_err(Transient)?;
-    if file.fsync {
-        handle.sync_all().await.map_err(Transient)?;
-    }
-    Ok(())
 }

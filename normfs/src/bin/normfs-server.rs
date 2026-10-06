@@ -94,8 +94,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("Max queue disk size: {} bytes", args.max_queue_disk_size);
     log::info!("Memory-only mode: {}", args.memory_only);
 
-    std::fs::create_dir_all(&args.data_dir)?;
-
     // All-active until the server grows a way to declare per-queue pool
     // rules: a passive default without that knob would silently cap every
     // record at a passive page with no recourse from the command line.

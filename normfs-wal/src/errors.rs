@@ -91,6 +91,12 @@ impl From<std::io::Error> for WalError {
     }
 }
 
+impl From<normfs_fs::FsError> for WalError {
+    fn from(e: normfs_fs::FsError) -> Self {
+        WalError::IoError(e.into())
+    }
+}
+
 impl From<uintn::Error> for WalError {
     fn from(e: uintn::Error) -> Self {
         WalError::WalHeaderError(WalHeaderError::UintN(e))

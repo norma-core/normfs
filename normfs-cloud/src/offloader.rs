@@ -1,9 +1,10 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use log::{error, info, warn};
+use normfs_fs::{Fs, Scan, ScanResult};
 use normfs_types::QueueId;
 use tokio::sync::{RwLock, mpsc};
-use uintn::{UintN, paths};
+use uintn::UintN;
 
 use crate::client::S3Client;
 
@@ -75,6 +76,7 @@ pub struct QueueOffloader {
 
 impl QueueOffloader {
     pub async fn new(
+        fs: Fs,
         queue_id: QueueId,
         root_path: PathBuf,
         client: Arc<S3Client>,
@@ -90,8 +92,10 @@ impl QueueOffloader {
 
         let prefix = prefix.to_string();
 
+        let worker_fs = fs.clone();
         tokio::spawn(async move {
             Self::offload_worker(
+                worker_fs,
                 worker_queue_id,
                 worker_queue_path,
                 client,
@@ -117,9 +121,13 @@ impl QueueOffloader {
                 "Starting background initialization of upload queue for queue_id: {}",
                 init_queue_id
             );
-            if let Err(e) =
-                Self::initialize_upload_queue_static(&init_queue_id, &init_queue_path, init_sender)
-                    .await
+            if let Err(e) = Self::initialize_upload_queue_static(
+                &fs,
+                &init_queue_id,
+                &init_queue_path,
+                init_sender,
+            )
+            .await
             {
                 error!("Failed to initialize upload queue: {}", e);
             }
@@ -129,26 +137,25 @@ impl QueueOffloader {
     }
 
     async fn initialize_upload_queue_static(
+        fs: &Fs,
         queue_id: &QueueId,
         queue_path: &PathBuf,
         offload_sender: mpsc::Sender<UintN>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         log::trace!("Initializing upload queue for queue_id: {}", queue_id);
 
-        if !queue_path.exists() {
-            warn!("Queue path does not exist: {:?}", queue_path);
-            return Ok(());
-        }
-
-        let min_id = match paths::find_min_id(queue_path, "store") {
-            Ok(id) => id,
-            Err(e) => {
-                warn!("No store files found in queue: {}", e);
+        let min_id = match fs.scan_ids(queue_path, "store", Scan::Min).await? {
+            ScanResult::One(id) => id,
+            _ => {
+                warn!("No store files found in queue {:?}", queue_path);
                 return Ok(());
             }
         };
 
-        let max_id = paths::find_max_id(queue_path, "store")?;
+        let max_id = match fs.scan_ids(queue_path, "store", Scan::Max).await? {
+            ScanResult::One(id) => id,
+            _ => return Ok(()),
+        };
 
         info!("Found store files from {:?} to {:?}", min_id, max_id);
 
@@ -157,7 +164,7 @@ impl QueueOffloader {
 
         loop {
             let local_path = current_id.to_file_path(&queue_path.to_string_lossy(), "store");
-            if local_path.exists() {
+            if fs.stat(&local_path).await?.is_some() {
                 if let Err(e) = offload_sender.send(current_id.clone()).await {
                     error!("Failed to enqueue file {:?}: {}", current_id, e);
                 } else {
@@ -188,6 +195,7 @@ impl QueueOffloader {
     }
 
     async fn offload_worker(
+        fs: Fs,
         queue_id: QueueId,
         queue_path: PathBuf,
         client: Arc<S3Client>,
@@ -199,6 +207,7 @@ impl QueueOffloader {
 
         while let Some(file_id) = receiver.recv().await {
             let temp_offloader = QueueOffloaderWorker {
+                fs: fs.clone(),
                 queue_id: queue_id.clone(),
                 queue_path: queue_path.clone(),
                 client: client.clone(),
@@ -272,6 +281,7 @@ impl QueueOffloader {
 }
 
 struct QueueOffloaderWorker {
+    fs: Fs,
     queue_id: QueueId,
     queue_path: PathBuf,
     client: Arc<S3Client>,
@@ -282,16 +292,16 @@ impl QueueOffloaderWorker {
     async fn is_file_offloaded(&self, file_id: &UintN) -> Result<bool, OffloadError> {
         let local_path = file_id.to_file_path(&self.queue_path.to_string_lossy(), "store");
 
-        if !local_path.exists() {
-            return Err(OffloadError::LocalFileError(format!(
-                "Local file does not exist: {:?}",
-                local_path
-            )));
-        }
-
-        let local_size = std::fs::metadata(&local_path)
-            .map_err(OffloadError::from)?
-            .len();
+        let local_size = match self.fs.stat(&local_path).await {
+            Ok(Some(metadata)) => metadata.len(),
+            Ok(None) => {
+                return Err(OffloadError::LocalFileError(format!(
+                    "Local file does not exist: {:?}",
+                    local_path
+                )));
+            }
+            Err(e) => return Err(OffloadError::from(std::io::Error::from(e))),
+        };
 
         let s3_key = self.queue_id.to_cloud_key(&self.prefix, file_id);
 
@@ -311,9 +321,11 @@ impl QueueOffloaderWorker {
 
         info!("Uploading file {:?} to S3 key: {}", file_id, s3_key);
 
-        let file_data = tokio::fs::read(&local_path)
+        let file_data = self
+            .fs
+            .read_whole(&local_path)
             .await
-            .map_err(OffloadError::from)?;
+            .map_err(|e| OffloadError::from(std::io::Error::from(e)))?;
 
         put_verified(&self.client, &s3_key, &file_data).await?;
 

@@ -30,6 +30,7 @@ pub struct WalWriter {
 }
 
 struct WriterState {
+    fs: normfs_fs::Fs,
     queue_path: PathBuf,
     queue_id: QueueId,
     file_id: UintN,
@@ -68,6 +69,7 @@ struct WriterState {
 
 impl WalWriter {
     pub async fn new(
+        fs: normfs_fs::Fs,
         queue: &QueueId,
         root: &Path,
         file_id: &UintN,
@@ -88,7 +90,7 @@ impl WalWriter {
         let (tx, mut rx) = mpsc::unbounded_channel();
 
         let queue_fs_path = queue.to_wal_dir(root);
-        tokio::fs::create_dir_all(&queue_fs_path).await?;
+        fs.mkdir_all(&queue_fs_path).await?;
 
         // From here a file writer is draining these pages, so an appender may
         // wait for one to be freed: a flush will end the wait. And from here
@@ -109,6 +111,7 @@ impl WalWriter {
         }
 
         let file_writer = new_file_writer(
+            fs.clone(),
             &queue_fs_path,
             file_id,
             &header,
@@ -121,6 +124,7 @@ impl WalWriter {
 
         let closing = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut state = WriterState {
+            fs,
             queue_path: queue_fs_path,
             queue_id: queue.clone(),
             file_id: file_id.clone(),
@@ -549,6 +553,7 @@ impl WriterState {
 
         let drainer = self.drainer.get_or_insert_with(|| {
             crate::drainer::spawn(
+                self.fs.clone(),
                 Arc::clone(pool),
                 self.wal_complete_sender.clone(),
                 self.written_sender.clone(),
@@ -741,6 +746,7 @@ impl WriterState {
         let mut attempt: u32 = 0;
         loop {
             match new_file_writer(
+                self.fs.clone(),
                 &self.queue_path,
                 &self.file_id,
                 &self.header,
@@ -801,6 +807,7 @@ const ROTATE_RETRY_DELAY: Duration = Duration::from_millis(10);
 const ROTATE_WARN_EVERY: u32 = 500;
 
 async fn new_file_writer(
+    fs: normfs_fs::Fs,
     queue_path: &Path,
     file_id: &UintN,
     header: &WalHeader,
@@ -818,6 +825,7 @@ async fn new_file_writer(
     WalHeaderV1::from_v0(header)?.write_to_bytes(&mut header_buf)?;
 
     let writer = AckFileWriter::new(
+        fs,
         file_path,
         AckFileWriterSettings {
             max_buffer_size: settings.write_buffer_size,

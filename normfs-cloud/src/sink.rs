@@ -15,12 +15,12 @@ use crate::offloader::put_verified;
 /// `mark_landed` returns only once the record is durable: a restart that read
 /// a stale one would start the next file at an id the bucket already holds.
 pub trait LandedIndex: Send + Sync {
-    fn mark_landed(
-        &self,
-        queue: &QueueId,
-        last_entry_id: &UintN,
-        file_id: &UintN,
-    ) -> io::Result<()>;
+    fn mark_landed<'a>(
+        &'a self,
+        queue: &'a QueueId,
+        last_entry_id: &'a UintN,
+        file_id: &'a UintN,
+    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>>;
 }
 
 /// The bucket, directly: a sealed page becomes one object and no local disk
@@ -55,7 +55,7 @@ impl SealedFileSink for CloudSink {
                     .record_range(queue, file_id, &file.entries_before, &last)
                     .await
                     .map_err(io::Error::other)?;
-                self.index.mark_landed(queue, &last, file_id)?;
+                self.index.mark_landed(queue, &last, file_id).await?;
             }
             Ok(())
         })

@@ -1,11 +1,11 @@
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
+use normfs_fs::{AppendOutcome, Fs, Runs, TmpMode};
 use normfs_types::QueueId;
-use tokio::fs::{File, OpenOptions};
-use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::{Mutex, Notify, mpsc};
 use tokio::task::JoinHandle;
 use uintn::UintN;
@@ -37,51 +37,96 @@ impl Default for AckFileWriterSettings {
 
 /// The file and the write-side view of it, under one lock.
 ///
-/// `flushed_len` is the length known to have reached the kernel: the header
-/// plus every batch whose write, flush and sync all succeeded. A failed
-/// attempt truncates back to it and seeks there before retrying, so a torn
-/// write cannot leave a partial frame for the retry to append after --
-/// tokio's `File` buffers writes and can surface an error one call late, and
-/// V1's positional ids turn any stray bytes into every later entry answering
-/// under the wrong id.
+/// `flushed_len` is the length known to be on the medium: the header plus
+/// every batch the fs layer committed. It is the `at` every append starts
+/// from, and the fs layer's APPEND plan promises that after a failed attempt
+/// the file is cut back to it, so a torn write cannot leave a partial frame
+/// for the retry to append after -- V1's positional ids turn any stray bytes
+/// into every later entry answering under the wrong id.
 #[derive(Debug)]
 pub(crate) struct FileTail {
-    pub(crate) file: File,
+    pub(crate) file: Arc<File>,
+    pub(crate) inode: u64,
     pub(crate) flushed_len: u64,
+    pub(crate) needs_restore: bool,
 }
 
-impl FileTail {
-    /// Cuts the file back to the last known-good length. After this a retry
-    /// starts exactly where the failed attempt did.
-    pub(crate) async fn restore(&mut self, path: &Path) {
-        // Drain whatever write is still in flight so set_len acts on a settled
-        // file; its error, if any, was the attempt's and is already handled.
-        let _ = self.file.flush().await;
-        if let Err(e) = self.file.set_len(self.flushed_len).await {
-            log::error!(
-                target: "normfs",
-                "Failed to truncate {} back to {} bytes after a failed write: {}",
-                path.display(),
-                self.flushed_len,
-                e
-            );
+/// One batch, committed only whole, at the file's known-good length.
+///
+/// Nothing is committed until the write and the sync have both succeeded: a
+/// failed sync leaves the page cache in a state Linux does not promise to
+/// sync later, so the only safe retry is to cut the file back and write the
+/// bytes again. The APPEND plan does the cutting; an attempt it could not
+/// cut back is followed by a RESTORE before the next one.
+pub(crate) async fn commit(
+    fs: &Fs,
+    path: &Path,
+    tail: &mut FileTail,
+    runs: Runs,
+    settings: &AckFileWriterSettings,
+) -> bool {
+    let total = runs.total();
+    for attempt in 0..settings.max_retries {
+        let at = tail.flushed_len;
+        if tail.needs_restore {
+            if let Err(e) = fs
+                .restore_with_inode(tail.file.clone(), tail.inode, path, at)
+                .await
+            {
+                log::error!(target: "normfs", "Cannot restore {} to {at}: {e}", path.display());
+                if attempt + 1 < settings.max_retries {
+                    tokio::time::sleep(settings.retry_delay).await;
+                }
+                continue;
+            }
+            tail.needs_restore = false;
         }
-        // set_len does not move the cursor; without the seek the next write
-        // would leave a hole where the truncated bytes were.
-        if let Err(e) = self
-            .file
-            .seek(std::io::SeekFrom::Start(self.flushed_len))
+        tail.needs_restore = true;
+        match fs
+            .append_sync_with_inode(
+                tail.file.clone(),
+                tail.inode,
+                path,
+                at,
+                runs.clone(),
+                settings.fsync,
+            )
             .await
         {
-            log::error!(
-                target: "normfs",
-                "Failed to seek {} back to {} after truncating: {}",
-                path.display(),
-                self.flushed_len,
-                e
-            );
+            Ok(AppendOutcome::Committed) => {
+                tail.needs_restore = false;
+                tail.flushed_len += total;
+                return true;
+            }
+            Ok(AppendOutcome::Failed { err, restored }) => {
+                log::error!(
+                    target: "normfs",
+                    "Failed to commit {} bytes to {} at {} (attempt {}/{}): {}",
+                    total,
+                    path.display(),
+                    at,
+                    attempt + 1,
+                    settings.max_retries,
+                    err
+                );
+                tail.needs_restore = !restored;
+            }
+            Err(e) => {
+                log::error!(
+                    target: "normfs",
+                    "The fs layer could not run the commit to {} (attempt {}/{}): {}",
+                    path.display(),
+                    attempt + 1,
+                    settings.max_retries,
+                    e
+                );
+            }
+        }
+        if attempt + 1 < settings.max_retries {
+            tokio::time::sleep(settings.retry_delay).await;
         }
     }
+    false
 }
 
 #[derive(Debug)]
@@ -131,6 +176,7 @@ pub struct AckFileWriter {
 /// back to be overwritten, so advancing it early would let a record be lost
 /// between being accepted and being on disk.
 async fn flush_pool(
+    fs: &Fs,
     path: &Path,
     file: &Arc<Mutex<FileTail>>,
     state: &Arc<Mutex<WriterState>>,
@@ -157,79 +203,10 @@ async fn flush_pool(
         path.display()
     );
 
-    // One batch, committed only whole. Nothing is committed until the write,
-    // the flush and the sync have all succeeded: a failed sync leaves the page
-    // cache in a state Linux does not promise to sync later, so the only safe
-    // retry is to cut the file back and write the bytes again -- and until the
-    // commit, take_pending hands the same runs out again by itself.
+    // Until the commit, take_pending hands the same runs out again by itself.
     let mut tail_guard = file.lock().await;
-    let mut flushed = false;
-    for attempt in 0..settings.max_retries {
-        let mut wrote = true;
-        for (write, bytes) in &pending {
-            if let Err(e) = tail_guard.file.write_all(bytes).await {
-                log::error!(
-                    target: "normfs",
-                    "Failed to write entries {}..={} to {} (attempt {}/{}): {}",
-                    write.first_entry_id,
-                    write.last_entry_id,
-                    path.display(),
-                    attempt + 1,
-                    settings.max_retries,
-                    e
-                );
-                wrote = false;
-                break;
-            }
-        }
-        // Stands in for the bytes reaching the page cache and the sync then
-        // failing. `restore` cuts the file back either way.
-        if wrote && crate::fault::take_failure(path) {
-            log::error!(
-                target: "normfs",
-                "Injected flush failure for {} (attempt {}/{})",
-                path.display(),
-                attempt + 1,
-                settings.max_retries
-            );
-            wrote = false;
-        }
-        // tokio's File reports a write error one call late; flush is what
-        // surfaces it before anything is committed on its strength.
-        if wrote && let Err(e) = tail_guard.file.flush().await {
-            log::error!(
-                target: "normfs",
-                "Deferred write to {} failed (attempt {}/{}): {}",
-                path.display(),
-                attempt + 1,
-                settings.max_retries,
-                e
-            );
-            wrote = false;
-        }
-        if wrote
-            && settings.fsync
-            && let Err(e) = tail_guard.file.sync_all().await
-        {
-            log::error!(
-                target: "normfs",
-                "Failed to sync {} (attempt {}/{}): {}",
-                path.display(),
-                attempt + 1,
-                settings.max_retries,
-                e
-            );
-            wrote = false;
-        }
-        if wrote {
-            flushed = true;
-            break;
-        }
-        tail_guard.restore(path).await;
-        if attempt + 1 < settings.max_retries {
-            tokio::time::sleep(settings.retry_delay).await;
-        }
-    }
+    let runs = Runs(pending.iter().map(|(_, b)| b.clone()).collect());
+    let flushed = commit(fs, path, &mut tail_guard, runs, settings).await;
     if !flushed {
         log::error!(
             target: "normfs",
@@ -239,7 +216,6 @@ async fn flush_pool(
         );
         return false;
     }
-    tail_guard.flushed_len += total;
     for (write, _) in &pending {
         pool.commit_written(write);
     }
@@ -287,6 +263,7 @@ async fn flush_pool(
 
 impl AckFileWriter {
     pub async fn new(
+        fs: Fs,
         path: impl AsRef<Path>,
         settings: AckFileWriterSettings,
         ack_sender: mpsc::UnboundedSender<(QueueId, UintN)>,
@@ -295,19 +272,21 @@ impl AckFileWriter {
         epoch: u64,
     ) -> std::io::Result<Self> {
         if let Some(parent) = path.as_ref().parent() {
-            tokio::fs::create_dir_all(parent).await?;
+            fs.mkdir_all(parent).await?;
         }
 
-        let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(path.as_ref())
-            .await?;
-
+        // Only successful creation certifies the header; recovery must still
+        // accept a torn header left by a crash before creation completed.
         let initial_size = header.len() as u64;
-        file.write_all(&header).await?;
-        file.flush().await?;
+        let (file, inode) = fs
+            .create_durable_with_inode(
+                path.as_ref(),
+                Runs(vec![header]),
+                TmpMode::Trunc,
+                settings.fsync,
+            )
+            .await?;
+        let file = Arc::new(file);
 
         let path = path.as_ref().to_path_buf();
 
@@ -327,9 +306,12 @@ impl AckFileWriter {
         }
         let tail = Arc::new(Mutex::new(FileTail {
             file,
+            inode,
             flushed_len: initial_size,
+            needs_restore: false,
         }));
         let writer_handle = tokio::spawn(writer_task(
+            fs.clone(),
             path.clone(),
             tail.clone(),
             state.clone(),
@@ -423,6 +405,7 @@ impl AckFileWriter {
 }
 
 async fn writer_task(
+    fs: Fs,
     path: PathBuf,
     file: Arc<Mutex<FileTail>>,
     state: Arc<Mutex<WriterState>>,
@@ -444,10 +427,10 @@ async fn writer_task(
                 // everything owed. Mid-life flushes may fail and retry, but a
                 // failure here has no next flush behind it, and `close()`
                 // must not report a file complete that is missing its tail.
-                return flush(&path, &file, &state, &ack_sender, &pool, epoch, &settings).await;
+                return flush(&fs, &path, &file, &state, &ack_sender, &pool, epoch, &settings).await;
             }
             _ = buffer_full_notify.notified() => {
-                let _ = flush(&path, &file, &state, &ack_sender, &pool, epoch, &settings).await;
+                let _ = flush(&fs, &path, &file, &state, &ack_sender, &pool, epoch, &settings).await;
             }
             // The timer is what a queue nobody writes to often depends on:
             // nothing else on this path can start a flush, so one record on an
@@ -458,7 +441,7 @@ async fn writer_task(
             // the pool lock and walking every page.
             _ = interval.tick() => {
                 if has_pending(&state, &pool).await {
-                    let _ = flush(&path, &file, &state, &ack_sender, &pool, epoch, &settings).await;
+                    let _ = flush(&fs, &path, &file, &state, &ack_sender, &pool, epoch, &settings).await;
                 }
             }
         }
@@ -485,6 +468,7 @@ async fn has_pending(state: &Arc<Mutex<WriterState>>, pool: &Option<Arc<PagePool
 /// writer was given one, the entry buffer otherwise. False when something
 /// owed to the file is still unwritten.
 async fn flush(
+    fs: &Fs,
     path: &Path,
     file: &Arc<Mutex<FileTail>>,
     state: &Arc<Mutex<WriterState>>,
@@ -503,11 +487,11 @@ async fn flush(
     // the file; going on to write pages would put later records in front of
     // them, and V1's positional ids would hand every payload after that point
     // out under the wrong id.
-    if !flush_buffer(path, file, state, ack_sender, settings).await {
+    if !flush_buffer(fs, path, file, state, ack_sender, settings).await {
         return false;
     }
     if let Some(pool) = pool {
-        return flush_pool(path, file, state, ack_sender, pool, epoch, settings).await;
+        return flush_pool(fs, path, file, state, ack_sender, pool, epoch, settings).await;
     }
     true
 }
@@ -515,6 +499,7 @@ async fn flush(
 /// False when the buffer still owes the file bytes, so nothing may be written
 /// after them.
 async fn flush_buffer(
+    fs: &Fs,
     path: &Path,
     file: &Arc<Mutex<FileTail>>,
     state: &Arc<Mutex<WriterState>>,
@@ -553,72 +538,15 @@ async fn flush_buffer(
         data_to_write.len()
     );
 
-    // Committed only whole, exactly as flush_pool: a failed attempt cuts the
-    // file back to its last known-good length before the retry, so a torn
-    // write cannot leave a partial frame behind, and a failed sync is answered
-    // by rewriting the bytes rather than trusting the page cache to hold them.
-    let mut write_successful = false;
     let mut tail_guard = file.lock().await;
-    for attempt in 0..settings.max_retries {
-        let mut ok = match tail_guard.file.write_all(&data_to_write).await {
-            Ok(()) => true,
-            Err(e) => {
-                log::error!(
-                    target: "normfs",
-                    "Failed to write to file (attempt {}/{}): {}",
-                    attempt + 1,
-                    settings.max_retries,
-                    e
-                );
-                false
-            }
-        };
-        if ok && crate::fault::take_failure(path) {
-            log::error!(
-                target: "normfs",
-                "Injected flush failure for {} (attempt {}/{})",
-                path.display(),
-                attempt + 1,
-                settings.max_retries
-            );
-            ok = false;
-        }
-        if ok && let Err(e) = tail_guard.file.flush().await {
-            log::error!(
-                target: "normfs",
-                "Deferred write to {} failed (attempt {}/{}): {}",
-                path.display(),
-                attempt + 1,
-                settings.max_retries,
-                e
-            );
-            ok = false;
-        }
-        if ok
-            && settings.fsync
-            && let Err(e) = tail_guard.file.sync_all().await
-        {
-            log::error!(
-                target: "normfs",
-                "Failed to sync file (attempt {}/{}): {}",
-                attempt + 1,
-                settings.max_retries,
-                e
-            );
-            ok = false;
-        }
-        if ok {
-            write_successful = true;
-            break;
-        }
-        tail_guard.restore(path).await;
-        if attempt + 1 < settings.max_retries {
-            tokio::time::sleep(settings.retry_delay).await;
-        }
-    }
-    if write_successful {
-        tail_guard.flushed_len += data_to_write.len() as u64;
-    }
+    let write_successful = commit(
+        fs,
+        path,
+        &mut tail_guard,
+        Runs(vec![data_to_write.clone()]),
+        settings,
+    )
+    .await;
     drop(tail_guard);
 
     if write_successful {

@@ -1,10 +1,9 @@
 use bytes::{Bytes, BytesMut};
 use normfs_crypto::CryptoContext;
+use normfs_fs::{Fs, PublishSpec, Runs, TmpMode};
 use normfs_types::QueueId;
 use std::io;
 use std::path::Path;
-use tokio::fs;
-use tokio::io::AsyncWriteExt;
 use uintn::UintN;
 use uuid::Uuid;
 
@@ -134,8 +133,12 @@ fn compress_and_encrypt(
     Ok(out)
 }
 
-/// The directory is synced after the rename so the name survives a crash too.
+/// Writes `file` under `root` as `queue`'s store file `file_id`: temp file,
+/// sync, rename, then the directory synced so the name survives a crash too.
+/// The fs layer's PUBLISH plan is that sequence, and its proof is what says
+/// the name never resolves to a torn file.
 pub async fn land_local(
+    fs: &Fs,
     root: &Path,
     queue: &QueueId,
     file_id: &UintN,
@@ -147,27 +150,29 @@ pub async fn land_local(
     let parent = store_path
         .parent()
         .ok_or_else(|| io::Error::other("store path has no parent"))?;
-    fs::create_dir_all(parent).await?;
+    fs.mkdir_all(parent).await?;
 
     let tmp_dir = root.join("tmp");
-    fs::create_dir_all(&tmp_dir).await?;
+    fs.mkdir_all(&tmp_dir).await?;
     let temp_path = tmp_dir.join(format!("{}.tmp", Uuid::new_v4()));
 
-    let mut out = fs::File::create(&temp_path).await?;
-    out.write_all(&file.auth).await?;
-    out.write_all(&file.header).await?;
-    out.write_all(&file.body).await?;
-    if fsync {
-        out.sync_all().await?;
-    }
-    drop(out);
-
     usage
-        .publish(queue, &temp_path, &store_path, file.len() as u64)
+        .publish(
+            fs,
+            queue,
+            PublishSpec {
+                tmp: temp_path,
+                dst: store_path.clone(),
+                runs: Runs(vec![
+                    file.auth.clone(),
+                    file.header.clone(),
+                    file.body.clone(),
+                ]),
+                tmp_mode: TmpMode::Excl,
+                sync: fsync,
+            },
+        )
         .await?;
-    if fsync {
-        fs::File::open(parent).await?.sync_all().await?;
-    }
 
     log::debug!(target: "normfs-store",
         "Landed store file for queue {}, file {}: {} bytes at {:?}",

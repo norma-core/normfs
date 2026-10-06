@@ -1,0 +1,30 @@
+[package]
+name = "normfs-fs"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Filesystem layer for NormFS: proved protocol planner and bounded thread-pool executor"
+
+[features]
+default = []
+uring = ["dep:io-uring"]
+fault-injection = []
+
+[dependencies]
+bytes = { workspace = true }
+libc = "0.2"
+log = { workspace = true }
+tokio = { workspace = true }
+uintn = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = { version = "0.7", optional = true }
+
+[build-dependencies]
+cc = "1"
+
+[dev-dependencies]
+tempfile = { workspace = true }

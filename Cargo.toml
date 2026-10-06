@@ -7,6 +7,7 @@ members = [
     "normfs-store",
     "normfs-cloud",
     "normfs-crypto",
+    "normfs-fs",
     "uintn-rs",
 ]
 exclude = ["normfs_go", "go.work", "go.work.sum"]
@@ -33,6 +34,7 @@ normfs-wal = { path = "normfs-wal" }
 normfs-store = { path = "normfs-store" }
 normfs-cloud = { path = "normfs-cloud" }
 normfs-crypto = { path = "normfs-crypto" }
+normfs-fs = { path = "normfs-fs" }
 
 # Dev dependencies
 tempfile = "3.25"

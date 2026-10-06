@@ -1,3 +1,4 @@
+use normfs_fs::Fs;
 use normfs_types::QueueId;
 use std::future::Future;
 use std::io;
@@ -26,8 +27,10 @@ pub trait SealedFileSink: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>>;
 }
 
-/// The local store directory, landed exactly as the WAL migration lands a file.
+/// The local store directory, as the WAL migration lands a file: temp, sync,
+/// rename, range recorded, offload told.
 pub struct LocalStoreSink {
+    fs: Fs,
     root: PathBuf,
     range_store: Arc<RangeStore>,
     disk_usage: Arc<DiskUsage>,
@@ -37,6 +40,7 @@ pub struct LocalStoreSink {
 
 impl LocalStoreSink {
     pub(crate) fn new(
+        fs: Fs,
         root: PathBuf,
         range_store: Arc<RangeStore>,
         disk_usage: Arc<DiskUsage>,
@@ -44,6 +48,7 @@ impl LocalStoreSink {
         fsync: bool,
     ) -> Self {
         Self {
+            fs,
             root,
             range_store,
             disk_usage,
@@ -62,6 +67,7 @@ impl SealedFileSink for LocalStoreSink {
     ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>> {
         Box::pin(async move {
             store_file::land_local(
+                &self.fs,
                 &self.root,
                 queue,
                 file_id,

@@ -1,3 +1,9 @@
+fn test_fs() -> normfs_fs::Fs {
+    static FS: std::sync::OnceLock<normfs_fs::Fs> = std::sync::OnceLock::new();
+    FS.get_or_init(|| normfs_fs::Fs::new(normfs_fs::FsConfig::default()).unwrap())
+        .clone()
+}
+
 use crate::wal_header::WalHeader;
 use crate::{
     errors::WalError,
@@ -41,12 +47,16 @@ async fn test_get_wal_range() {
 
     fs::write(&wal_path, &buffer).await.unwrap();
 
-    let (header, range) = get_wal_range(dir.path(), &file_id).await.unwrap();
+    let (header, range) = get_wal_range(&test_fs(), dir.path(), &file_id)
+        .await
+        .unwrap();
 
     assert_eq!(header.num_entries_before, UintN::from(0u64));
     assert_eq!(range, Some((UintN::from(1u64), UintN::from(5u64))));
 
-    let wal_content = get_wal_content(dir.path(), &file_id).await.unwrap();
+    let wal_content = get_wal_content(&test_fs(), dir.path(), &file_id)
+        .await
+        .unwrap();
     assert_eq!(wal_content.entries_before, UintN::from(0u64));
     assert_eq!(wal_content.num_entries, UintN::from(5u64));
     assert_eq!(wal_content.content, buffer.clone().freeze());
@@ -54,6 +64,7 @@ async fn test_get_wal_range() {
     // Test read_wal_file_range
     let (tx, mut rx) = mpsc::channel(10);
     let result = read_wal_file_range(
+        &test_fs(),
         dir.path(),
         &file_id,
         &UintN::from(1u64),
@@ -114,12 +125,12 @@ async fn test_get_wal_range_empty_file() {
 
     fs::write(&wal_path, &[]).await.unwrap();
 
-    let result = get_wal_range(dir.path(), &file_id).await;
+    let result = get_wal_range(&test_fs(), dir.path(), &file_id).await;
 
     // Empty file should return WalEmpty error
     assert!(matches!(result, Err(WalError::WalEmpty(_))));
 
-    let result_content = get_wal_content(dir.path(), &file_id).await;
+    let result_content = get_wal_content(&test_fs(), dir.path(), &file_id).await;
     assert!(matches!(
         result_content,
         Err(WalError::WalEntryError(
@@ -130,6 +141,7 @@ async fn test_get_wal_range_empty_file() {
     // Test read_wal_file_range with empty file
     let (tx, mut rx) = mpsc::channel(1);
     let result = read_wal_file_range(
+        &test_fs(),
         dir.path(),
         &file_id,
         &UintN::from(1u64),
@@ -173,12 +185,16 @@ async fn test_get_wal_range_header_only() {
 
     fs::write(&wal_path, &buffer).await.unwrap();
 
-    let (header, range) = get_wal_range(dir.path(), &file_id).await.unwrap();
+    let (header, range) = get_wal_range(&test_fs(), dir.path(), &file_id)
+        .await
+        .unwrap();
 
     assert_eq!(header.num_entries_before, UintN::from(0u64));
     assert_eq!(range, None);
 
-    let wal_content = get_wal_content(dir.path(), &file_id).await.unwrap();
+    let wal_content = get_wal_content(&test_fs(), dir.path(), &file_id)
+        .await
+        .unwrap();
     assert_eq!(wal_content.entries_before, UintN::from(0u64));
     assert_eq!(wal_content.num_entries, UintN::from(0u64));
     assert_eq!(wal_content.content, buffer.clone().freeze());
@@ -186,6 +202,7 @@ async fn test_get_wal_range_header_only() {
     // Test read_wal_file_range with header only
     let (tx, _rx) = mpsc::channel(1);
     match read_wal_file_range(
+        &test_fs(),
         dir.path(),
         &file_id,
         &UintN::from(0u64),
@@ -252,12 +269,16 @@ async fn test_get_wal_range_corrupted_end() {
 
     fs::write(&wal_path, &buffer).await.unwrap();
 
-    let (header, range) = get_wal_range(dir.path(), &file_id).await.unwrap();
+    let (header, range) = get_wal_range(&test_fs(), dir.path(), &file_id)
+        .await
+        .unwrap();
 
     assert_eq!(header.num_entries_before, UintN::from(0u64));
     assert_eq!(range, Some((UintN::from(1u64), UintN::from(3u64))));
 
-    let wal_content = get_wal_content(dir.path(), &file_id).await.unwrap();
+    let wal_content = get_wal_content(&test_fs(), dir.path(), &file_id)
+        .await
+        .unwrap();
     assert_eq!(wal_content.entries_before, UintN::from(0u64));
     assert_eq!(wal_content.num_entries, UintN::from(3u64));
     assert_eq!(wal_content.content, buffer.clone().freeze());
@@ -265,6 +286,7 @@ async fn test_get_wal_range_corrupted_end() {
     // Test read_wal_file_range with corrupted end
     let (tx, mut rx) = mpsc::channel(10);
     read_wal_file_range(
+        &test_fs(),
         dir.path(),
         &file_id,
         &UintN::from(0u64),
@@ -352,12 +374,16 @@ async fn test_get_wal_range_cropped_last_entry() {
 
     fs::write(&wal_path, &buffer).await.unwrap();
 
-    let (header, range) = get_wal_range(dir.path(), &file_id).await.unwrap();
+    let (header, range) = get_wal_range(&test_fs(), dir.path(), &file_id)
+        .await
+        .unwrap();
 
     assert_eq!(header.num_entries_before, UintN::from(0u64));
     assert_eq!(range, Some((UintN::from(1u64), UintN::from(3u64))));
 
-    let wal_content = get_wal_content(dir.path(), &file_id).await.unwrap();
+    let wal_content = get_wal_content(&test_fs(), dir.path(), &file_id)
+        .await
+        .unwrap();
     assert_eq!(wal_content.entries_before, UintN::from(0u64));
     assert_eq!(wal_content.num_entries, UintN::from(3u64));
     assert_eq!(wal_content.content, buffer.clone().freeze());
@@ -365,6 +391,7 @@ async fn test_get_wal_range_cropped_last_entry() {
     // Test read_wal_file_range with cropped last entry
     let (tx, mut rx) = mpsc::channel(10);
     let result = read_wal_file_range(
+        &test_fs(),
         dir.path(),
         &file_id,
         &UintN::from(1u64),

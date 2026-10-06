@@ -2,6 +2,20 @@ use super::*;
 use normfs_types::QueueIdResolver;
 use std::sync::Mutex;
 
+fn test_fs() -> Fs {
+    Fs::new(normfs_fs::FsConfig::default()).unwrap()
+}
+
+fn spec_100(tmp: &Path, dst: &Path) -> normfs_fs::PublishSpec {
+    normfs_fs::PublishSpec {
+        tmp: tmp.to_path_buf(),
+        dst: dst.to_path_buf(),
+        runs: normfs_fs::Runs(vec![bytes::Bytes::from(vec![0u8; 100])]),
+        tmp_mode: normfs_fs::TmpMode::Trunc,
+        sync: false,
+    }
+}
+
 fn write_store_file(root: &Path, queue: &QueueId, id: u64, len: usize) {
     let path = queue.to_store_path(root, &UintN::from(id));
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -26,6 +40,7 @@ async fn the_tracked_size_follows_completions_and_deletions() {
     let forget: ForgetRange =
         Arc::new(move |_: &QueueId, id: &UintN| log.lock().unwrap().push(id.clone()));
     let monitor = DiskMonitor::new(
+        test_fs(),
         root,
         None,
         None,
@@ -67,10 +82,9 @@ async fn the_tracked_size_follows_completions_and_deletions() {
     monitor
         .disk_usage
         .publish(
+            &test_fs(),
             &queue,
-            &temp_file,
-            &queue.to_store_path(root, &UintN::from(5u64)),
-            100,
+            spec_100(&temp_file, &queue.to_store_path(root, &UintN::from(5u64))),
         )
         .await
         .unwrap();
@@ -152,7 +166,7 @@ async fn delayed_and_duplicate_completions_do_not_count_scanned_files_again() {
         write_store_file(root, &queue, id, 100);
     }
     let usage = Arc::new(DiskUsage::default());
-    let monitor = DiskMonitor::new(root, None, None, None, usage.clone())
+    let monitor = DiskMonitor::new(test_fs(), root, None, None, None, usage.clone())
         .await
         .unwrap();
     monitor
@@ -178,10 +192,9 @@ async fn delayed_and_duplicate_completions_do_not_count_scanned_files_again() {
     std::fs::write(&temp_file, vec![0; 100]).unwrap();
     usage
         .publish(
+            &test_fs(),
             &queue,
-            &temp_file,
-            &queue.to_store_path(root, &UintN::from(3u64)),
-            100,
+            spec_100(&temp_file, &queue.to_store_path(root, &UintN::from(3u64))),
         )
         .await
         .unwrap();
@@ -211,6 +224,7 @@ async fn concurrent_rescans_and_out_of_order_publications_preserve_usage() {
     let queue = QueueIdResolver::new("inst").resolve("cam");
     let usage = Arc::new(DiskUsage::default());
     let monitor = QueueMonitor::new(
+        test_fs(),
         queue.clone(),
         DiskMonitorConfig {
             max_size: 10_000,
@@ -236,10 +250,9 @@ async fn concurrent_rescans_and_out_of_order_publications_preserve_usage() {
             tokio::fs::write(&temp_file, vec![0; 100]).await.unwrap();
             usage
                 .publish(
+                    &test_fs(),
                     &queue,
-                    &temp_file,
-                    &queue.to_store_path(root, &UintN::from(id)),
-                    100,
+                    spec_100(&temp_file, &queue.to_store_path(root, &UintN::from(id))),
                 )
                 .await
                 .unwrap();
@@ -262,6 +275,7 @@ async fn concurrent_rescans_and_out_of_order_publications_preserve_usage() {
 
 async fn seeded_monitor(root: &Path, queue: &QueueId, max_size: usize) -> QueueMonitor {
     QueueMonitor::new(
+        test_fs(),
         queue.clone(),
         DiskMonitorConfig {
             max_size,
@@ -288,7 +302,9 @@ async fn publish_store_file(monitor: &QueueMonitor, root: &Path, queue: &QueueId
     let path = queue.to_store_path(root, &UintN::from(id));
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::rename(&temp_file, &path).unwrap();
-    *monitor.store_bytes.lock().await += 100;
+    let bump = monitor.store_bytes.clone().exclusive().await;
+    bump.set(bump.get() + 100);
+    drop(bump);
 }
 
 #[tokio::test]
@@ -378,4 +394,37 @@ async fn a_file_that_cannot_be_deleted_holds_cleanup_at_its_id() {
     assert!(!store_file_exists(root, &queue, 0x1fff));
     assert!(!store_file_exists(root, &queue, 0x2000));
     assert!(store_file_exists(root, &queue, 0x2001));
+}
+
+#[tokio::test]
+async fn scans_wait_for_the_fs_pool() {
+    use std::future::Future;
+
+    let temp = tempfile::TempDir::new().unwrap();
+    let queue = QueueIdResolver::new("inst").resolve("cam");
+    let mut monitor = seeded_monitor(temp.path(), &queue, 1000).await;
+    let fs = Fs::new(normfs_fs::FsConfig {
+        threads: 1,
+        ..Default::default()
+    })
+    .unwrap();
+    monitor.fs = fs.clone();
+    let waker = std::task::Waker::noop();
+    let mut cx = std::task::Context::from_waker(waker);
+
+    let (release, hold) = std::sync::mpsc::channel::<()>();
+    let mut blocker = Box::pin(fs.run_blocking(move || {
+        hold.recv().unwrap();
+        Ok(())
+    }));
+    assert!(blocker.as_mut().poll(&mut cx).is_pending());
+
+    let mut size = Box::pin(monitor.get_queue_size());
+    assert!(size.as_mut().poll(&mut cx).is_pending());
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(size.as_mut().poll(&mut cx).is_pending());
+
+    release.send(()).unwrap();
+    blocker.await.unwrap();
+    assert_eq!(size.await.unwrap(), 0);
 }

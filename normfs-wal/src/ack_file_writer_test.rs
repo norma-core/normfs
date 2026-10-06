@@ -1,3 +1,7 @@
+fn test_fs() -> normfs_fs::Fs {
+    normfs_fs::Fs::new(normfs_fs::FsConfig::default()).unwrap()
+}
+
 use crate::ack_file_writer::{AckFileWriter, AckFileWriterSettings};
 
 use super::*;
@@ -29,9 +33,17 @@ async fn test_write_single_entry_and_ack() {
         ..Default::default()
     };
 
-    let mut writer = AckFileWriter::new(&file_path, settings, ack_sender, Bytes::new(), None, 0)
-        .await
-        .unwrap();
+    let mut writer = AckFileWriter::new(
+        test_fs(),
+        &file_path,
+        settings,
+        ack_sender,
+        Bytes::new(),
+        None,
+        0,
+    )
+    .await
+    .unwrap();
 
     let resolver = QueueIdResolver::new("test_instance");
     let queue_id = resolver.resolve("queue_1");
@@ -68,9 +80,17 @@ async fn test_write_multiple_entries_and_ack() {
         ..Default::default()
     };
 
-    let mut writer = AckFileWriter::new(&file_path, settings, ack_sender, Bytes::new(), None, 0)
-        .await
-        .unwrap();
+    let mut writer = AckFileWriter::new(
+        test_fs(),
+        &file_path,
+        settings,
+        ack_sender,
+        Bytes::new(),
+        None,
+        0,
+    )
+    .await
+    .unwrap();
 
     let resolver = QueueIdResolver::new("test_instance");
     let queue_id_1 = resolver.resolve("queue_1");
@@ -120,9 +140,17 @@ async fn test_buffer_full_triggers_write_and_ack() {
         ..Default::default()
     };
 
-    let mut writer = AckFileWriter::new(&file_path, settings, ack_sender, Bytes::new(), None, 0)
-        .await
-        .unwrap();
+    let mut writer = AckFileWriter::new(
+        test_fs(),
+        &file_path,
+        settings,
+        ack_sender,
+        Bytes::new(),
+        None,
+        0,
+    )
+    .await
+    .unwrap();
 
     let resolver = QueueIdResolver::new("test_instance");
     let queue_id_1 = resolver.resolve("queue_1");
@@ -193,9 +221,17 @@ async fn test_writer_with_header() {
     let (ack_sender, mut ack_receiver) = mpsc::unbounded_channel();
     let header = Bytes::from_static(b"test header");
 
-    let mut writer = AckFileWriter::new(&file_path, settings, ack_sender, header.clone(), None, 0)
-        .await
-        .unwrap();
+    let mut writer = AckFileWriter::new(
+        test_fs(),
+        &file_path,
+        settings,
+        ack_sender,
+        header.clone(),
+        None,
+        0,
+    )
+    .await
+    .unwrap();
 
     let resolver = QueueIdResolver::new("test_instance");
     let queue_id = resolver.resolve("test_queue");
@@ -238,6 +274,7 @@ async fn pages_reach_the_file_before_the_watermark_moves() {
 
     let header = Bytes::from_static(b"HDR!");
     let mut writer = AckFileWriter::new(
+        test_fs(),
         &file_path,
         settings,
         ack_sender,
@@ -322,6 +359,7 @@ async fn a_record_in_flight_is_not_overtaken_by_the_pages_behind_it() {
 
     let header = Bytes::from_static(b"HDR!");
     let mut writer = AckFileWriter::new(
+        test_fs(),
         &file_path,
         settings,
         ack_sender,
@@ -398,37 +436,43 @@ async fn a_record_in_flight_is_not_overtaken_by_the_pages_behind_it() {
     );
 }
 
-/// After a restore, the next write lands exactly at the known-good length:
-/// no torn prefix left behind, and no hole from a cursor past the truncation.
+/// After a failed attempt, the next write lands exactly at the known-good
+/// length: no torn prefix left behind, and no hole where it was.
 #[tokio::test]
-async fn a_restore_cuts_back_to_the_known_good_length() {
-    use crate::ack_file_writer::FileTail;
-    use tokio::io::AsyncWriteExt;
+async fn a_failed_commit_cuts_back_to_the_known_good_length() {
+    use crate::ack_file_writer::{FileTail, commit};
+    use normfs_fs::Runs;
 
     let dir = tempdir().unwrap();
     let path = dir.path().join("tail.wal");
-    let file = tokio::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .open(&path)
+    let fs = test_fs();
+    let (file, inode) = fs
+        .create_durable_with_inode(&path, Runs::default(), normfs_fs::TmpMode::Excl, true)
         .await
         .unwrap();
     let mut tail = FileTail {
-        file,
+        inode,
+        needs_restore: false,
+        file: std::sync::Arc::new(file),
         flushed_len: 0,
     };
+    let settings = AckFileWriterSettings {
+        max_retries: 1,
+        ..AckFileWriterSettings::default()
+    };
 
-    tail.file.write_all(b"GOOD").await.unwrap();
-    tail.file.flush().await.unwrap();
-    tail.flushed_len = 4;
+    let good = Runs(vec![Bytes::from_static(b"GOOD")]);
+    assert!(commit(&fs, &path, &mut tail, good, &settings).await);
+    assert_eq!(tail.flushed_len, 4);
 
-    // A torn attempt: bytes reach the file, but the batch fails part-way.
-    tail.file.write_all(b"TORN-PREFIX").await.unwrap();
-    tail.file.flush().await.unwrap();
-    tail.restore(&path).await;
+    // A torn attempt: bytes reach the file, but the sync fails.
+    normfs_fs::fault::fail_flushes(&path, 1);
+    let torn = Runs(vec![Bytes::from_static(b"TORN-PREFIX")]);
+    assert!(!commit(&fs, &path, &mut tail, torn, &settings).await);
+    assert_eq!(tail.flushed_len, 4);
 
-    tail.file.write_all(b"RETRY").await.unwrap();
-    tail.file.flush().await.unwrap();
+    let retry = Runs(vec![Bytes::from_static(b"RETRY")]);
+    assert!(commit(&fs, &path, &mut tail, retry, &settings).await);
 
     let content = tokio::fs::read(&path).await.unwrap();
     assert_eq!(
@@ -465,6 +509,7 @@ async fn a_buffered_ack_does_not_report_a_pooled_record_durable() {
         ..Default::default()
     };
     let mut writer = AckFileWriter::new(
+        test_fs(),
         &file_path,
         settings,
         ack_sender,
@@ -558,6 +603,7 @@ async fn an_entry_buffered_during_a_flush_is_not_acked_by_it() {
         ..Default::default()
     };
     let mut writer = AckFileWriter::new(
+        test_fs(),
         &file_path,
         settings,
         ack_sender,
@@ -645,6 +691,7 @@ async fn a_durable_buffered_ack_is_sent_without_another_write_or_a_close() {
         ..Default::default()
     };
     let writer = AckFileWriter::new(
+        test_fs(),
         &file_path,
         settings,
         ack_sender,
@@ -721,9 +768,17 @@ async fn a_close_that_cannot_flush_says_so() {
         fsync: false,
         ..Default::default()
     };
-    let mut writer = AckFileWriter::new("/dev/full", settings, ack_sender, Bytes::new(), None, 0)
-        .await
-        .expect("an empty header has nothing to flush, so construction succeeds");
+    let mut writer = AckFileWriter::new(
+        test_fs(),
+        "/dev/full",
+        settings,
+        ack_sender,
+        Bytes::new(),
+        None,
+        0,
+    )
+    .await
+    .expect("an empty header has nothing to flush, so construction succeeds");
 
     let queue = QueueIdResolver::new("test_instance").resolve("full");
     writer
@@ -763,6 +818,7 @@ async fn an_injected_flush_failure_makes_a_close_fail() {
     crate::fail_flushes(&file_path, u32::MAX);
 
     let mut writer = AckFileWriter::new(
+        test_fs(),
         &file_path,
         settings,
         ack_sender,
@@ -790,4 +846,64 @@ async fn an_injected_flush_failure_makes_a_close_fail() {
 
     crate::heal(&file_path);
     assert_eq!(read_file_content(&file_path).await, b"hdr");
+}
+
+#[tokio::test]
+async fn failed_restore_blocks_later_batches_until_the_tail_is_repaired() {
+    use crate::ack_file_writer::{FileTail, commit};
+    use normfs_fs::{Runs, TmpMode};
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("unrestored.wal");
+    let fs = test_fs();
+    let (file, inode) = fs
+        .create_durable_with_inode(&path, Runs::default(), TmpMode::Excl, true)
+        .await
+        .unwrap();
+    let mut tail = FileTail {
+        inode,
+        file: std::sync::Arc::new(file),
+        flushed_len: 0,
+        needs_restore: false,
+    };
+    let settings = AckFileWriterSettings {
+        max_retries: 1,
+        ..Default::default()
+    };
+    normfs_fs::fault::fail_flushes(&path, 1);
+    normfs_fs::fault::fail_truncates(&path, 2);
+    assert!(
+        !commit(
+            &fs,
+            &path,
+            &mut tail,
+            Runs(vec![Bytes::from_static(b"long torn batch")]),
+            &settings
+        )
+        .await
+    );
+    assert!(tail.needs_restore);
+    assert!(
+        !commit(
+            &fs,
+            &path,
+            &mut tail,
+            Runs(vec![Bytes::from_static(b"new")]),
+            &settings
+        )
+        .await
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), b"long torn batch");
+    assert_eq!(tail.flushed_len, 0);
+    assert!(
+        commit(
+            &fs,
+            &path,
+            &mut tail,
+            Runs(vec![Bytes::from_static(b"new")]),
+            &settings
+        )
+        .await
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), b"new");
+    assert!(!tail.needs_restore);
 }

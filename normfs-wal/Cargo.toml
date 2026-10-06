@@ -9,14 +9,15 @@ homepage.workspace = true
 description = "Write-ahead log implementation for NormFS with crash recovery"
 
 [features]
-# Lets a dependent's tests make a WAL flush fail; see src/fault.rs.
-fault-injection = []
+# Lets a dependent's tests make a WAL flush fail; see normfs-fs's fault.rs.
+fault-injection = ["normfs-fs/fault-injection"]
 
 [dependencies]
 log = "0.4"
 bytes = "1"
 uintn = { version = "0.3.5", path = "../uintn-rs" }
 normfs-types = { version = "0.3.5", path = "../normfs-types" }
+normfs-fs = { version = "0.3.5", path = "../normfs-fs" }
 tokio = { version = "1", features = ["full"] }
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 walkdir = "2"
@@ -29,6 +30,9 @@ cc = "1"
 # xxh64, which is what the V0 read path uses.
 xxhash-rust = { version = "0.8", features = ["xxh32"] }
 tempfile = "3"
+# The fault seam is in normfs-fs and this crate's own cfg(test) cannot reach
+# a dependency's feature; the dev-dependency can.
+normfs-fs = { version = "0.3.5", path = "../normfs-fs", features = ["fault-injection"] }
 criterion = "0.5"
 env_logger = { workspace = true }
 rand = "0.8"

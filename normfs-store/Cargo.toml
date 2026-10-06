@@ -21,6 +21,7 @@ normfs-crypto = { version = "0.3.5", path = "../normfs-crypto" }
 tokio = { version = "1", features = ["full"] }
 bytes = "1"
 normfs-wal = { version = "0.3.5", path = "../normfs-wal" }
+normfs-fs = { version = "0.3.5", path = "../normfs-fs" }
 uuid = { version = "1", features = ["v4", "fast-rng"] }
 
 # Compression libraries - C bindings (default, faster for zstd)

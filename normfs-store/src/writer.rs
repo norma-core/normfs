@@ -102,7 +102,8 @@ impl StoreWriteWorker {
             }
         };
 
-        // Off the runtime, as in the page writer.
+        // Off the runtime for the same reason as the page writer: a file's
+        // worth of zstd and AES on a worker thread stalls every other task.
         let build = {
             let (queue_id, file_id, crypto) =
                 (queue_id.clone(), file_id.clone(), self.crypto_ctx.clone());
@@ -141,6 +142,7 @@ impl StoreWriteWorker {
         };
 
         if let Err(e) = store_file::land_local(
+            self.wal_store.fs(),
             &self.root_dir,
             queue_id,
             file_id,

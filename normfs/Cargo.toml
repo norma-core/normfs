@@ -21,6 +21,7 @@ normfs-wal = { version = "0.3.5", path = "../normfs-wal" }
 normfs-store = { version = "0.3.5", path = "../normfs-store" }
 normfs-cloud = { version = "0.3.5", path = "../normfs-cloud" }
 normfs-crypto = { version = "0.3.5", path = "../normfs-crypto" }
+normfs-fs = { version = "0.3.5", path = "../normfs-fs" }
 tokio = { workspace = true }
 bytes = { workspace = true }
 prost = { workspace = true }

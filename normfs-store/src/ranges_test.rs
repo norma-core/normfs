@@ -8,7 +8,12 @@ use uintn::UintN;
 async fn a_forgotten_range_is_read_from_disk_again() {
     let temp = tempfile::TempDir::new().unwrap();
     let crypto = Arc::new(CryptoContext::open(temp.path()).unwrap());
-    let store = RangeStore::new(temp.path(), crypto, false);
+    let store = RangeStore::new(
+        normfs_fs::Fs::new(normfs_fs::FsConfig::default()).unwrap(),
+        temp.path(),
+        crypto,
+        false,
+    );
     let queue = QueueIdResolver::new("inst").resolve("cam");
     let file_id = UintN::from(7u64);
 

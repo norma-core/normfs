@@ -1,10 +1,10 @@
 use normfs_crypto::CryptoContext;
+use normfs_fs::{Fs, Scan, ScanResult};
 use normfs_types::QueueId;
 use normfs_wal::{AnyWalHeaderError, PagePool, WalError, WalFile, WalHeader, WalStore};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::{path::Path, sync::Arc};
-use tokio::fs;
 use tokio::sync::{Mutex, broadcast, mpsc};
 use tokio::task::JoinHandle;
 use uintn::paths;
@@ -14,7 +14,7 @@ use crate::ranges::RangeStoreError;
 
 mod compression;
 mod disk_usage;
-pub use disk_usage::DiskUsage;
+pub use disk_usage::{DiskUsage, QueueBytes};
 pub mod header;
 pub mod page_writer;
 pub mod parser;
@@ -139,6 +139,12 @@ impl From<RangeStoreError> for StoreError {
     }
 }
 
+impl From<normfs_fs::FsError> for StoreError {
+    fn from(e: normfs_fs::FsError) -> Self {
+        StoreError::Io(e.into())
+    }
+}
+
 impl From<paths::PathError> for StoreError {
     fn from(e: paths::PathError) -> Self {
         StoreError::Path(e)
@@ -168,6 +174,7 @@ impl Default for StoreWriteConfig {
 
 pub struct PersistStore {
     root: PathBuf,
+    fs: Fs,
     range_store: Arc<ranges::RangeStore>,
     disk_usage: Arc<DiskUsage>,
     config: StoreWriteConfig,
@@ -195,15 +202,12 @@ impl PersistStore {
         let root_path = root.as_ref().to_path_buf();
         let (store_done_tx, store_done_rx) = mpsc::unbounded_channel();
 
-        let tmp_dir = root_path.join("tmp");
-        std::fs::create_dir_all(&tmp_dir).unwrap_or_else(|e| {
-            log::warn!(target: "normfs-store", "Failed to create tmp directory: {:?}", e);
-        });
-
         Self {
             root: root_path.clone(),
             disk_usage: Arc::new(DiskUsage::default()),
+            fs: wal_store.fs().clone(),
             range_store: Arc::new(ranges::RangeStore::new(
+                wal_store.fs().clone(),
                 root_path,
                 crypto_ctx.clone(),
                 config.verify_signatures,
@@ -270,8 +274,13 @@ impl PersistStore {
         store_done_rx
     }
 
+    pub fn fs(&self) -> &Fs {
+        &self.fs
+    }
+
     pub fn local_sink(&self, fsync: bool) -> Arc<LocalStoreSink> {
         Arc::new(LocalStoreSink::new(
+            self.fs.clone(),
             self.root.clone(),
             self.range_store.clone(),
             self.disk_usage.clone(),
@@ -393,11 +402,10 @@ impl PersistStore {
         let queue_path = queue.to_store_dir(&self.root);
         // A lookup creates nothing: a queue that never wrote a store file has
         // no store directory, and a restart reads that absence.
-        if !queue_path.is_dir() {
-            return Err(StoreError::Path(paths::PathError::NoFilesFound));
+        match self.fs.scan_ids(&queue_path, "store", Scan::Max).await? {
+            ScanResult::One(id) => Ok(id),
+            _ => Err(StoreError::Path(paths::PathError::NoFilesFound)),
         }
-
-        paths::find_max_id(&queue_path, "store").map_err(StoreError::Path)
     }
 
     pub async fn get_file_range(
@@ -453,15 +461,12 @@ impl PersistStore {
         let queue_fs_path = queue.to_store_dir(&self.root);
         let file_path = file_id.to_file_path(queue_fs_path.to_str().unwrap(), "store");
 
-        if !file_path.exists() {
-            log::info!(target: "normfs-store",
-                "Store file not found for queue '{}', file {}",
-                queue, file_id
-            );
-            return Ok(None);
-        }
-
-        let store_file_bytes = match fs::read(&file_path).await {
+        let store_file_bytes = match self
+            .fs
+            .read_whole(&file_path)
+            .await
+            .map_err(std::io::Error::from)
+        {
             Ok(bytes) => {
                 if bytes.len() < 10 {
                     // File is too small to have a valid header
@@ -515,22 +520,14 @@ impl PersistStore {
         log::debug!(target: "normfs-store", "Getting first file ID for queue: {}", queue);
 
         let queue_fs_path = queue.to_store_dir(&self.root);
-        if !queue_fs_path.is_dir() {
-            return Ok(None);
-        }
-
-        match paths::find_min_id(&queue_fs_path, "store") {
-            Ok(id) => {
+        match self.fs.scan_ids(&queue_fs_path, "store", Scan::Min).await? {
+            ScanResult::One(id) => {
                 log::debug!(target: "normfs-store", "First file ID for queue {}: {:?}", queue, id);
                 Ok(Some(id))
             }
-            Err(paths::PathError::NoFilesFound) => {
+            _ => {
                 log::debug!(target: "normfs-store", "No store files found for queue: {}", queue);
                 Ok(None)
-            }
-            Err(e) => {
-                log::error!(target: "normfs-store", "Error finding first file ID for queue {}: {:?}", queue, e);
-                Err(StoreError::Path(e))
             }
         }
     }
@@ -539,22 +536,14 @@ impl PersistStore {
         log::debug!(target: "normfs-store", "Getting last file ID for queue: {}", queue);
 
         let queue_fs_path = queue.to_store_dir(&self.root);
-        if !queue_fs_path.is_dir() {
-            return Ok(None);
-        }
-
-        let last_file = match paths::find_max_id(&queue_fs_path, "store") {
-            Err(paths::PathError::NoFilesFound) => {
-                log::debug!(target: "normfs-store", "No store files found for queue: {}", queue);
-                return Ok(None);
-            }
-            Err(e) => {
-                log::error!(target: "normfs-store", "Error finding last file ID for queue {}: {:?}", queue, e);
-                return Err(StoreError::Path(e));
-            }
-            Ok(file) => {
+        let last_file = match self.fs.scan_ids(&queue_fs_path, "store", Scan::Max).await? {
+            ScanResult::One(file) => {
                 log::debug!(target: "normfs-store", "Last file ID for queue {}: {:?}", queue, file);
                 file
+            }
+            _ => {
+                log::debug!(target: "normfs-store", "No store files found for queue: {}", queue);
+                return Ok(None);
             }
         };
 
@@ -565,31 +554,35 @@ impl PersistStore {
         log::info!(target: "normfs-store", "Starting recovery: cleaning up temp folder");
 
         let temp_dir = self.root.join("tmp");
-
-        if !temp_dir.exists() {
-            log::debug!(target: "normfs-store", "Temp directory does not exist, nothing to recover");
-            return Ok(());
-        }
-
-        let mut entries = fs::read_dir(&temp_dir).await?;
-        let mut cleaned_count = 0;
-
-        while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path();
-
-            // Only remove files with .tmp extension
-            if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("tmp") {
-                match fs::remove_file(&path).await {
-                    Ok(_) => {
-                        log::debug!(target: "normfs-store", "Removed temp file: {:?}", path);
-                        cleaned_count += 1;
+        let cleaned_count = self
+            .fs
+            .run_blocking(move || {
+                let entries = match std::fs::read_dir(&temp_dir) {
+                    Ok(entries) => entries,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        log::debug!(target: "normfs-store", "Temp directory does not exist, nothing to recover");
+                        return Ok(0usize);
                     }
-                    Err(e) => {
-                        log::warn!(target: "normfs-store", "Failed to remove temp file {:?}: {}", path, e);
+                    Err(e) => return Err(e),
+                };
+                let mut cleaned = 0usize;
+                for entry in entries {
+                    let path = entry?.path();
+                    if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("tmp") {
+                        match std::fs::remove_file(&path) {
+                            Ok(_) => {
+                                log::debug!(target: "normfs-store", "Removed temp file: {:?}", path);
+                                cleaned += 1;
+                            }
+                            Err(e) => {
+                                log::warn!(target: "normfs-store", "Failed to remove temp file {:?}: {}", path, e);
+                            }
+                        }
                     }
                 }
-            }
-        }
+                Ok(cleaned)
+            })
+            .await?;
 
         if cleaned_count > 0 {
             log::info!(target: "normfs-store", "Recovery completed: removed {} temp files", cleaned_count);
@@ -693,12 +686,17 @@ impl PersistStore {
         let store_fs_path = queue.to_store_dir(&self.root);
         let file_path = file_id.to_file_path(store_fs_path.to_str().unwrap(), "store");
 
-        match fs::read(&file_path).await {
+        match self
+            .fs
+            .read_whole(&file_path)
+            .await
+            .map_err(std::io::Error::from)
+        {
             Ok(bytes) => {
                 log::debug!(target: "normfs-store",
                     "Read {} bytes from store file for queue '{}', file {}",
                     bytes.len(), queue, file_id);
-                Ok(Some(bytes::Bytes::from(bytes)))
+                Ok(Some(bytes))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 log::debug!(target: "normfs-store",

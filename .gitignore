@@ -1,11 +1,7 @@
 # Rust
 target/
 **/*.rs.bk
-uintn-rs/c/build/
-normfs-wal/c/build/
-normfs-store/c/build/
-normfs-crypto/c/build/
-normfs/c/build/
+**/c/build/
 
 # macOS
 .DS_Store
@@ -22,4 +18,4 @@ normfs/c/build/
 
 # Proof build directories
 build-verify/
-.wp-cache/
+.wpcache/
