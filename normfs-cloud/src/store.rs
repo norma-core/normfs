@@ -123,8 +123,11 @@ impl Backend for S3Store {
         len: u64,
     ) -> BackendFuture<'a, Option<Bytes>> {
         Box::pin(async move {
+            // As the local store: nothing for a missing file, empty for one
+            // that is there.
             if len == 0 {
-                return Ok(Some(Bytes::new()));
+                let size = self.client.head_object(&self.key(queue, file_id)).await?;
+                return Ok(size.map(|_| Bytes::new()));
             }
             let key = self.key(queue, file_id);
             let end = offset + len - 1;

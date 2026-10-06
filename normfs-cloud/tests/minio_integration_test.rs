@@ -707,3 +707,27 @@ async fn test_s3_store_reads_back_what_it_put() {
     );
     assert_eq!(store.find(&queue, End::Max).await.unwrap(), Some(id));
 }
+
+#[tokio::test]
+async fn test_s3_store_reads_empty_ranges_as_the_local_store_does() {
+    let Some(settings) = skip_if_no_s3() else {
+        return;
+    };
+    let (_, bucket, queue) = fresh_queue(&settings, None).await;
+    let temp = tempfile::tempdir().unwrap();
+    let fs = normfs_wal::Fs::new(normfs_wal::FsConfig::default()).unwrap();
+    let local = normfs_store::local_store(fs, temp.path(), false, Default::default());
+    let (kept, missing) = (uintn::UintN::from(1u64), uintn::UintN::from(2u64));
+    for store in [&bucket as &dyn Backend, &local] {
+        let body = Body::Runs(vec![Bytes::from_static(b"nine byte")]);
+        store.put(&queue, &kept, body).await.unwrap();
+    }
+
+    for (offset, len) in [(0, 0), (4, 0), (9, 0), (9, 5), (20, 5)] {
+        for id in [&kept, &missing] {
+            let remote = bucket.get_range(&queue, id, offset, len).await.unwrap();
+            let here = local.get_range(&queue, id, offset, len).await.unwrap();
+            assert_eq!(remote, here, "file {id} at {offset}+{len}");
+        }
+    }
+}

@@ -24,4 +24,6 @@ bytes = "1"
 
 [dev-dependencies]
 env_logger = { workspace = true }
+normfs-wal = { version = "0.4.0", path = "../normfs-wal" }
+tempfile = { workspace = true }
 uuid = { version = "1", features = ["v4"] }

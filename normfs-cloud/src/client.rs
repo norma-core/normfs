@@ -171,6 +171,10 @@ impl S3Client {
         if status == 404 {
             return Ok(None);
         }
+        // The object is there but ends before `start`.
+        if status == 416 {
+            return Ok(Some(bytes::Bytes::new()));
+        }
 
         if status != 200 && status != 206 {
             return Err(crate::errors::CloudError::InvalidStatusCode(status));
