@@ -409,7 +409,7 @@ async fn landed_records(fs: &NormFS, want: usize) -> Vec<normfs::proto::system::
         landed.clear();
         while let Ok(entry) = rx.try_recv() {
             let event = pb::Event::decode(entry.data).unwrap();
-            if event.r#type() == EventType::EtFileLanded {
+            if event.r#type() == EventType::EtFileInCloud {
                 landed.push(event);
             }
         }
@@ -438,11 +438,11 @@ async fn assert_landed(
         let facts = file.file.as_ref().unwrap();
         let file_id = id_of(&facts.file_id);
         assert_eq!(file_id, UintN::from(n as u64 + 1));
-        assert_eq!(id_of(&file.landed_through), file_id);
+        assert_eq!(id_of(&file.in_cloud_through), file_id);
         assert_eq!(id_of(&facts.first_id), UintN::from(n as u64 * PER_PAGE));
         assert_eq!(facts.num_entries, PER_PAGE);
         let object = object(cloud, queue, n as u64 + 1).await.unwrap();
-        assert_eq!(file.key, queue.to_cloud_key(&cloud.prefix, &file_id));
+        assert_eq!(file.cloud_key, queue.to_cloud_key(&cloud.prefix, &file_id));
         assert_eq!(facts.file_bytes, object.len() as u64);
         assert_eq!(facts.content_signature.as_ref(), &object[88..152]);
     }

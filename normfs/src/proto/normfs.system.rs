@@ -24,8 +24,6 @@ pub struct File {
     #[prost(bytes = "bytes", tag = "8")]
     pub content_signature: ::prost::bytes::Bytes,
 }
-/// One record of `<instance>/normfs/system`. Only NormFS writes there; a
-/// client write to that path is refused.
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Event {
@@ -39,19 +37,18 @@ pub struct Event {
     pub dropped_before: u64,
     #[prost(string, tag = "4")]
     pub queue: ::prost::alloc::string::String,
-    /// ET_FILE_STORED, ET_FILE_LANDED
     #[prost(message, optional, tag = "10")]
     pub file: ::core::option::Option<File>,
-    /// ET_FILE_LANDED. Nothing is left to upload up to landed_through, so local
-    /// copies up to it may be deleted.
+    /// ET_FILE_IN_CLOUD
     #[prost(string, tag = "20")]
-    pub key: ::prost::alloc::string::String,
+    pub cloud_key: ::prost::alloc::string::String,
     #[prost(uint64, tag = "21")]
-    pub duration_ms: u64,
+    pub upload_ms: u64,
+    /// Every file of the queue up to this id is in the cloud, so local copies
+    /// up to it may be deleted.
     #[prost(message, optional, tag = "22")]
-    pub landed_through: ::core::option::Option<super::Id>,
-    /// ET_UPLOAD_FAILED. Retried every second; attempts 1, 2, 4, 8 and so on
-    /// are reported.
+    pub in_cloud_through: ::core::option::Option<super::Id>,
+    /// ET_CLOUD_UPLOAD_FAILED. Attempts 1, 2, 4, 8 and so on are reported.
     #[prost(message, optional, tag = "30")]
     pub failed_file_id: ::core::option::Option<super::Id>,
     #[prost(enumeration = "UploadFailure", tag = "31")]
@@ -64,35 +61,38 @@ pub struct Event {
     pub remote_bytes: u64,
     #[prost(string, tag = "35")]
     pub error: ::prost::alloc::string::String,
-    /// ET_FILE_EVICTED
+    /// ET_DISK_FILE_DELETED
     #[prost(enumeration = "FileKind", tag = "40")]
-    pub evicted_kind: i32,
+    pub deleted_kind: i32,
     #[prost(message, optional, tag = "41")]
-    pub evicted_file_id: ::core::option::Option<super::Id>,
+    pub deleted_file_id: ::core::option::Option<super::Id>,
     #[prost(uint64, tag = "42")]
-    pub evicted_bytes: u64,
+    pub deleted_bytes: u64,
+    /// The file was in the cloud when it was deleted locally.
     #[prost(bool, tag = "43")]
     pub in_cloud: bool,
-    /// ET_FILE_EVICTED, ET_EVICTION_BLOCKED
+    /// ET_DISK_FILE_DELETED, ET_DISK_CLEANUP_BLOCKED: the queue's bytes on disk
+    /// after the event.
     #[prost(uint64, tag = "50")]
     pub queue_bytes: u64,
-    /// ET_EVICTION_BLOCKED. Reported once per reason until the queue is back
-    /// under the limit or the reason changes.
-    #[prost(enumeration = "EvictionBlock", tag = "60")]
-    pub eviction_block: i32,
+    /// ET_DISK_CLEANUP_BLOCKED. Reported once per reason until the queue is
+    /// back under the limit or the reason changes.
+    #[prost(enumeration = "CleanupBlock", tag = "60")]
+    pub cleanup_blocked_by: i32,
+    /// The file cleanup stopped at.
     #[prost(message, optional, tag = "61")]
     pub held_at: ::core::option::Option<super::Id>,
     #[prost(uint64, tag = "62")]
     pub limit_bytes: u64,
-    /// ET_POOL_STALLED: when the stall starts, every 30 seconds while it lasts,
-    /// and once with resumed when it ends.
+    /// ET_QUEUE_WAITING_FOR_MEMORY: when the wait starts, every 30 seconds
+    /// while it lasts, and once with resumed when it ends.
     #[prost(uint64, tag = "70")]
     pub waits: u64,
     #[prost(uint64, tag = "71")]
-    pub stalled_for_ms: u64,
+    pub waiting_ms: u64,
     #[prost(bool, tag = "72")]
     pub resumed: bool,
-    /// ET_QUEUE_STARTED, ET_QUEUE_CLOSED
+    /// ET_QUEUE_OPENED, ET_QUEUE_CLOSED
     #[prost(message, optional, tag = "80")]
     pub last_id: ::core::option::Option<super::Id>,
     #[prost(bool, tag = "81")]
@@ -104,16 +104,46 @@ pub struct Event {
     #[prost(bool, tag = "84")]
     pub cloud: bool,
 }
+/// What NormFS did with a queue's files, one Event per record of
+/// `<instance>/normfs/system`. Only NormFS writes there.
+///
+/// Where a store file is reported depends on the queue's Persist:
+///    store only             FILE_ON_DISK
+///    store + cloud          FILE_ON_DISK when it is written locally, then
+///                           FILE_IN_CLOUD once the offloader has uploaded it
+///                           (queues with a disk limit); only after that may the
+///                           disk monitor delete the local copy, DISK_FILE_DELETED
+///                           with in_cloud set
+///    cloud without store    FILE_IN_CLOUD only, uploaded straight from memory
+/// A failed upload is retried and reported as CLOUD_UPLOAD_FAILED until it
+/// goes through. WAL files are reported only when the disk monitor deletes them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum EventType {
-    EtFileStored = 0,
-    EtFileLanded = 1,
-    EtUploadFailed = 2,
-    EtFileEvicted = 3,
-    EtEvictionBlocked = 4,
-    EtPoolStalled = 5,
-    EtQueueStarted = 6,
+    /// The store file is on the local disk: written, synced and renamed into
+    /// the queue's store directory. Set: file.
+    EtFileOnDisk = 0,
+    /// The store file is in the bucket and its size was read back, so readers
+    /// can fetch it from there. Set: file, cloud_key, upload_ms,
+    /// in_cloud_through.
+    EtFileInCloud = 1,
+    /// One upload attempt failed; it is retried every second. Set:
+    /// failed_file_id, upload_failure, error, and http_status or
+    /// local_bytes/remote_bytes when they apply.
+    EtCloudUploadFailed = 2,
+    /// The disk monitor deleted a local file to keep the queue under its limit.
+    /// Set: deleted_kind, deleted_file_id, deleted_bytes, in_cloud,
+    /// queue_bytes.
+    EtDiskFileDeleted = 3,
+    /// The queue is over its disk limit but the next file may not be deleted.
+    /// Set: cleanup_blocked_by, held_at, queue_bytes, limit_bytes.
+    EtDiskCleanupBlocked = 4,
+    /// Appenders of the queue are waiting for a memory page: files are not
+    /// draining it fast enough. Set: waits, waiting_ms, resumed.
+    EtQueueWaitingForMemory = 5,
+    /// Set: last_id, readonly, wal, store, cloud.
+    EtQueueOpened = 6,
+    /// Set: last_id.
     EtQueueClosed = 7,
 }
 impl EventType {
@@ -123,26 +153,26 @@ impl EventType {
     /// (if the ProtoBuf definition does not change) and safe for programmatic use.
     pub fn as_str_name(&self) -> &'static str {
         match self {
-            EventType::EtFileStored => "ET_FILE_STORED",
-            EventType::EtFileLanded => "ET_FILE_LANDED",
-            EventType::EtUploadFailed => "ET_UPLOAD_FAILED",
-            EventType::EtFileEvicted => "ET_FILE_EVICTED",
-            EventType::EtEvictionBlocked => "ET_EVICTION_BLOCKED",
-            EventType::EtPoolStalled => "ET_POOL_STALLED",
-            EventType::EtQueueStarted => "ET_QUEUE_STARTED",
+            EventType::EtFileOnDisk => "ET_FILE_ON_DISK",
+            EventType::EtFileInCloud => "ET_FILE_IN_CLOUD",
+            EventType::EtCloudUploadFailed => "ET_CLOUD_UPLOAD_FAILED",
+            EventType::EtDiskFileDeleted => "ET_DISK_FILE_DELETED",
+            EventType::EtDiskCleanupBlocked => "ET_DISK_CLEANUP_BLOCKED",
+            EventType::EtQueueWaitingForMemory => "ET_QUEUE_WAITING_FOR_MEMORY",
+            EventType::EtQueueOpened => "ET_QUEUE_OPENED",
             EventType::EtQueueClosed => "ET_QUEUE_CLOSED",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
     pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
         match value {
-            "ET_FILE_STORED" => Some(Self::EtFileStored),
-            "ET_FILE_LANDED" => Some(Self::EtFileLanded),
-            "ET_UPLOAD_FAILED" => Some(Self::EtUploadFailed),
-            "ET_FILE_EVICTED" => Some(Self::EtFileEvicted),
-            "ET_EVICTION_BLOCKED" => Some(Self::EtEvictionBlocked),
-            "ET_POOL_STALLED" => Some(Self::EtPoolStalled),
-            "ET_QUEUE_STARTED" => Some(Self::EtQueueStarted),
+            "ET_FILE_ON_DISK" => Some(Self::EtFileOnDisk),
+            "ET_FILE_IN_CLOUD" => Some(Self::EtFileInCloud),
+            "ET_CLOUD_UPLOAD_FAILED" => Some(Self::EtCloudUploadFailed),
+            "ET_DISK_FILE_DELETED" => Some(Self::EtDiskFileDeleted),
+            "ET_DISK_CLEANUP_BLOCKED" => Some(Self::EtDiskCleanupBlocked),
+            "ET_QUEUE_WAITING_FOR_MEMORY" => Some(Self::EtQueueWaitingForMemory),
+            "ET_QUEUE_OPENED" => Some(Self::EtQueueOpened),
             "ET_QUEUE_CLOSED" => Some(Self::EtQueueClosed),
             _ => None,
         }
@@ -270,29 +300,30 @@ impl UploadFailure {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
-pub enum EvictionBlock {
-    EbNotOffloaded = 0,
-    EbDeleteFailed = 1,
-    EbNothingFound = 2,
+pub enum CleanupBlock {
+    /// The next file to delete is not in the cloud yet.
+    CbNotInCloud = 0,
+    CbDeleteFailed = 1,
+    CbNothingToFind = 2,
 }
-impl EvictionBlock {
+impl CleanupBlock {
     /// String value of the enum field names used in the ProtoBuf definition.
     ///
     /// The values are not transformed in any way and thus are considered stable
     /// (if the ProtoBuf definition does not change) and safe for programmatic use.
     pub fn as_str_name(&self) -> &'static str {
         match self {
-            EvictionBlock::EbNotOffloaded => "EB_NOT_OFFLOADED",
-            EvictionBlock::EbDeleteFailed => "EB_DELETE_FAILED",
-            EvictionBlock::EbNothingFound => "EB_NOTHING_FOUND",
+            CleanupBlock::CbNotInCloud => "CB_NOT_IN_CLOUD",
+            CleanupBlock::CbDeleteFailed => "CB_DELETE_FAILED",
+            CleanupBlock::CbNothingToFind => "CB_NOTHING_TO_FIND",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
     pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
         match value {
-            "EB_NOT_OFFLOADED" => Some(Self::EbNotOffloaded),
-            "EB_DELETE_FAILED" => Some(Self::EbDeleteFailed),
-            "EB_NOTHING_FOUND" => Some(Self::EbNothingFound),
+            "CB_NOT_IN_CLOUD" => Some(Self::CbNotInCloud),
+            "CB_DELETE_FAILED" => Some(Self::CbDeleteFailed),
+            "CB_NOTHING_TO_FIND" => Some(Self::CbNothingToFind),
             _ => None,
         }
     }

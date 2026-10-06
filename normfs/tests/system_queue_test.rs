@@ -48,7 +48,7 @@ async fn wait_for(fs: &NormFS, done: impl Fn(&[pb::Event]) -> bool) -> Vec<pb::E
 fn stored(events: &[pb::Event], queue: &str) -> Vec<pb::File> {
     events
         .iter()
-        .filter(|e| e.r#type() == EventType::EtFileStored && e.queue == queue)
+        .filter(|e| e.r#type() == EventType::EtFileOnDisk && e.queue == queue)
         .filter_map(|e| e.file.clone())
         .collect()
 }
@@ -69,7 +69,7 @@ async fn a_stored_file_is_recorded_with_its_entries() {
     let events = wait_for(&fs, |events| !stored(events, cam.as_str()).is_empty()).await;
     assert!(events
         .iter()
-        .any(|e| e.r#type() == EventType::EtQueueStarted && e.queue == cam.as_str() && e.store));
+        .any(|e| e.r#type() == EventType::EtQueueOpened && e.queue == cam.as_str() && e.store));
     let file = &stored(&events, cam.as_str())[0];
     assert_eq!(file.num_entries, 10);
     let first = &file.first_id.as_ref().unwrap().raw;
@@ -143,7 +143,7 @@ async fn the_record_survives_a_restart() {
         events
             .iter()
             .skip_while(|e| !closed(e))
-            .any(|e| e.r#type() == EventType::EtQueueStarted)
+            .any(|e| e.r#type() == EventType::EtQueueOpened)
     })
     .await;
     assert!(events
@@ -170,7 +170,7 @@ async fn an_instance_without_a_disk_keeps_its_record_in_memory() {
     wait_for(&fs, |events| {
         events
             .iter()
-            .any(|e| e.r#type() == EventType::EtQueueStarted)
+            .any(|e| e.r#type() == EventType::EtQueueOpened)
     })
     .await;
     fs.close().await.unwrap();

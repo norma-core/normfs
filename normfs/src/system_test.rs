@@ -72,7 +72,7 @@ fn a_landed_file_keeps_its_ids_and_signature() {
         took: Duration::from_millis(250),
         landed_through: UintN::from(0x1234u64),
     });
-    assert_eq!(landed.r#type(), pb::EventType::EtFileLanded);
+    assert_eq!(landed.r#type(), pb::EventType::EtFileInCloud);
     assert_eq!(landed.queue, "/inst/cam");
     let file = landed.file.unwrap();
     assert_eq!(file.file_id, Some(id(&UintN::from(0x1234u64))));
@@ -82,8 +82,8 @@ fn a_landed_file_keeps_its_ids_and_signature() {
     assert_eq!(file.compression, pb::Compression::CZstd as i32);
     assert_eq!(file.encryption, pb::Encryption::EAes as i32);
     assert_eq!(file.content_signature.as_ref(), &[0xAB; 64]);
-    assert_eq!(landed.duration_ms, 250);
-    assert_eq!(landed.landed_through, file.file_id);
+    assert_eq!(landed.upload_ms, 250);
+    assert_eq!(landed.in_cloud_through, file.file_id);
 }
 
 #[test]
@@ -94,7 +94,7 @@ fn an_upload_failure_carries_its_status_and_a_bounded_message() {
         failure: UploadFailure::Status(503),
         message: "ж".repeat(MAX_MESSAGE),
     });
-    assert_eq!(failed.r#type(), pb::EventType::EtUploadFailed);
+    assert_eq!(failed.r#type(), pb::EventType::EtCloudUploadFailed);
     assert_eq!(failed.failed_file_id, Some(id(&UintN::from(3u64))));
     assert_eq!(failed.upload_failure(), pb::UploadFailure::UfHttpStatus);
     assert_eq!(failed.http_status, 503);

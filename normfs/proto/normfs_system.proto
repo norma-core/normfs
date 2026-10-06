@@ -4,15 +4,45 @@ package normfs.system;
 
 import "normfs.proto";
 
+// What NormFS did with a queue's files, one Event per record of
+// `<instance>/normfs/system`. Only NormFS writes there.
+//
+// Where a store file is reported depends on the queue's Persist:
+//   store only             FILE_ON_DISK
+//   store + cloud          FILE_ON_DISK when it is written locally, then
+//                          FILE_IN_CLOUD once the offloader has uploaded it
+//                          (queues with a disk limit); only after that may the
+//                          disk monitor delete the local copy, DISK_FILE_DELETED
+//                          with in_cloud set
+//   cloud without store    FILE_IN_CLOUD only, uploaded straight from memory
+// A failed upload is retried and reported as CLOUD_UPLOAD_FAILED until it
+// goes through. WAL files are reported only when the disk monitor deletes them.
 enum EventType {
-    ET_FILE_STORED      = 0;
-    ET_FILE_LANDED      = 1;
-    ET_UPLOAD_FAILED    = 2;
-    ET_FILE_EVICTED     = 3;
-    ET_EVICTION_BLOCKED = 4;
-    ET_POOL_STALLED     = 5;
-    ET_QUEUE_STARTED    = 6;
-    ET_QUEUE_CLOSED     = 7;
+    // The store file is on the local disk: written, synced and renamed into
+    // the queue's store directory. Set: file.
+    ET_FILE_ON_DISK = 0;
+    // The store file is in the bucket and its size was read back, so readers
+    // can fetch it from there. Set: file, cloud_key, upload_ms,
+    // in_cloud_through.
+    ET_FILE_IN_CLOUD = 1;
+    // One upload attempt failed; it is retried every second. Set:
+    // failed_file_id, upload_failure, error, and http_status or
+    // local_bytes/remote_bytes when they apply.
+    ET_CLOUD_UPLOAD_FAILED = 2;
+    // The disk monitor deleted a local file to keep the queue under its limit.
+    // Set: deleted_kind, deleted_file_id, deleted_bytes, in_cloud,
+    // queue_bytes.
+    ET_DISK_FILE_DELETED = 3;
+    // The queue is over its disk limit but the next file may not be deleted.
+    // Set: cleanup_blocked_by, held_at, queue_bytes, limit_bytes.
+    ET_DISK_CLEANUP_BLOCKED = 4;
+    // Appenders of the queue are waiting for a memory page: files are not
+    // draining it fast enough. Set: waits, waiting_ms, resumed.
+    ET_QUEUE_WAITING_FOR_MEMORY = 5;
+    // Set: last_id, readonly, wal, store, cloud.
+    ET_QUEUE_OPENED = 6;
+    // Set: last_id.
+    ET_QUEUE_CLOSED = 7;
 }
 
 // Values as in the store header.
@@ -41,10 +71,11 @@ enum UploadFailure {
     UF_LOCAL_READ    = 4;
 }
 
-enum EvictionBlock {
-    EB_NOT_OFFLOADED = 0;
-    EB_DELETE_FAILED = 1;
-    EB_NOTHING_FOUND = 2;
+enum CleanupBlock {
+    // The next file to delete is not in the cloud yet.
+    CB_NOT_IN_CLOUD    = 0;
+    CB_DELETE_FAILED   = 1;
+    CB_NOTHING_TO_FIND = 2;
 }
 
 // A store file as its own header and signature block describe it.
@@ -63,8 +94,6 @@ message File {
     bytes       content_signature = 8;
 }
 
-// One record of `<instance>/normfs/system`. Only NormFS writes there; a
-// client write to that path is refused.
 message Event {
     normfs.Stamp stamp = 1;
     EventType    type  = 2;
@@ -73,17 +102,16 @@ message Event {
     uint64       dropped_before = 3;
     string       queue = 4;
 
-    // ET_FILE_STORED, ET_FILE_LANDED
     File file = 10;
 
-    // ET_FILE_LANDED. Nothing is left to upload up to landed_through, so local
-    // copies up to it may be deleted.
-    string    key            = 20;
-    uint64    duration_ms    = 21;
-    normfs.Id landed_through = 22;
+    // ET_FILE_IN_CLOUD
+    string    cloud_key        = 20;
+    uint64    upload_ms        = 21;
+    // Every file of the queue up to this id is in the cloud, so local copies
+    // up to it may be deleted.
+    normfs.Id in_cloud_through = 22;
 
-    // ET_UPLOAD_FAILED. Retried every second; attempts 1, 2, 4, 8 and so on
-    // are reported.
+    // ET_CLOUD_UPLOAD_FAILED. Attempts 1, 2, 4, 8 and so on are reported.
     normfs.Id     failed_file_id = 30;
     UploadFailure upload_failure = 31;
     uint32        http_status    = 32;
@@ -91,28 +119,31 @@ message Event {
     uint64        remote_bytes   = 34;
     string        error          = 35;
 
-    // ET_FILE_EVICTED
-    FileKind  evicted_kind    = 40;
-    normfs.Id evicted_file_id = 41;
-    uint64    evicted_bytes   = 42;
+    // ET_DISK_FILE_DELETED
+    FileKind  deleted_kind    = 40;
+    normfs.Id deleted_file_id = 41;
+    uint64    deleted_bytes   = 42;
+    // The file was in the cloud when it was deleted locally.
     bool      in_cloud        = 43;
 
-    // ET_FILE_EVICTED, ET_EVICTION_BLOCKED
+    // ET_DISK_FILE_DELETED, ET_DISK_CLEANUP_BLOCKED: the queue's bytes on disk
+    // after the event.
     uint64 queue_bytes = 50;
 
-    // ET_EVICTION_BLOCKED. Reported once per reason until the queue is back
-    // under the limit or the reason changes.
-    EvictionBlock eviction_block = 60;
-    normfs.Id     held_at        = 61;
-    uint64        limit_bytes    = 62;
+    // ET_DISK_CLEANUP_BLOCKED. Reported once per reason until the queue is
+    // back under the limit or the reason changes.
+    CleanupBlock cleanup_blocked_by = 60;
+    // The file cleanup stopped at.
+    normfs.Id    held_at            = 61;
+    uint64       limit_bytes        = 62;
 
-    // ET_POOL_STALLED: when the stall starts, every 30 seconds while it lasts,
-    // and once with resumed when it ends.
-    uint64 waits          = 70;
-    uint64 stalled_for_ms = 71;
-    bool   resumed        = 72;
+    // ET_QUEUE_WAITING_FOR_MEMORY: when the wait starts, every 30 seconds
+    // while it lasts, and once with resumed when it ends.
+    uint64 waits      = 70;
+    uint64 waiting_ms = 71;
+    bool   resumed    = 72;
 
-    // ET_QUEUE_STARTED, ET_QUEUE_CLOSED
+    // ET_QUEUE_OPENED, ET_QUEUE_CLOSED
     normfs.Id last_id  = 80;
     bool      readonly = 81;
     bool      wal      = 82;
