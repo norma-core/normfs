@@ -143,3 +143,25 @@ async fn a_creation_overlapping_a_removal_is_not_cached() {
     fs.mkdir_all(&leaf).await.unwrap();
     assert!(leaf.is_dir());
 }
+
+#[tokio::test]
+async fn only_files_with_the_extension_are_removed() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("tmp");
+    fs::create_dir_all(dir.join("nested.tmp")).unwrap();
+    fs::write(dir.join("a.tmp"), b"").unwrap();
+    fs::write(dir.join("b.tmp"), b"").unwrap();
+    fs::write(dir.join("keep.store"), b"").unwrap();
+    let fs = fs();
+
+    assert_eq!(fs.remove_files_with_ext(&dir, "tmp").await.unwrap(), 2);
+    assert!(!dir.join("a.tmp").exists());
+    assert!(dir.join("keep.store").exists());
+    assert!(dir.join("nested.tmp").is_dir());
+    assert_eq!(
+        fs.remove_files_with_ext(&root.path().join("missing"), "tmp")
+            .await
+            .unwrap(),
+        0
+    );
+}

@@ -572,35 +572,9 @@ impl PersistStore {
     pub async fn recover(&self) -> Result<(), StoreError> {
         log::info!(target: "normfs-store", "Starting recovery: cleaning up temp folder");
 
-        let temp_dir = self.root.join("tmp");
         let cleaned_count = self
             .fs
-            .run_blocking(move || {
-                let entries = match std::fs::read_dir(&temp_dir) {
-                    Ok(entries) => entries,
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                        log::debug!(target: "normfs-store", "Temp directory does not exist, nothing to recover");
-                        return Ok(0usize);
-                    }
-                    Err(e) => return Err(e),
-                };
-                let mut cleaned = 0usize;
-                for entry in entries {
-                    let path = entry?.path();
-                    if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("tmp") {
-                        match std::fs::remove_file(&path) {
-                            Ok(_) => {
-                                log::debug!(target: "normfs-store", "Removed temp file: {:?}", path);
-                                cleaned += 1;
-                            }
-                            Err(e) => {
-                                log::warn!(target: "normfs-store", "Failed to remove temp file {:?}: {}", path, e);
-                            }
-                        }
-                    }
-                }
-                Ok(cleaned)
-            })
+            .remove_files_with_ext(&self.root.join("tmp"), "tmp")
             .await?;
 
         if cleaned_count > 0 {
