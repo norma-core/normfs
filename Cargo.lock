@@ -1468,6 +1468,7 @@ dependencies = [
  "normfs-crypto",
  "normfs-fs",
  "normfs-store",
+ "normfs-time",
  "normfs-types",
  "normfs-wal",
  "prost",
@@ -1556,11 +1557,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "normfs-time"
+version = "0.3.5"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "normfs-types"
 version = "0.3.5"
 dependencies = [
  "bytes",
- "libc",
  "uintn",
 ]
 

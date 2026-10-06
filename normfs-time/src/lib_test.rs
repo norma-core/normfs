@@ -1,9 +1,9 @@
-use super::stamp::*;
+use super::*;
 
 #[test]
 fn monotonic_time_does_not_go_back() {
-    let first = monotonic_ns();
-    let second = monotonic_ns();
+    let first = monotonic_stamp_ns();
+    let second = monotonic_stamp_ns();
     assert!(first > 0);
     assert!(second >= first);
 }

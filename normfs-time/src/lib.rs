@@ -1,13 +1,13 @@
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// The same three clocks station stamps its records with, so the two can be
-/// lined up.
+/// The three clocks NormFS and station stamp their records with, so records of
+/// both can be lined up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Stamp {
     /// Keeps counting through suspend on Linux, unlike `Instant`.
-    pub monotonic_ns: u64,
-    pub local_ns: u64,
+    pub monotonic_stamp_ns: u64,
+    pub local_stamp_ns: u64,
     /// Unix seconds when the process first took a stamp; tells lives apart
     /// even when the wall clock jumps.
     pub app_start_id: u64,
@@ -16,8 +16,8 @@ pub struct Stamp {
 impl Stamp {
     pub fn now() -> Self {
         Self {
-            monotonic_ns: monotonic_ns(),
-            local_ns: local_ns(),
+            monotonic_stamp_ns: monotonic_stamp_ns(),
+            local_stamp_ns: local_stamp_ns(),
             app_start_id: app_start_id(),
         }
     }
@@ -28,7 +28,7 @@ const MONOTONIC: libc::clockid_t = libc::CLOCK_BOOTTIME;
 #[cfg(not(target_os = "linux"))]
 const MONOTONIC: libc::clockid_t = libc::CLOCK_MONOTONIC_RAW;
 
-pub fn monotonic_ns() -> u64 {
+pub fn monotonic_stamp_ns() -> u64 {
     let mut ts = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
@@ -42,7 +42,7 @@ pub fn monotonic_ns() -> u64 {
         .saturating_add(ts.tv_nsec as u64)
 }
 
-pub fn local_ns() -> u64 {
+pub fn local_stamp_ns() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos().min(u64::MAX as u128) as u64)
@@ -56,3 +56,6 @@ pub fn app_start_id() -> u64 {
             .map_or(0, |d| d.as_secs())
     })
 }
+
+#[cfg(test)]
+mod lib_test;

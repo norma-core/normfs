@@ -1,8 +1,8 @@
 use bytes::{Bytes, BytesMut};
+use normfs_time::Stamp;
 use normfs_types::events::{
     self, EventSink, EvictionBlock, FileFacts, SystemEvent, SystemEvents, UploadFailure,
 };
-use normfs_types::stamp::Stamp;
 use normfs_types::{CompressionType, EncryptionType, QueueId};
 use prost::Message;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -193,8 +193,8 @@ impl Drop for Writer {
 
 fn stamp(s: Stamp) -> crate::proto::Stamp {
     crate::proto::Stamp {
-        monotonic_stamp_ns: s.monotonic_ns,
-        local_stamp_ns: s.local_ns,
+        monotonic_stamp_ns: s.monotonic_stamp_ns,
+        local_stamp_ns: s.local_stamp_ns,
         app_start_id: s.app_start_id,
     }
 }

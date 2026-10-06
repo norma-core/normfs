@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "normfs",
     "normfs-types",
+    "normfs-time",
     "normfs-wal",
     "normfs-store",
     "normfs-cloud",
@@ -30,6 +31,7 @@ log = "0.4.28"
 # Internal workspace crates
 uintn = { path = "uintn-rs" }
 normfs-types = { path = "normfs-types" }
+normfs-time = { path = "normfs-time" }
 normfs-wal = { path = "normfs-wal" }
 normfs-store = { path = "normfs-store" }
 normfs-cloud = { path = "normfs-cloud" }
