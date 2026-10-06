@@ -140,6 +140,7 @@ async fn a_file_moves_to_the_next_layer_once_it_accepts_it() {
     let offloader = QueueOffloader::new(
         Arc::new(Layer::new(local, None, false)),
         Arc::new(Layer::new(remote.clone(), None, true)),
+        None,
         queue.clone(),
         events,
     )
@@ -200,6 +201,7 @@ async fn a_file_kept_by_a_put_that_failed_is_reported_landed() {
     let offloader = QueueOffloader::new(
         Arc::new(Layer::new(local, None, false)),
         Arc::new(Layer::new(remote, None, true)),
+        None,
         queue.clone(),
         events,
     )
@@ -222,4 +224,126 @@ async fn a_file_kept_by_a_put_that_failed_is_reported_landed() {
         })
         .collect();
     assert_eq!(landed, vec![file_id]);
+}
+
+async fn wait_for(what: &str, mut done: impl AsyncFnMut() -> bool) {
+    for _ in 0..1000 {
+        if done().await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("timed out waiting for {what}");
+}
+
+fn local_layer(temp: &tempfile::TempDir) -> Arc<dyn Backend> {
+    let fs = normfs_fs::Fs::new(normfs_fs::FsConfig::default()).unwrap();
+    Arc::new(local_store(fs, temp.path(), false, Arc::default()))
+}
+
+async fn put(backend: &dyn Backend, queue: &QueueId, id: u64) {
+    let data = Bytes::from(format!("store file {id}"));
+    backend
+        .put(queue, &UintN::from(id), Body::Runs(vec![data]))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_file_landing_before_a_lower_one_holds_the_bound_until_both_moved() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let local = local_layer(&temp);
+    let queue = QueueIdResolver::new("inst").resolve("cam");
+    let wal = Arc::new(Memory::default());
+    put(wal.as_ref(), &queue, 1).await;
+    put(local.as_ref(), &queue, 2).await;
+
+    let remote = Arc::new(Memory::default());
+    let offloader = QueueOffloader::new(
+        Arc::new(Layer::new(local.clone(), None, false)),
+        Arc::new(Layer::new(remote.clone(), None, true)),
+        Some(wal.clone()),
+        queue.clone(),
+        events::discard(),
+    )
+    .await;
+    offloader.file_landed(UintN::from(2u64));
+    wait_for("file 2 in the next layer", async || {
+        remote
+            .size(&queue, &UintN::from(2u64))
+            .await
+            .unwrap()
+            .is_some()
+    })
+    .await;
+    let bound = offloader.get_latest_offloaded_id().await;
+    assert!(
+        bound.as_ref().is_none_or(|b| b < &UintN::from(1u64)),
+        "{bound:?}"
+    );
+
+    put(local.as_ref(), &queue, 1).await;
+    wal.files.lock().unwrap().clear();
+    offloader.file_landed(UintN::from(1u64));
+    wait_for("file 1 in the next layer", async || {
+        remote
+            .size(&queue, &UintN::from(1u64))
+            .await
+            .unwrap()
+            .is_some()
+    })
+    .await;
+    wait_for("the bound over both files", async || {
+        offloader.get_latest_offloaded_id().await == Some(UintN::from(2u64))
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn an_id_that_can_no_longer_land_does_not_hold_the_bound() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let local = local_layer(&temp);
+    let queue = QueueIdResolver::new("inst").resolve("cam");
+    put(local.as_ref(), &queue, 1).await;
+    put(local.as_ref(), &queue, 3).await;
+    let wal = Arc::new(Memory::default());
+    put(wal.as_ref(), &queue, 2).await;
+
+    let remote = Arc::new(Memory::default());
+    let offloader = QueueOffloader::new(
+        Arc::new(Layer::new(local, None, false)),
+        Arc::new(Layer::new(remote.clone(), None, true)),
+        Some(wal.clone()),
+        queue.clone(),
+        events::discard(),
+    )
+    .await;
+    wait_for("files 1 and 3 in the next layer", async || {
+        remote
+            .size(&queue, &UintN::from(3u64))
+            .await
+            .unwrap()
+            .is_some()
+            && remote
+                .size(&queue, &UintN::from(1u64))
+                .await
+                .unwrap()
+                .is_some()
+    })
+    .await;
+    // File 2 is still in the WAL and may yet land.
+    assert_eq!(
+        offloader.get_latest_offloaded_id().await,
+        Some(UintN::from(1u64))
+    );
+
+    // Its WAL file went away without a store file, as an empty one does.
+    wal.files.lock().unwrap().clear();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while offloader.get_latest_offloaded_id().await != Some(UintN::from(3u64)) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the bound passes an id that can no longer land");
 }

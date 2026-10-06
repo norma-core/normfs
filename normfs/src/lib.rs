@@ -562,6 +562,7 @@ impl NormFS {
             Arc::new(offload::offloaders::Offloaders::new(
                 store_arc.local().clone(),
                 to,
+                wal.backend().clone(),
                 events.clone(),
             ))
         });

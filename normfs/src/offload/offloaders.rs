@@ -1,5 +1,5 @@
 use normfs_store::offloader::QueueOffloader;
-use normfs_store::Layer;
+use normfs_store::{Backend, Layer};
 use normfs_types::events::EventSink;
 use normfs_types::QueueId;
 use std::collections::HashMap;
@@ -12,15 +12,22 @@ use uintn::UintN;
 pub(crate) struct Offloaders {
     from: Arc<Layer>,
     to: Arc<Layer>,
+    wal: Arc<dyn Backend>,
     events: EventSink,
     queues: RwLock<HashMap<QueueId, Arc<QueueOffloader>>>,
 }
 
 impl Offloaders {
-    pub(crate) fn new(from: Arc<Layer>, to: Arc<Layer>, events: EventSink) -> Self {
+    pub(crate) fn new(
+        from: Arc<Layer>,
+        to: Arc<Layer>,
+        wal: Arc<dyn Backend>,
+        events: EventSink,
+    ) -> Self {
         Self {
             from,
             to,
+            wal,
             events,
             queues: RwLock::new(HashMap::new()),
         }
@@ -39,6 +46,7 @@ impl Offloaders {
             QueueOffloader::new(
                 self.from.clone(),
                 self.to.clone(),
+                Some(self.wal.clone()),
                 queue.clone(),
                 self.events.clone(),
             )

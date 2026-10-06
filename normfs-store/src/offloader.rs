@@ -3,11 +3,13 @@ use std::{sync::Arc, time::Duration};
 use log::{error, info, warn};
 use normfs_types::QueueId;
 use normfs_types::events::{EventSink, FileFacts, SystemEvent, UploadFailure};
-use tokio::sync::{RwLock, watch};
+use std::collections::BTreeSet;
+use std::sync::Mutex;
+use tokio::sync::Notify;
 use tokio::time::Instant;
 use uintn::UintN;
 
-use crate::backend::BackendError;
+use crate::backend::{Backend, BackendError, End};
 use crate::layer::Layer;
 use crate::store_file::{self, HEAD_LEN};
 
@@ -49,220 +51,152 @@ impl From<BackendError> for OffloadError {
 
 /// Moves a queue's files from one of its layers to the next: today the local
 /// store to the bucket. A file counts as moved once the next layer holds it
-/// at the same size; the bound of moved files is what eviction may delete up
-/// to.
+/// at the same size. The bound handed to eviction is contiguous: every file
+/// up to it is in the next layer, whatever order the files landed in.
 #[derive(Debug)]
 pub struct QueueOffloader {
-    /// The first and the last file the worker has been told of. Telling it
-    /// never waits, so a queue whose next layer is down holds up no other.
-    landed: watch::Sender<Option<(UintN, UintN)>>,
-    latest_offloaded_id: Arc<RwLock<Option<UintN>>>,
+    shared: Arc<Shared>,
 }
 
+#[derive(Debug, Default)]
+struct Shared {
+    /// Files landed and not yet moved. Telling the worker never waits, so a
+    /// queue whose next layer is down holds up no other.
+    pending: Mutex<BTreeSet<UintN>>,
+    wake: Notify,
+    moved_through: Mutex<Option<UintN>>,
+}
+
+/// Rechecks a gap below moved files while nothing else wakes the worker, so a
+/// WAL file that goes away without becoming a store file does not hold the
+/// bound for good.
+const GAP_RECHECK: Duration = Duration::from_secs(5);
+
 impl QueueOffloader {
+    /// `wal` is where the files of `from` come from when they are migrated,
+    /// if anywhere: an id still there may yet land in `from`.
     pub async fn new(
         from: Arc<Layer>,
         to: Arc<Layer>,
+        wal: Option<Arc<dyn Backend>>,
         queue_id: QueueId,
         events: EventSink,
     ) -> Self {
-        let (landed, landed_rx) = watch::channel(None);
-        let latest_offloaded_id = Arc::new(RwLock::new(None));
-
+        let shared = Arc::new(Shared::default());
         let worker = QueueOffloaderWorker {
             from,
             to,
+            wal,
             queue_id,
             events,
         };
-        let worker_latest_id = latest_offloaded_id.clone();
+        let worker_shared = shared.clone();
         tokio::spawn(async move {
-            Self::offload_worker(worker, landed_rx, worker_latest_id).await;
+            Self::offload_worker(worker, worker_shared).await;
         });
-
-        Self {
-            landed,
-            latest_offloaded_id,
-        }
+        Self { shared }
     }
 
-    /// The files already in the layer when the worker starts.
-    async fn existing(from: &Layer, queue_id: &QueueId) -> Option<(UintN, UintN)> {
-        let found = async {
-            let Some(min_id) = from.first_file_id(queue_id).await? else {
-                return Ok(None);
-            };
-            let max_id = from.last_file_id(queue_id).await?.unwrap_or(min_id.clone());
-            Ok::<_, BackendError>(Some((min_id, max_id)))
-        };
-        match found.await {
-            Ok(Some((min_id, max_id))) => {
-                info!("Found store files from {:?} to {:?}", min_id, max_id);
-                Some((min_id, max_id))
-            }
-            Ok(None) => {
-                warn!("No store files found in queue {}", queue_id);
-                None
-            }
-            Err(e) => {
-                error!("Failed to scan store files of queue {}: {}", queue_id, e);
-                None
-            }
-        }
-    }
-
-    /// `file_id` is in the first layer, after every lower id the queue landed.
+    /// `file_id` is in the first layer. Files may land in any order.
     pub fn file_landed(&self, file_id: UintN) {
-        self.landed
-            .send_modify(|range| widen(range, &file_id, &file_id));
+        self.shared.pending.lock().unwrap().insert(file_id);
+        self.shared.wake.notify_one();
     }
 
     pub async fn get_latest_offloaded_id(&self) -> Option<UintN> {
-        self.latest_offloaded_id.read().await.clone()
+        self.shared.moved_through.lock().unwrap().clone()
     }
 
-    async fn offload_worker(
-        worker: QueueOffloaderWorker,
-        mut landed: watch::Receiver<Option<(UintN, UintN)>>,
-        latest_offloaded_id: Arc<RwLock<Option<UintN>>>,
-    ) {
+    async fn offload_worker(worker: QueueOffloaderWorker, shared: Arc<Shared>) {
         info!("Starting offload worker for queue_id: {}", worker.queue_id);
-
-        let existing = Self::existing(&worker.from, &worker.queue_id).await;
-        let mut next: Option<UintN> = None;
+        worker.queue_existing(&shared).await;
+        let mut moved = Moved::default();
 
         loop {
-            let mut range = existing.clone();
-            if let Some((first, last)) = landed.borrow_and_update().clone() {
-                widen(&mut range, &first, &last);
-            }
-            let Some((first, last)) = range else {
-                if landed.changed().await.is_err() {
-                    break;
+            let next = shared.pending.lock().unwrap().pop_first();
+            let Some(file_id) = next else {
+                if moved.has_gap() {
+                    let _ = tokio::time::timeout(GAP_RECHECK, shared.wake.notified()).await;
+                    moved.advance(&worker, &shared).await;
+                } else {
+                    shared.wake.notified().await;
                 }
                 continue;
             };
-            let file_id = match &next {
-                Some(id) if id <= &last => id.clone(),
-                Some(_) => {
-                    if landed.changed().await.is_err() {
-                        break;
-                    }
-                    continue;
+            let landed = match worker.move_file(&file_id).await {
+                Outcome::Moved(landed) => {
+                    moved.mark(file_id);
+                    landed
                 }
-                None => first,
+                Outcome::Gone => None,
             };
-            next = Some(file_id.increment());
-            match worker.from.backend().size(&worker.queue_id, &file_id).await {
-                Ok(Some(_)) => {}
-                Ok(None) => continue,
-                Err(e) => {
-                    error!(
-                        "Failed to check local file {:?}: {}, retrying in 1 second",
-                        file_id, e
-                    );
-                    next = Some(file_id);
-                    tokio::time::sleep(RETRY_DELAY).await;
+            let through = moved.advance(&worker, &shared).await;
+            if let (Some(mut landed), Some(through)) = (landed, through) {
+                if let SystemEvent::FileLanded { landed_through, .. } = landed.as_mut() {
+                    *landed_through = through;
+                }
+                worker.events.emit(*landed);
+            }
+        }
+    }
+}
+
+/// Files known to be in the next layer above the contiguous bound.
+#[derive(Default)]
+struct Moved {
+    /// The lowest id not yet known to be in the next layer; `None` until the
+    /// first move fixes where the queue's files start.
+    next: Option<UintN>,
+    above: BTreeSet<UintN>,
+}
+
+impl Moved {
+    fn mark(&mut self, file_id: UintN) {
+        if self.next.as_ref().is_none_or(|next| &file_id >= next) {
+            self.above.insert(file_id);
+        }
+    }
+
+    fn has_gap(&self) -> bool {
+        !self.above.is_empty()
+    }
+
+    /// Raises the bound over moved files and over ids that can no longer
+    /// land, and publishes it.
+    async fn advance(&mut self, worker: &QueueOffloaderWorker, shared: &Shared) -> Option<UintN> {
+        if self.next.is_none() {
+            self.next = worker.first_id(shared, &self.above).await;
+        }
+        if let Some(next) = self.next.as_mut() {
+            loop {
+                if self.above.remove(next) {
+                    *next = next.increment();
                     continue;
                 }
-            }
-            let mut attempt: u32 = 0;
-            let mut first_put: Option<Instant> = None;
-            loop {
-                match worker.is_file_offloaded(&file_id).await {
-                    Ok(true) => {
-                        // A put this worker saw fail can still have landed; its facts
-                        // are read first so whoever sees the bound finds the record.
-                        let facts = match first_put {
-                            Some(_) => worker.local_facts(&file_id).await,
-                            None => None,
-                        };
-                        let landed_through = advance(&latest_offloaded_id, &file_id).await;
-                        if let (Some(file), Some(started)) = (facts, first_put) {
-                            worker.events.emit(SystemEvent::FileLanded {
-                                file,
-                                key: worker.to.backend().key(&worker.queue_id, &file_id),
-                                took: started.elapsed(),
-                                landed_through,
-                            });
-                        }
-                        break;
-                    }
-                    Ok(false) => {}
-                    Err(OffloadError::LocalFileError(e)) => {
-                        error!("File {:?} does not exist locally, skipping: {}", file_id, e);
-                        break;
-                    }
-                    Err(OffloadError::RemoteError(e)) => {
-                        error!(
-                            "Failed to check if file {:?} is offloaded: {}, retrying in 1 second",
-                            file_id, e
-                        );
-                        tokio::time::sleep(RETRY_DELAY).await;
-                        continue;
-                    }
+                if self.above.range(next.clone()..).next().is_none() {
+                    break;
                 }
-
-                attempt = attempt.saturating_add(1);
-                first_put.get_or_insert_with(Instant::now);
-                match worker.upload_file(&file_id, attempt).await {
-                    Ok(uploaded) => {
-                        info!("Successfully uploaded file {:?}", file_id);
-                        let landed_through = advance(&latest_offloaded_id, &file_id).await;
-                        if let Some(file) = uploaded.facts {
-                            worker.events.emit(SystemEvent::FileLanded {
-                                file,
-                                key: uploaded.key,
-                                took: uploaded.took,
-                                landed_through,
-                            });
-                        }
-                        break;
-                    }
-                    Err(OffloadError::LocalFileError(e)) => {
-                        error!("Cannot read file {:?} locally, skipping: {}", file_id, e);
-                        break;
-                    }
-                    Err(OffloadError::RemoteError(e)) => {
-                        error!(
-                            "Failed to upload file {:?}: {}, retrying in 1 second",
-                            file_id, e
-                        );
-                        tokio::time::sleep(RETRY_DELAY).await;
-                        continue;
-                    }
+                if worker.may_land(shared, next).await {
+                    break;
                 }
+                *next = next.increment();
             }
         }
-
-        info!("Offload worker stopped for queue_id: {}", worker.queue_id);
+        let through = self
+            .next
+            .as_ref()
+            .filter(|next| !next.is_zero())
+            .and_then(|next| next.sub(&UintN::one()).ok());
+        *shared.moved_through.lock().unwrap() = through.clone();
+        through
     }
 }
 
-fn widen(range: &mut Option<(UintN, UintN)>, first: &UintN, last: &UintN) {
-    match range {
-        Some((lo, hi)) => {
-            if first < lo {
-                *lo = first.clone();
-            }
-            if last > hi {
-                *hi = last.clone();
-            }
-        }
-        None => *range = Some((first.clone(), last.clone())),
-    }
-}
-
-/// Raises the offloaded bound to `file_id` and returns the bound.
-async fn advance(latest: &RwLock<Option<UintN>>, file_id: &UintN) -> UintN {
-    let mut latest = latest.write().await;
-    match &*latest {
-        Some(current) if current >= file_id => current.clone(),
-        _ => {
-            *latest = Some(file_id.clone());
-            file_id.clone()
-        }
-    }
+enum Outcome {
+    /// In the next layer, with the record to emit when this worker put it.
+    Moved(Option<Box<SystemEvent>>),
+    /// No longer in the first layer.
+    Gone,
 }
 
 struct Uploaded {
@@ -275,11 +209,159 @@ struct Uploaded {
 struct QueueOffloaderWorker {
     from: Arc<Layer>,
     to: Arc<Layer>,
+    wal: Option<Arc<dyn Backend>>,
     queue_id: QueueId,
     events: EventSink,
 }
 
 impl QueueOffloaderWorker {
+    /// The files already in the layer when the worker starts.
+    async fn queue_existing(&self, shared: &Shared) {
+        let from = self.from.backend();
+        let found = async {
+            let Some(first) = from.find(&self.queue_id, End::Min).await? else {
+                return Ok(None);
+            };
+            let last = from
+                .find(&self.queue_id, End::Max)
+                .await?
+                .unwrap_or(first.clone());
+            Ok::<_, BackendError>(Some((first, last)))
+        };
+        let (mut id, last) = match found.await {
+            Ok(Some(range)) => range,
+            Ok(None) => return,
+            Err(e) => {
+                error!(
+                    "Failed to scan store files of queue {}: {}",
+                    self.queue_id, e
+                );
+                return;
+            }
+        };
+        info!("Found store files from {:?} to {:?}", id, last);
+        loop {
+            if let Ok(Some(_)) = from.size(&self.queue_id, &id).await {
+                shared.pending.lock().unwrap().insert(id.clone());
+            }
+            if id >= last {
+                break;
+            }
+            id = id.increment();
+        }
+    }
+
+    /// Where the queue's files start: nothing below the lowest file still in
+    /// the WAL, in the first layer, waiting or moved can land any more. The
+    /// WAL is looked at first because a migrated file reaches the first layer
+    /// before its WAL file is deleted.
+    async fn first_id(&self, shared: &Shared, moved: &BTreeSet<UintN>) -> Option<UintN> {
+        let mut first = moved.first().cloned();
+        let mut lower = |id: Option<UintN>| {
+            if let Some(id) = id
+                && first.as_ref().is_none_or(|f| &id < f)
+            {
+                first = Some(id);
+            }
+        };
+        if let Some(wal) = &self.wal {
+            lower(wal.find(&self.queue_id, End::Min).await.ok().flatten());
+        }
+        lower(
+            self.from
+                .backend()
+                .find(&self.queue_id, End::Min)
+                .await
+                .ok()
+                .flatten(),
+        );
+        lower(shared.pending.lock().unwrap().first().cloned());
+        first
+    }
+
+    /// Whether `file_id` may still reach the next layer through this worker.
+    /// A file lands in the first layer before its WAL file is deleted and WAL
+    /// files are made in id order, so an id below a moved one that is in
+    /// neither place never will.
+    async fn may_land(&self, shared: &Shared, file_id: &UintN) -> bool {
+        if shared.pending.lock().unwrap().contains(file_id) {
+            return true;
+        }
+        if let Some(wal) = &self.wal
+            && !matches!(wal.size(&self.queue_id, file_id).await, Ok(None))
+        {
+            return true;
+        }
+        !matches!(
+            self.from.backend().size(&self.queue_id, file_id).await,
+            Ok(None)
+        )
+    }
+
+    async fn move_file(&self, file_id: &UintN) -> Outcome {
+        let mut attempt: u32 = 0;
+        let mut first_put: Option<Instant> = None;
+        loop {
+            match self.is_file_offloaded(file_id).await {
+                Ok(true) => {
+                    // A put this worker saw fail can still have landed.
+                    let landed =
+                        match first_put {
+                            Some(started) => self.local_facts(file_id).await.map(|file| {
+                                SystemEvent::FileLanded {
+                                    file,
+                                    key: self.to.backend().key(&self.queue_id, file_id),
+                                    took: started.elapsed(),
+                                    landed_through: file_id.clone(),
+                                }
+                            }),
+                            None => None,
+                        };
+                    return Outcome::Moved(landed.map(Box::new));
+                }
+                Ok(false) => {}
+                Err(OffloadError::LocalFileError(e)) => {
+                    error!("File {:?} does not exist locally, skipping: {}", file_id, e);
+                    return Outcome::Gone;
+                }
+                Err(OffloadError::RemoteError(e)) => {
+                    error!(
+                        "Failed to check if file {:?} is offloaded: {}, retrying in 1 second",
+                        file_id, e
+                    );
+                    tokio::time::sleep(RETRY_DELAY).await;
+                    continue;
+                }
+            }
+
+            attempt = attempt.saturating_add(1);
+            first_put.get_or_insert_with(Instant::now);
+            match self.upload_file(file_id, attempt).await {
+                Ok(uploaded) => {
+                    info!("Successfully uploaded file {:?}", file_id);
+                    let landed = uploaded.facts.map(|file| SystemEvent::FileLanded {
+                        file,
+                        key: uploaded.key,
+                        took: uploaded.took,
+                        landed_through: file_id.clone(),
+                    });
+                    return Outcome::Moved(landed.map(Box::new));
+                }
+                Err(OffloadError::LocalFileError(e)) => {
+                    error!("Cannot read file {:?} locally, skipping: {}", file_id, e);
+                    return Outcome::Gone;
+                }
+                Err(OffloadError::RemoteError(e)) => {
+                    error!(
+                        "Failed to upload file {:?}: {}, retrying in 1 second",
+                        file_id, e
+                    );
+                    tokio::time::sleep(RETRY_DELAY).await;
+                }
+            }
+        }
+    }
+
     async fn is_file_offloaded(&self, file_id: &UintN) -> Result<bool, OffloadError> {
         let local_size = match self.from.backend().size(&self.queue_id, file_id).await {
             Ok(Some(size)) => size,
