@@ -52,10 +52,10 @@ impl Offloaders {
         let Some(offloader) = self.queues.read().await.get(queue).cloned() else {
             return;
         };
-        if let Err(e) = offloader.enqueue_file(file_id.clone()).await {
-            log::error!(target: "normfs",
-                "Failed to enqueue file for offload: queue={}, file_id={:?}, error={}",
-                queue, file_id, e);
-        }
+        offloader.file_landed(file_id);
     }
 }
+
+#[cfg(test)]
+#[path = "offloaders_test.rs"]
+mod offloaders_test;

@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use log::{error, info, warn};
 use normfs_types::QueueId;
 use normfs_types::events::{EventSink, FileFacts, SystemEvent, UploadFailure};
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{RwLock, watch};
 use tokio::time::Instant;
 use uintn::UintN;
 
@@ -53,7 +53,9 @@ impl From<BackendError> for OffloadError {
 /// to.
 #[derive(Debug)]
 pub struct QueueOffloader {
-    offload_sender: mpsc::Sender<UintN>,
+    /// The first and the last file the worker has been told of. Telling it
+    /// never waits, so a queue whose next layer is down holds up no other.
+    landed: watch::Sender<Option<(UintN, UintN)>>,
     latest_offloaded_id: Arc<RwLock<Option<UintN>>>,
 }
 
@@ -64,86 +66,55 @@ impl QueueOffloader {
         queue_id: QueueId,
         events: EventSink,
     ) -> Self {
-        let (offload_sender, offload_receiver) = mpsc::channel::<UintN>(1000);
+        let (landed, landed_rx) = watch::channel(None);
         let latest_offloaded_id = Arc::new(RwLock::new(None));
 
         let worker = QueueOffloaderWorker {
-            from: from.clone(),
+            from,
             to,
-            queue_id: queue_id.clone(),
+            queue_id,
             events,
         };
         let worker_latest_id = latest_offloaded_id.clone();
         tokio::spawn(async move {
-            Self::offload_worker(worker, offload_receiver, worker_latest_id).await;
+            Self::offload_worker(worker, landed_rx, worker_latest_id).await;
         });
 
-        let init_sender = offload_sender.clone();
-
-        let offloader = Self {
-            offload_sender,
+        Self {
+            landed,
             latest_offloaded_id,
-        };
-
-        // Detach the initialization to avoid blocking
-        tokio::spawn(async move {
-            log::trace!(
-                "Starting background initialization of upload queue for queue_id: {}",
-                queue_id
-            );
-            if let Err(e) = Self::initialize_upload_queue(&from, &queue_id, init_sender).await {
-                error!("Failed to initialize upload queue: {}", e);
-            }
-        });
-
-        offloader
-    }
-
-    async fn initialize_upload_queue(
-        from: &Layer,
-        queue_id: &QueueId,
-        offload_sender: mpsc::Sender<UintN>,
-    ) -> Result<(), BackendError> {
-        log::trace!("Initializing upload queue for queue_id: {}", queue_id);
-
-        let Some(min_id) = from.first_file_id(queue_id).await? else {
-            warn!("No store files found in queue {}", queue_id);
-            return Ok(());
-        };
-        let Some(max_id) = from.last_file_id(queue_id).await? else {
-            return Ok(());
-        };
-
-        info!("Found store files from {:?} to {:?}", min_id, max_id);
-
-        let mut current_id = min_id;
-        let mut enqueued_count = 0;
-
-        loop {
-            if from.backend().size(queue_id, &current_id).await?.is_some() {
-                if let Err(e) = offload_sender.send(current_id.clone()).await {
-                    error!("Failed to enqueue file {:?}: {}", current_id, e);
-                } else {
-                    enqueued_count += 1;
-                }
-            }
-
-            if current_id == max_id {
-                break;
-            }
-
-            current_id = current_id.increment();
         }
-
-        info!("Enqueued {} files for upload", enqueued_count);
-        Ok(())
     }
 
-    pub async fn enqueue_file(&self, file_id: UintN) -> Result<(), Box<dyn std::error::Error>> {
-        self.offload_sender
-            .send(file_id)
-            .await
-            .map_err(|e| format!("Failed to send file ID to upload queue: {}", e).into())
+    /// The files already in the layer when the worker starts.
+    async fn existing(from: &Layer, queue_id: &QueueId) -> Option<(UintN, UintN)> {
+        let found = async {
+            let Some(min_id) = from.first_file_id(queue_id).await? else {
+                return Ok(None);
+            };
+            let max_id = from.last_file_id(queue_id).await?.unwrap_or(min_id.clone());
+            Ok::<_, BackendError>(Some((min_id, max_id)))
+        };
+        match found.await {
+            Ok(Some((min_id, max_id))) => {
+                info!("Found store files from {:?} to {:?}", min_id, max_id);
+                Some((min_id, max_id))
+            }
+            Ok(None) => {
+                warn!("No store files found in queue {}", queue_id);
+                None
+            }
+            Err(e) => {
+                error!("Failed to scan store files of queue {}: {}", queue_id, e);
+                None
+            }
+        }
+    }
+
+    /// `file_id` is in the first layer, after every lower id the queue landed.
+    pub fn file_landed(&self, file_id: UintN) {
+        self.landed
+            .send_modify(|range| widen(range, &file_id, &file_id));
     }
 
     pub async fn get_latest_offloaded_id(&self) -> Option<UintN> {
@@ -152,23 +123,68 @@ impl QueueOffloader {
 
     async fn offload_worker(
         worker: QueueOffloaderWorker,
-        mut receiver: mpsc::Receiver<UintN>,
+        mut landed: watch::Receiver<Option<(UintN, UintN)>>,
         latest_offloaded_id: Arc<RwLock<Option<UintN>>>,
     ) {
         info!("Starting offload worker for queue_id: {}", worker.queue_id);
 
-        while let Some(file_id) = receiver.recv().await {
+        let existing = Self::existing(&worker.from, &worker.queue_id).await;
+        let mut next: Option<UintN> = None;
+
+        loop {
+            let mut range = existing.clone();
+            if let Some((first, last)) = landed.borrow_and_update().clone() {
+                widen(&mut range, &first, &last);
+            }
+            let Some((first, last)) = range else {
+                if landed.changed().await.is_err() {
+                    break;
+                }
+                continue;
+            };
+            let file_id = match &next {
+                Some(id) if id <= &last => id.clone(),
+                Some(_) => {
+                    if landed.changed().await.is_err() {
+                        break;
+                    }
+                    continue;
+                }
+                None => first,
+            };
+            next = Some(file_id.increment());
+            match worker.from.backend().size(&worker.queue_id, &file_id).await {
+                Ok(Some(_)) => {}
+                Ok(None) => continue,
+                Err(e) => {
+                    error!(
+                        "Failed to check local file {:?}: {}, retrying in 1 second",
+                        file_id, e
+                    );
+                    next = Some(file_id);
+                    tokio::time::sleep(RETRY_DELAY).await;
+                    continue;
+                }
+            }
             let mut attempt: u32 = 0;
-            let mut first_put = None;
+            let mut first_put: Option<Instant> = None;
             loop {
                 match worker.is_file_offloaded(&file_id).await {
                     Ok(true) => {
+                        // A put this worker saw fail can still have landed; its facts
+                        // are read first so whoever sees the bound finds the record.
+                        let facts = match first_put {
+                            Some(_) => worker.local_facts(&file_id).await,
+                            None => None,
+                        };
                         let landed_through = advance(&latest_offloaded_id, &file_id).await;
-                        // A put this worker saw fail can still have landed.
-                        if let Some(started) = first_put {
-                            worker
-                                .report_landed(&file_id, started, landed_through)
-                                .await;
+                        if let (Some(file), Some(started)) = (facts, first_put) {
+                            worker.events.emit(SystemEvent::FileLanded {
+                                file,
+                                key: worker.to.backend().key(&worker.queue_id, &file_id),
+                                took: started.elapsed(),
+                                landed_through,
+                            });
                         }
                         break;
                     }
@@ -220,6 +236,20 @@ impl QueueOffloader {
         }
 
         info!("Offload worker stopped for queue_id: {}", worker.queue_id);
+    }
+}
+
+fn widen(range: &mut Option<(UintN, UintN)>, first: &UintN, last: &UintN) {
+    match range {
+        Some((lo, hi)) => {
+            if first < lo {
+                *lo = first.clone();
+            }
+            if last > hi {
+                *hi = last.clone();
+            }
+        }
+        None => *range = Some((first.clone(), last.clone())),
     }
 }
 
@@ -345,7 +375,7 @@ impl QueueOffloaderWorker {
         Ok((body, head))
     }
 
-    async fn report_landed(&self, file_id: &UintN, started: Instant, landed_through: UintN) {
+    async fn local_facts(&self, file_id: &UintN) -> Option<FileFacts> {
         let from = self.from.backend();
         let head = from
             .get_range(&self.queue_id, file_id, 0, HEAD_LEN as u64)
@@ -356,20 +386,16 @@ impl QueueOffloaderWorker {
                 "File {:?} of {} landed but cannot be read back for its facts",
                 file_id, self.queue_id
             );
-            return;
+            return None;
         };
-        match store_file::facts_of_head(&self.queue_id, file_id, &head, len) {
-            Ok(file) => self.events.emit(SystemEvent::FileLanded {
-                file,
-                key: self.to.backend().key(&self.queue_id, file_id),
-                took: started.elapsed(),
-                landed_through,
-            }),
-            Err(e) => warn!(
-                "Uploaded file {:?} of {} but its blocks do not parse: {}",
-                file_id, self.queue_id, e
-            ),
-        }
+        store_file::facts_of_head(&self.queue_id, file_id, &head, len)
+            .inspect_err(|e| {
+                warn!(
+                    "Uploaded file {:?} of {} but its blocks do not parse: {}",
+                    file_id, self.queue_id, e
+                )
+            })
+            .ok()
     }
 
     fn report_failure(&self, file_id: &UintN, failure: UploadFailure, e: &dyn std::fmt::Display) {
