@@ -267,9 +267,11 @@ fn event(event: SystemEvent) -> pb::Event {
             landed_through,
         } => {
             out.file = Some(file(f));
-            out.cloud_key = key;
-            out.upload_ms = millis(took);
-            out.in_cloud_through = Some(id(&landed_through));
+            out.in_cloud = Some(pb::InCloud {
+                key,
+                upload_ms: millis(took),
+                in_cloud_through: Some(id(&landed_through)),
+            });
             T::EtFileInCloud
         }
         SystemEvent::UploadFailed {
@@ -278,23 +280,27 @@ fn event(event: SystemEvent) -> pb::Event {
             message,
             ..
         } => {
-            out.failed_file_id = Some(id(&file_id));
-            out.error = truncated(message);
-            let failure = match failure {
+            let mut failed = pb::UploadFailed {
+                file_id: Some(id(&file_id)),
+                error: truncated(message),
+                ..Default::default()
+            };
+            let reason = match failure {
                 UploadFailure::Network => pb::UploadFailure::UfNetwork,
                 UploadFailure::Status(status) => {
-                    out.http_status = u32::from(status);
+                    failed.http_status = u32::from(status);
                     pb::UploadFailure::UfHttpStatus
                 }
                 UploadFailure::Missing => pb::UploadFailure::UfMissing,
                 UploadFailure::SizeMismatch { local, remote } => {
-                    out.local_bytes = local;
-                    out.remote_bytes = remote;
+                    failed.local_bytes = local;
+                    failed.remote_bytes = remote;
                     pb::UploadFailure::UfSizeMismatch
                 }
                 UploadFailure::LocalRead => pb::UploadFailure::UfLocalRead,
             };
-            out.upload_failure = failure as i32;
+            failed.reason = reason as i32;
+            out.upload_failed = Some(failed);
             T::EtCloudUploadFailed
         }
         SystemEvent::FileEvicted {
@@ -305,14 +311,16 @@ fn event(event: SystemEvent) -> pb::Event {
             in_cloud,
             ..
         } => {
-            out.deleted_kind = match kind {
-                events::FileKind::Wal => pb::FileKind::FkWal,
-                events::FileKind::Store => pb::FileKind::FkStore,
-            } as i32;
-            out.deleted_file_id = Some(id(&file_id));
-            out.deleted_bytes = file_bytes;
-            out.queue_bytes = queue_bytes;
-            out.in_cloud = in_cloud;
+            out.disk_file_deleted = Some(pb::DiskFileDeleted {
+                kind: match kind {
+                    events::FileKind::Wal => pb::FileKind::FkWal,
+                    events::FileKind::Store => pb::FileKind::FkStore,
+                } as i32,
+                file_id: Some(id(&file_id)),
+                bytes: file_bytes,
+                in_cloud,
+                queue_bytes,
+            });
             T::EtDiskFileDeleted
         }
         SystemEvent::EvictionBlocked {
@@ -322,14 +330,16 @@ fn event(event: SystemEvent) -> pb::Event {
             limit_bytes,
             ..
         } => {
-            out.cleanup_blocked_by = match reason {
-                EvictionBlock::NotOffloaded => pb::CleanupBlock::CbNotInCloud,
-                EvictionBlock::DeleteFailed => pb::CleanupBlock::CbDeleteFailed,
-                EvictionBlock::NothingFound => pb::CleanupBlock::CbNothingToFind,
-            } as i32;
-            out.held_at = held_at.as_ref().map(id);
-            out.queue_bytes = queue_bytes;
-            out.limit_bytes = limit_bytes;
+            out.disk_cleanup_blocked = Some(pb::DiskCleanupBlocked {
+                reason: match reason {
+                    EvictionBlock::NotOffloaded => pb::CleanupBlock::CbNotInCloud,
+                    EvictionBlock::DeleteFailed => pb::CleanupBlock::CbDeleteFailed,
+                    EvictionBlock::NothingFound => pb::CleanupBlock::CbNothingToFind,
+                } as i32,
+                held_at: held_at.as_ref().map(id),
+                queue_bytes,
+                limit_bytes,
+            });
             T::EtDiskCleanupBlocked
         }
         SystemEvent::PoolStalled {
@@ -338,9 +348,11 @@ fn event(event: SystemEvent) -> pb::Event {
             resumed,
             ..
         } => {
-            out.waits = waits;
-            out.waiting_ms = millis(stalled_for);
-            out.resumed = resumed;
+            out.memory_wait = Some(pb::MemoryWait {
+                waits,
+                waiting_ms: millis(stalled_for),
+                resumed,
+            });
             T::EtQueueWaitingForMemory
         }
         SystemEvent::QueueStarted {
@@ -351,15 +363,20 @@ fn event(event: SystemEvent) -> pb::Event {
             last_id,
             ..
         } => {
-            out.readonly = readonly;
-            out.wal = wal;
-            out.store = store;
-            out.cloud = cloud;
-            out.last_id = last_id.as_ref().map(id);
+            out.queue_state = Some(pb::QueueState {
+                last_id: last_id.as_ref().map(id),
+                readonly,
+                wal,
+                store,
+                cloud,
+            });
             T::EtQueueOpened
         }
         SystemEvent::QueueClosed { last_id, .. } => {
-            out.last_id = last_id.as_ref().map(id);
+            out.queue_state = Some(pb::QueueState {
+                last_id: last_id.as_ref().map(id),
+                ..Default::default()
+            });
             T::EtQueueClosed
         }
     };

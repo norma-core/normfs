@@ -82,8 +82,9 @@ fn a_landed_file_keeps_its_ids_and_signature() {
     assert_eq!(file.compression, pb::Compression::CZstd as i32);
     assert_eq!(file.encryption, pb::Encryption::EAes as i32);
     assert_eq!(file.content_signature.as_ref(), &[0xAB; 64]);
-    assert_eq!(landed.upload_ms, 250);
-    assert_eq!(landed.in_cloud_through, file.file_id);
+    let in_cloud = landed.in_cloud.unwrap();
+    assert_eq!(in_cloud.upload_ms, 250);
+    assert_eq!(in_cloud.in_cloud_through, file.file_id);
 }
 
 #[test]
@@ -95,8 +96,9 @@ fn an_upload_failure_carries_its_status_and_a_bounded_message() {
         message: "ж".repeat(MAX_MESSAGE),
     });
     assert_eq!(failed.r#type(), pb::EventType::EtCloudUploadFailed);
-    assert_eq!(failed.failed_file_id, Some(id(&UintN::from(3u64))));
-    assert_eq!(failed.upload_failure(), pb::UploadFailure::UfHttpStatus);
+    let failed = failed.upload_failed.unwrap();
+    assert_eq!(failed.file_id, Some(id(&UintN::from(3u64))));
+    assert_eq!(failed.reason(), pb::UploadFailure::UfHttpStatus);
     assert_eq!(failed.http_status, 503);
     assert!(failed.error.len() <= MAX_MESSAGE);
 }

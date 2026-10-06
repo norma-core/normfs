@@ -436,13 +436,14 @@ async fn assert_landed(
     assert_eq!(landed.len() as u64, files, "one record per object");
     for (n, file) in landed.iter().enumerate() {
         let facts = file.file.as_ref().unwrap();
+        let in_cloud = file.in_cloud.as_ref().unwrap();
         let file_id = id_of(&facts.file_id);
         assert_eq!(file_id, UintN::from(n as u64 + 1));
-        assert_eq!(id_of(&file.in_cloud_through), file_id);
+        assert_eq!(id_of(&in_cloud.in_cloud_through), file_id);
         assert_eq!(id_of(&facts.first_id), UintN::from(n as u64 * PER_PAGE));
         assert_eq!(facts.num_entries, PER_PAGE);
         let object = object(cloud, queue, n as u64 + 1).await.unwrap();
-        assert_eq!(file.cloud_key, queue.to_cloud_key(&cloud.prefix, &file_id));
+        assert_eq!(in_cloud.key, queue.to_cloud_key(&cloud.prefix, &file_id));
         assert_eq!(facts.file_bytes, object.len() as u64);
         assert_eq!(facts.content_signature.as_ref(), &object[88..152]);
     }

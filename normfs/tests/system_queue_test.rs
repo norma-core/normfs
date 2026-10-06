@@ -67,9 +67,9 @@ async fn a_stored_file_is_recorded_with_its_entries() {
     fs.flush_queue(&cam).await.unwrap();
 
     let events = wait_for(&fs, |events| !stored(events, cam.as_str()).is_empty()).await;
-    assert!(events
-        .iter()
-        .any(|e| e.r#type() == EventType::EtQueueOpened && e.queue == cam.as_str() && e.store));
+    assert!(events.iter().any(|e| e.r#type() == EventType::EtQueueOpened
+        && e.queue == cam.as_str()
+        && e.queue_state.as_ref().is_some_and(|q| q.store)));
     let file = &stored(&events, cam.as_str())[0];
     assert_eq!(file.num_entries, 10);
     let first = &file.first_id.as_ref().unwrap().raw;

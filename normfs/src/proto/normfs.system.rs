@@ -24,6 +24,97 @@ pub struct File {
     #[prost(bytes = "bytes", tag = "8")]
     pub content_signature: ::prost::bytes::Bytes,
 }
+/// ET_FILE_IN_CLOUD
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct InCloud {
+    #[prost(string, tag = "1")]
+    pub key: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "2")]
+    pub upload_ms: u64,
+    /// Every file of the queue up to this id is in the cloud, so local copies
+    /// up to it may be deleted.
+    #[prost(message, optional, tag = "3")]
+    pub in_cloud_through: ::core::option::Option<super::Id>,
+}
+/// ET_CLOUD_UPLOAD_FAILED. Attempts 1, 2, 4, 8 and so on are reported.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct UploadFailed {
+    #[prost(message, optional, tag = "1")]
+    pub file_id: ::core::option::Option<super::Id>,
+    #[prost(enumeration = "UploadFailure", tag = "2")]
+    pub reason: i32,
+    #[prost(uint32, tag = "3")]
+    pub http_status: u32,
+    #[prost(uint64, tag = "4")]
+    pub local_bytes: u64,
+    #[prost(uint64, tag = "5")]
+    pub remote_bytes: u64,
+    #[prost(string, tag = "6")]
+    pub error: ::prost::alloc::string::String,
+}
+/// ET_DISK_FILE_DELETED
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DiskFileDeleted {
+    #[prost(enumeration = "FileKind", tag = "1")]
+    pub kind: i32,
+    #[prost(message, optional, tag = "2")]
+    pub file_id: ::core::option::Option<super::Id>,
+    #[prost(uint64, tag = "3")]
+    pub bytes: u64,
+    /// The file was in the cloud when it was deleted locally.
+    #[prost(bool, tag = "4")]
+    pub in_cloud: bool,
+    /// The queue's bytes on disk after the deletion.
+    #[prost(uint64, tag = "5")]
+    pub queue_bytes: u64,
+}
+/// ET_DISK_CLEANUP_BLOCKED. Reported once per reason until the queue is back
+/// under the limit or the reason changes.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DiskCleanupBlocked {
+    #[prost(enumeration = "CleanupBlock", tag = "1")]
+    pub reason: i32,
+    /// The file cleanup stopped at.
+    #[prost(message, optional, tag = "2")]
+    pub held_at: ::core::option::Option<super::Id>,
+    #[prost(uint64, tag = "3")]
+    pub queue_bytes: u64,
+    #[prost(uint64, tag = "4")]
+    pub limit_bytes: u64,
+}
+/// ET_QUEUE_WAITING_FOR_MEMORY: when the wait starts, every 30 seconds while it
+/// lasts, and once with resumed when it ends.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MemoryWait {
+    #[prost(uint64, tag = "1")]
+    pub waits: u64,
+    #[prost(uint64, tag = "2")]
+    pub waiting_ms: u64,
+    #[prost(bool, tag = "3")]
+    pub resumed: bool,
+}
+/// ET_QUEUE_OPENED, ET_QUEUE_CLOSED
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct QueueState {
+    #[prost(message, optional, tag = "1")]
+    pub last_id: ::core::option::Option<super::Id>,
+    #[prost(bool, tag = "2")]
+    pub readonly: bool,
+    #[prost(bool, tag = "3")]
+    pub wal: bool,
+    #[prost(bool, tag = "4")]
+    pub store: bool,
+    #[prost(bool, tag = "5")]
+    pub cloud: bool,
+}
+/// The fields after queue belong to the event types named on each; the rest
+/// are left unset.
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Event {
@@ -37,72 +128,21 @@ pub struct Event {
     pub dropped_before: u64,
     #[prost(string, tag = "4")]
     pub queue: ::prost::alloc::string::String,
+    /// ET_FILE_ON_DISK, ET_FILE_IN_CLOUD
     #[prost(message, optional, tag = "10")]
     pub file: ::core::option::Option<File>,
-    /// ET_FILE_IN_CLOUD
-    #[prost(string, tag = "20")]
-    pub cloud_key: ::prost::alloc::string::String,
-    #[prost(uint64, tag = "21")]
-    pub upload_ms: u64,
-    /// Every file of the queue up to this id is in the cloud, so local copies
-    /// up to it may be deleted.
-    #[prost(message, optional, tag = "22")]
-    pub in_cloud_through: ::core::option::Option<super::Id>,
-    /// ET_CLOUD_UPLOAD_FAILED. Attempts 1, 2, 4, 8 and so on are reported.
-    #[prost(message, optional, tag = "30")]
-    pub failed_file_id: ::core::option::Option<super::Id>,
-    #[prost(enumeration = "UploadFailure", tag = "31")]
-    pub upload_failure: i32,
-    #[prost(uint32, tag = "32")]
-    pub http_status: u32,
-    #[prost(uint64, tag = "33")]
-    pub local_bytes: u64,
-    #[prost(uint64, tag = "34")]
-    pub remote_bytes: u64,
-    #[prost(string, tag = "35")]
-    pub error: ::prost::alloc::string::String,
-    /// ET_DISK_FILE_DELETED
-    #[prost(enumeration = "FileKind", tag = "40")]
-    pub deleted_kind: i32,
-    #[prost(message, optional, tag = "41")]
-    pub deleted_file_id: ::core::option::Option<super::Id>,
-    #[prost(uint64, tag = "42")]
-    pub deleted_bytes: u64,
-    /// The file was in the cloud when it was deleted locally.
-    #[prost(bool, tag = "43")]
-    pub in_cloud: bool,
-    /// ET_DISK_FILE_DELETED, ET_DISK_CLEANUP_BLOCKED: the queue's bytes on disk
-    /// after the event.
-    #[prost(uint64, tag = "50")]
-    pub queue_bytes: u64,
-    /// ET_DISK_CLEANUP_BLOCKED. Reported once per reason until the queue is
-    /// back under the limit or the reason changes.
-    #[prost(enumeration = "CleanupBlock", tag = "60")]
-    pub cleanup_blocked_by: i32,
-    /// The file cleanup stopped at.
-    #[prost(message, optional, tag = "61")]
-    pub held_at: ::core::option::Option<super::Id>,
-    #[prost(uint64, tag = "62")]
-    pub limit_bytes: u64,
-    /// ET_QUEUE_WAITING_FOR_MEMORY: when the wait starts, every 30 seconds
-    /// while it lasts, and once with resumed when it ends.
-    #[prost(uint64, tag = "70")]
-    pub waits: u64,
-    #[prost(uint64, tag = "71")]
-    pub waiting_ms: u64,
-    #[prost(bool, tag = "72")]
-    pub resumed: bool,
-    /// ET_QUEUE_OPENED, ET_QUEUE_CLOSED
-    #[prost(message, optional, tag = "80")]
-    pub last_id: ::core::option::Option<super::Id>,
-    #[prost(bool, tag = "81")]
-    pub readonly: bool,
-    #[prost(bool, tag = "82")]
-    pub wal: bool,
-    #[prost(bool, tag = "83")]
-    pub store: bool,
-    #[prost(bool, tag = "84")]
-    pub cloud: bool,
+    #[prost(message, optional, tag = "11")]
+    pub in_cloud: ::core::option::Option<InCloud>,
+    #[prost(message, optional, tag = "12")]
+    pub upload_failed: ::core::option::Option<UploadFailed>,
+    #[prost(message, optional, tag = "13")]
+    pub disk_file_deleted: ::core::option::Option<DiskFileDeleted>,
+    #[prost(message, optional, tag = "14")]
+    pub disk_cleanup_blocked: ::core::option::Option<DiskCleanupBlocked>,
+    #[prost(message, optional, tag = "15")]
+    pub memory_wait: ::core::option::Option<MemoryWait>,
+    #[prost(message, optional, tag = "16")]
+    pub queue_state: ::core::option::Option<QueueState>,
 }
 /// What NormFS did with a queue's files, one Event per record of
 /// `<instance>/normfs/system`. Only NormFS writes there.
@@ -124,26 +164,23 @@ pub enum EventType {
     /// the queue's store directory. Set: file.
     EtFileOnDisk = 0,
     /// The store file is in the bucket and its size was read back, so readers
-    /// can fetch it from there. Set: file, cloud_key, upload_ms,
-    /// in_cloud_through.
+    /// can fetch it from there. Set: file, in_cloud.
     EtFileInCloud = 1,
     /// One upload attempt failed; it is retried every second. Set:
-    /// failed_file_id, upload_failure, error, and http_status or
-    /// local_bytes/remote_bytes when they apply.
+    /// upload_failed.
     EtCloudUploadFailed = 2,
     /// The disk monitor deleted a local file to keep the queue under its limit.
-    /// Set: deleted_kind, deleted_file_id, deleted_bytes, in_cloud,
-    /// queue_bytes.
+    /// Set: disk_file_deleted.
     EtDiskFileDeleted = 3,
     /// The queue is over its disk limit but the next file may not be deleted.
-    /// Set: cleanup_blocked_by, held_at, queue_bytes, limit_bytes.
+    /// Set: disk_cleanup_blocked.
     EtDiskCleanupBlocked = 4,
     /// Appenders of the queue are waiting for a memory page: files are not
-    /// draining it fast enough. Set: waits, waiting_ms, resumed.
+    /// draining it fast enough. Set: memory_wait.
     EtQueueWaitingForMemory = 5,
-    /// Set: last_id, readonly, wal, store, cloud.
+    /// Set: queue_state.
     EtQueueOpened = 6,
-    /// Set: last_id.
+    /// Set: queue_state (last_id).
     EtQueueClosed = 7,
 }
 impl EventType {
