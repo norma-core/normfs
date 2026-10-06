@@ -4,7 +4,7 @@ use bytes::Bytes;
 use normfs_types::{DataSource, End, QueueId, ReadEntry};
 use std::{collections::HashMap, sync::Arc, sync::RwLock};
 use tokio::sync::mpsc;
-use uintn::{UintN, paths};
+use uintn::UintN;
 use writer::WalWriter;
 
 mod ack_file_writer;
@@ -199,7 +199,7 @@ impl WalStore {
     pub async fn find_last_file_id(&self, queue: &QueueId) -> Result<UintN, WalError> {
         match self.backend.find(queue, End::Max).await? {
             Some(id) => Ok(id),
-            None => Err(WalError::PathError(paths::PathError::NoFilesFound)),
+            None => Err(WalError::PathError(normfs_fs::PathError::NoFilesFound)),
         }
     }
 
@@ -429,7 +429,7 @@ impl WalStore {
             .backend
             .list(queue)
             .await
-            .map_err(|e| paths::PathError::Io(e.into()));
+            .map_err(|e| normfs_fs::PathError::Io(e.into()));
         match file_ids {
             Ok(file_ids) => {
                 let mut sent_count = 0;

@@ -8,7 +8,6 @@ use std::path::PathBuf;
 use std::{path::Path, sync::Arc};
 use tokio::sync::{Mutex, broadcast, mpsc};
 use tokio::task::JoinHandle;
-use uintn::paths;
 use uintn::{Error as UintNError, UintN};
 
 use crate::layer::LayerError;
@@ -69,7 +68,7 @@ pub enum StoreError {
     UintN(UintNError),
     Range(LayerError),
     Backend(BackendError),
-    Path(paths::PathError),
+    Path(normfs_fs::PathError),
     WalHeaderError(AnyWalHeaderError),
     FileNotFound,
     SignatureVerificationFailed,
@@ -170,8 +169,8 @@ impl From<normfs_fs::FsError> for StoreError {
     }
 }
 
-impl From<paths::PathError> for StoreError {
-    fn from(e: paths::PathError) -> Self {
+impl From<normfs_fs::PathError> for StoreError {
+    fn from(e: normfs_fs::PathError) -> Self {
         StoreError::Path(e)
     }
 }
@@ -466,7 +465,7 @@ impl PersistStore {
         self.local
             .last_file_id(queue)
             .await?
-            .ok_or(StoreError::Path(paths::PathError::NoFilesFound))
+            .ok_or(StoreError::Path(normfs_fs::PathError::NoFilesFound))
     }
 
     pub async fn get_file_range(

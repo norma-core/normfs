@@ -11,7 +11,7 @@ pub enum WalError {
     AnyWalHeaderError(AnyWalHeaderError),
     WalEntryError(WalEntryError),
     WalEntryV1Error(WalEntryV1Error),
-    PathError(uintn::paths::PathError),
+    PathError(normfs_fs::PathError),
     SendError,
     WalNotFound,
     WriterNotFound,

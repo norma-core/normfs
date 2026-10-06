@@ -2,7 +2,6 @@ use dashu_int::UBig;
 use std::fmt;
 use std::path::PathBuf;
 mod containers;
-pub mod paths;
 pub mod varint;
 
 #[cfg(test)]

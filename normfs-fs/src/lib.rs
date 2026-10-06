@@ -44,7 +44,7 @@ mod scan_test;
 
 pub use executor::Accounting;
 pub use plan::{Op, PlanError, TmpMode};
-pub use scan::{Scan, ScanResult};
+pub use scan::{PathError, Scan, ScanResult};
 
 use executor::{Executor, Job, PlanJob, Resources, Task};
 use plan::Plan;

@@ -13,7 +13,6 @@ links = "normfs_uintn_c"
 dashu-int = "0.4.1"
 hex = "0.4"
 bytes = { workspace = true }
-walkdir = "2.5"
 
 [build-dependencies]
 cc = "1"
