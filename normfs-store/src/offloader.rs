@@ -165,7 +165,14 @@ impl Moved {
     /// land, and publishes it.
     async fn advance(&mut self, worker: &QueueOffloaderWorker, shared: &Shared) -> Option<UintN> {
         if self.next.is_none() {
-            self.next = worker.first_id(shared, &self.above).await;
+            match worker.first_id(shared, &self.above).await {
+                Ok(first) => self.next = first,
+                Err(e) => warn!(
+                    "queue {}: cannot find where its files start ({}); the offloaded \
+                     bound waits",
+                    worker.queue_id, e
+                ),
+            }
         }
         if let Some(next) = self.next.as_mut() {
             loop {
@@ -216,32 +223,30 @@ struct QueueOffloaderWorker {
 
 impl QueueOffloaderWorker {
     /// The files already in the layer when the worker starts.
+    /// A failed scan is retried: files it would miss stay below the bound and
+    /// would hold it for good.
     async fn queue_existing(&self, shared: &Shared) {
         let from = self.from.backend();
-        let found = async {
-            let Some(first) = from.find(&self.queue_id, End::Min).await? else {
-                return Ok(None);
-            };
-            let last = from
-                .find(&self.queue_id, End::Max)
-                .await?
-                .unwrap_or(first.clone());
-            Ok::<_, BackendError>(Some((first, last)))
-        };
-        let (mut id, last) = match found.await {
-            Ok(Some(range)) => range,
-            Ok(None) => return,
-            Err(e) => {
-                error!(
-                    "Failed to scan store files of queue {}: {}",
-                    self.queue_id, e
-                );
-                return;
+        let found = loop {
+            match self.scan_existing().await {
+                Ok(found) => break found,
+                Err(e) => {
+                    error!(
+                        "Failed to scan store files of queue {}: {}, retrying in 1 second",
+                        self.queue_id, e
+                    );
+                    tokio::time::sleep(RETRY_DELAY).await;
+                }
             }
+        };
+        let Some((mut id, last)) = found else {
+            return;
         };
         info!("Found store files from {:?} to {:?}", id, last);
         loop {
-            if let Ok(Some(_)) = from.size(&self.queue_id, &id).await {
+            // A file whose size cannot be read is still tried: skipping it
+            // would hold the bound below it for good.
+            if !matches!(from.size(&self.queue_id, &id).await, Ok(None)) {
                 shared.pending.lock().unwrap().insert(id.clone());
             }
             if id >= last {
@@ -251,11 +256,27 @@ impl QueueOffloaderWorker {
         }
     }
 
+    async fn scan_existing(&self) -> Result<Option<(UintN, UintN)>, BackendError> {
+        let from = self.from.backend();
+        let Some(first) = from.find(&self.queue_id, End::Min).await? else {
+            return Ok(None);
+        };
+        let last = from
+            .find(&self.queue_id, End::Max)
+            .await?
+            .unwrap_or(first.clone());
+        Ok(Some((first, last)))
+    }
+
     /// Where the queue's files start: nothing below the lowest file still in
     /// the WAL, in the first layer, waiting or moved can land any more. The
     /// WAL is looked at first because a migrated file reaches the first layer
-    /// before its WAL file is deleted.
-    async fn first_id(&self, shared: &Shared, moved: &BTreeSet<UintN>) -> Option<UintN> {
+    /// before its WAL file is deleted. A failed look decides nothing.
+    async fn first_id(
+        &self,
+        shared: &Shared,
+        moved: &BTreeSet<UintN>,
+    ) -> Result<Option<UintN>, BackendError> {
         let mut first = moved.first().cloned();
         let mut lower = |id: Option<UintN>| {
             if let Some(id) = id
@@ -265,37 +286,41 @@ impl QueueOffloaderWorker {
             }
         };
         if let Some(wal) = &self.wal {
-            lower(wal.find(&self.queue_id, End::Min).await.ok().flatten());
+            lower(wal.find(&self.queue_id, End::Min).await?);
         }
-        lower(
-            self.from
-                .backend()
-                .find(&self.queue_id, End::Min)
-                .await
-                .ok()
-                .flatten(),
-        );
+        lower(self.from.backend().find(&self.queue_id, End::Min).await?);
         lower(shared.pending.lock().unwrap().first().cloned());
-        first
+        Ok(first)
     }
 
     /// Whether `file_id` may still reach the next layer through this worker.
     /// A file lands in the first layer before its WAL file is deleted and WAL
     /// files are made in id order, so an id below a moved one that is in
     /// neither place never will.
+    /// A failed look counts as "may".
     async fn may_land(&self, shared: &Shared, file_id: &UintN) -> bool {
         if shared.pending.lock().unwrap().contains(file_id) {
             return true;
         }
-        if let Some(wal) = &self.wal
-            && !matches!(wal.size(&self.queue_id, file_id).await, Ok(None))
-        {
-            return true;
+        let mut places = vec![self.from.backend()];
+        if let Some(wal) = &self.wal {
+            places.insert(0, wal);
         }
-        !matches!(
-            self.from.backend().size(&self.queue_id, file_id).await,
-            Ok(None)
-        )
+        for place in places {
+            match place.size(&self.queue_id, file_id).await {
+                Ok(None) => {}
+                Ok(Some(_)) => return true,
+                Err(e) => {
+                    warn!(
+                        "queue {}: cannot tell whether file {:?} may still land ({}); \
+                         the offloaded bound waits for it",
+                        self.queue_id, file_id, e
+                    );
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     async fn move_file(&self, file_id: &UintN) -> Outcome {

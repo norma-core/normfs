@@ -347,3 +347,110 @@ async fn an_id_that_can_no_longer_land_does_not_hold_the_bound() {
     .await
     .expect("the bound passes an id that can no longer land");
 }
+
+/// A WAL whose lookups fail while `broken` is set.
+#[derive(Default)]
+struct Flaky {
+    inner: Memory,
+    broken: std::sync::atomic::AtomicBool,
+}
+
+impl Flaky {
+    fn check(&self) -> Result<(), BackendError> {
+        if self.broken.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(BackendError::Io(std::io::Error::other("scan failed")));
+        }
+        Ok(())
+    }
+}
+
+impl Backend for Flaky {
+    fn source(&self) -> DataSource {
+        DataSource::DiskStore
+    }
+
+    fn key(&self, queue: &QueueId, file_id: &UintN) -> String {
+        self.inner.key(queue, file_id)
+    }
+
+    fn put<'a>(&'a self, q: &'a QueueId, id: &'a UintN, body: Body) -> BackendFuture<'a, ()> {
+        self.inner.put(q, id, body)
+    }
+
+    fn get<'a>(&'a self, q: &'a QueueId, id: &'a UintN) -> BackendFuture<'a, Option<Bytes>> {
+        Box::pin(async move {
+            self.check()?;
+            self.inner.get(q, id).await
+        })
+    }
+
+    fn body<'a>(&'a self, q: &'a QueueId, id: &'a UintN) -> BackendFuture<'a, Option<Body>> {
+        Box::pin(async move {
+            self.check()?;
+            self.inner.body(q, id).await
+        })
+    }
+
+    fn get_range<'a>(
+        &'a self,
+        q: &'a QueueId,
+        id: &'a UintN,
+        offset: u64,
+        len: u64,
+    ) -> BackendFuture<'a, Option<Bytes>> {
+        Box::pin(async move {
+            self.check()?;
+            self.inner.get_range(q, id, offset, len).await
+        })
+    }
+
+    fn size<'a>(&'a self, q: &'a QueueId, id: &'a UintN) -> BackendFuture<'a, Option<u64>> {
+        Box::pin(async move {
+            self.check()?;
+            self.inner.size(q, id).await
+        })
+    }
+
+    fn find<'a>(&'a self, q: &'a QueueId, end: End) -> BackendFuture<'a, Option<UintN>> {
+        Box::pin(async move {
+            self.check()?;
+            self.inner.find(q, end).await
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_failed_wal_scan_does_not_let_the_bound_pass_a_file_still_there() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let local = local_layer(&temp);
+    let queue = QueueIdResolver::new("inst").resolve("cam");
+    let wal = Arc::new(Flaky::default());
+    put(wal.as_ref(), &queue, 1).await;
+    wal.broken.store(true, std::sync::atomic::Ordering::SeqCst);
+    put(local.as_ref(), &queue, 2).await;
+
+    let remote = Arc::new(Memory::default());
+    let offloader = QueueOffloader::new(
+        Arc::new(Layer::new(local, None, false)),
+        Arc::new(Layer::new(remote.clone(), None, true)),
+        Some(wal.clone()),
+        queue.clone(),
+        events::discard(),
+    )
+    .await;
+    offloader.file_landed(UintN::from(2u64));
+    wait_for("file 2 in the next layer", async || {
+        remote
+            .size(&queue, &UintN::from(2u64))
+            .await
+            .unwrap()
+            .is_some()
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let bound = offloader.get_latest_offloaded_id().await;
+    assert!(
+        bound.as_ref().is_none_or(|b| b < &UintN::from(1u64)),
+        "the bound reached {bound:?} with file 1 still in the WAL"
+    );
+}
