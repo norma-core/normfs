@@ -3,6 +3,7 @@ use std::{sync::Arc, time::Duration};
 use log::{error, info, warn};
 use normfs_types::QueueId;
 use normfs_types::events::{EventSink, FileFacts, SystemEvent, UploadFailure};
+use normfs_wal::WAL_HEADER_V1_MIN_SIZE;
 use std::collections::BTreeSet;
 use std::sync::Mutex;
 use tokio::sync::Notify;
@@ -76,10 +77,12 @@ struct Shared {
     moved_through: Mutex<Option<UintN>>,
 }
 
-/// Rechecks a gap below moved files while nothing else wakes the worker, so a
-/// WAL file that goes away without becoming a store file does not hold the
-/// bound for good.
+/// Rechecks a gap below moved files while nothing else wakes the worker: a
+/// WAL file removed without becoming a store file is never reported to it.
 const GAP_RECHECK: Duration = Duration::from_secs(5);
+
+/// How long one id may hold the bound below moved files before it is logged.
+const HELD_WARN: Duration = Duration::from_secs(60);
 
 impl QueueOffloader {
     /// `wal` is where the files of `from` come from when they are migrated,
@@ -152,6 +155,13 @@ struct Moved {
     /// first move fixes where the queue's files start.
     next: Option<UintN>,
     above: BTreeSet<UintN>,
+    held: Option<Held>,
+}
+
+struct Held {
+    id: UintN,
+    since: Instant,
+    logged: bool,
 }
 
 impl Moved {
@@ -193,6 +203,7 @@ impl Moved {
                 *next = next.increment();
             }
         }
+        self.note_held(worker);
         let through = self
             .next
             .as_ref()
@@ -200,6 +211,31 @@ impl Moved {
             .and_then(|next| next.sub(&UintN::one()).ok());
         *shared.moved_through.lock().unwrap() = through.clone();
         through
+    }
+
+    fn note_held(&mut self, worker: &QueueOffloaderWorker) {
+        let Some(next) = self.next.as_ref().filter(|_| !self.above.is_empty()) else {
+            self.held = None;
+            return;
+        };
+        if self.held.as_ref().is_none_or(|held| &held.id != next) {
+            self.held = Some(Held {
+                id: next.clone(),
+                since: Instant::now(),
+                logged: false,
+            });
+        }
+        let Some(held) = self.held.as_mut() else {
+            return;
+        };
+        if !held.logged && held.since.elapsed() >= HELD_WARN {
+            held.logged = true;
+            warn!(
+                "queue {}: file {:?} has held the offloaded bound for over {:?} with later \
+                 files moved; eviction stops below it until it moves or leaves the WAL",
+                worker.queue_id, held.id, HELD_WARN
+            );
+        }
     }
 }
 
@@ -273,9 +309,8 @@ impl QueueOffloaderWorker {
     }
 
     /// Where the queue's files start: nothing below the lowest file still in
-    /// the WAL, in the first layer, waiting or moved can land any more. The
-    /// WAL is looked at first because a migrated file reaches the first layer
-    /// before its WAL file is deleted. A failed look decides nothing.
+    /// the WAL, in the first layer, waiting or moved can land any more. A
+    /// failed look decides nothing.
     async fn first_id(
         &self,
         shared: &Shared,
@@ -301,19 +336,19 @@ impl QueueOffloaderWorker {
     /// A file lands in the first layer before its WAL file is deleted and WAL
     /// files are made in id order, so an id below a moved one that is in
     /// neither place never will.
-    /// A failed look counts as "may".
     async fn may_land(&self, shared: &Shared, file_id: &UintN) -> bool {
         if shared.pending.lock().unwrap().contains(file_id) {
             return true;
         }
-        let mut places = vec![self.from.backend()];
+        let mut places = vec![(self.from.backend(), 0)];
         if let Some(wal) = &self.wal {
-            places.insert(0, wal);
+            // Too short for a header, it holds no entry and never migrates.
+            places.insert(0, (wal, WAL_HEADER_V1_MIN_SIZE as u64));
         }
-        for place in places {
+        for (place, least) in places {
             match place.size(&self.queue_id, file_id).await {
-                Ok(None) => {}
-                Ok(Some(_)) => return true,
+                Ok(Some(len)) if len >= least => return true,
+                Ok(_) => {}
                 Err(e) => {
                     warn!(
                         "queue {}: cannot tell whether file {:?} may still land ({}); \
