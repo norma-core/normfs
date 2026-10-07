@@ -82,6 +82,9 @@ const GAP_RECHECK: Duration = Duration::from_secs(5);
 /// How long one id may hold the bound below moved files before it is logged.
 const HELD_WARN: Duration = Duration::from_secs(60);
 
+/// Landed records kept while there is no bound to carry; later ones are dropped.
+const MAX_HELD_RECORDS: usize = 1024;
+
 impl QueueOffloader {
     /// `wal` is where the files of `from` come from when they are migrated,
     /// if anywhere: an id still there may yet land in `from`.
@@ -123,6 +126,7 @@ impl QueueOffloader {
         let mut moved = Moved::default();
         // Records of files this worker put, held until there is a bound to carry.
         let mut landed = Vec::new();
+        let mut dropped: u64 = 0;
         // Files that could not be read, with the attempts made so far.
         let mut later = BTreeMap::new();
         let mut retry_at = Instant::now();
@@ -151,7 +155,20 @@ impl QueueOffloader {
             match worker.move_file(&file_id, tried).await {
                 Outcome::Moved(put) => {
                     moved.mark(file_id);
-                    landed.extend(put.map(|put| *put));
+                    if let Some(put) = put {
+                        if landed.len() < MAX_HELD_RECORDS {
+                            landed.push(*put);
+                        } else {
+                            dropped += 1;
+                            if dropped.is_power_of_two() {
+                                warn!(
+                                    "queue {}: {} landed records dropped while the offloaded \
+                                     bound is unknown",
+                                    worker.queue_id, dropped
+                                );
+                            }
+                        }
+                    }
                 }
                 Outcome::Later(tried) => {
                     later.insert(file_id, tried);
@@ -173,6 +190,7 @@ struct Moved {
     next: Option<UintN>,
     above: BTreeSet<UintN>,
     held: Option<Held>,
+    start_failures: u32,
 }
 
 struct Held {
@@ -198,11 +216,16 @@ impl Moved {
         if self.next.is_none() {
             match worker.first_id(shared, &self.above).await {
                 Ok(first) => self.next = first,
-                Err(e) => warn!(
-                    "queue {}: cannot find where its files start ({}); the offloaded \
-                     bound waits",
-                    worker.queue_id, e
-                ),
+                Err(e) => {
+                    self.start_failures = self.start_failures.saturating_add(1);
+                    if self.start_failures.is_power_of_two() {
+                        warn!(
+                            "queue {}: cannot find where its files start ({}, {} tries); \
+                             the offloaded bound waits",
+                            worker.queue_id, e, self.start_failures
+                        );
+                    }
+                }
             }
         }
         if let Some(next) = self.next.as_mut() {
