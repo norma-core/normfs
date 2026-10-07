@@ -190,7 +190,6 @@ impl Layer {
             .remove(&Self::key(queue, file_id));
     }
 
-    /// The first id of the queue's oldest file here.
     pub async fn get_queue_start(&self, queue: &QueueId) -> Result<Option<UintN>, LayerError> {
         match self.first_file_id(queue).await? {
             Some(first) => Ok(self.get_file_range(queue, &first).await?.map(|r| r.0)),

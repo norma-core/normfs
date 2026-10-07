@@ -153,12 +153,14 @@ pub type Reader = Box<dyn FileRead>;
 /// How an append ended.
 #[derive(Debug)]
 pub enum Appended {
-    /// The bytes are durable.
     Committed,
     /// Nothing is committed. `restored` says the file is back at the length
     /// the append started from, so the same append may be tried again;
     /// without it, [`AppendTarget::restore`] first.
-    Failed { err: io::Error, restored: bool },
+    Failed {
+        err: io::Error,
+        restored: bool,
+    },
 }
 
 /// What [`Backend::read_into`] put in the slot.
@@ -171,7 +173,6 @@ pub enum Fill {
 
 /// One file, open to be appended to at a known length.
 pub trait AppendTarget: Send + Sync {
-    /// For logs.
     fn name(&self) -> &str;
 
     /// Writes `runs` at `at`. `Committed` means they are durable there, and
@@ -235,7 +236,6 @@ pub trait Backend: Send + Sync {
     fn size<'a>(&'a self, queue: &'a QueueId, file_id: &'a UintN)
     -> BackendFuture<'a, Option<u64>>;
 
-    /// The lowest or highest file id the queue has here.
     fn find<'a>(&'a self, queue: &'a QueueId, end: End) -> BackendFuture<'a, Option<UintN>>;
 
     fn list<'a>(&'a self, _queue: &'a QueueId) -> BackendFuture<'a, Vec<UintN>> {

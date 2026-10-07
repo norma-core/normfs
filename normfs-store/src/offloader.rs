@@ -59,7 +59,6 @@ pub struct QueueOffloader {
     worker: JoinHandle<()>,
 }
 
-/// The worker holds the layers and backends; it ends with its handle.
 impl Drop for QueueOffloader {
     fn drop(&mut self) {
         self.worker.abort();
