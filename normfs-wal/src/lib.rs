@@ -1,13 +1,14 @@
 #![allow(clippy::too_many_arguments)]
 
 use bytes::Bytes;
-use normfs_types::{DataSource, QueueId, ReadEntry};
-use std::{collections::HashMap, path::PathBuf, sync::RwLock};
+use normfs_types::{DataSource, End, QueueId, ReadEntry};
+use std::{collections::HashMap, sync::Arc, sync::RwLock};
 use tokio::sync::mpsc;
-use uintn::{UintN, paths};
+use uintn::UintN;
 use writer::WalWriter;
 
 mod ack_file_writer;
+pub mod backend;
 mod drainer;
 mod errors;
 mod pack_pool;
@@ -22,10 +23,14 @@ mod wal_ring_v1;
 mod writer;
 mod writer_buffer;
 
+pub use backend::{
+    AppendTarget, Appended, Backend, BackendError, BackendFuture, Body, FileRead, Fill, Layout,
+    Local, Publisher, Reader,
+};
 pub use errors::*;
 #[cfg(any(test, feature = "fault-injection"))]
 pub use normfs_fs::fault::{fail_flushes, heal};
-pub use normfs_fs::{Fs, FsConfig, Scan, ScanResult};
+pub use normfs_fs::{Fs, FsConfig};
 pub use pack_pool::{PackPool, PackSlot};
 pub use page_pool::{
     FileRuns, MIN_PAGE_SIZE, PagePool, PendingWrite, Placement, PoolError, RotateHint,
@@ -48,6 +53,9 @@ pub use wal_header_v1::{
     WalHeaderV1Error, peek_version as peek_wal_header_version,
 };
 pub use wal_ring_v1::{AppendOutcome, WalRing};
+
+#[cfg(test)]
+mod backend_test;
 
 #[cfg(test)]
 mod wal_header_test;
@@ -123,8 +131,7 @@ impl Default for WalSettings {
 }
 
 pub struct WalStore {
-    root: PathBuf,
-    fs: Fs,
+    backend: Arc<dyn Backend>,
     written_sender: mpsc::UnboundedSender<(QueueId, UintN)>,
     wal_complete_sender: mpsc::UnboundedSender<WalFile>,
     writers: RwLock<HashMap<QueueId, WalWriter>>,
@@ -163,30 +170,36 @@ impl WalStore {
         wal_complete_sender: mpsc::UnboundedSender<WalFile>,
         fs: Fs,
     ) -> Self {
-        let root_path = root.as_ref().to_path_buf();
-        log::info!("WalStore: initializing at path: {:?}", root_path);
+        log::info!("WalStore: initializing at path: {:?}", root.as_ref());
+        Self::with_backend(
+            Arc::new(Local::wal(fs, root)),
+            written_sender,
+            wal_complete_sender,
+        )
+    }
 
+    pub fn with_backend(
+        backend: Arc<dyn Backend>,
+        written_sender: mpsc::UnboundedSender<(QueueId, UintN)>,
+        wal_complete_sender: mpsc::UnboundedSender<WalFile>,
+    ) -> Self {
         Self {
-            root: root_path,
-            fs,
+            backend,
             written_sender,
             wal_complete_sender,
             writers: RwLock::new(HashMap::new()),
         }
     }
 
-    pub fn fs(&self) -> &Fs {
-        &self.fs
+    pub fn backend(&self) -> &Arc<dyn Backend> {
+        &self.backend
     }
 
     /// Get the latest WAL file ID for a queue.
     pub async fn find_last_file_id(&self, queue: &QueueId) -> Result<UintN, WalError> {
-        let queue_path = queue.to_wal_dir(&self.root);
-        // A lookup creates nothing: a queue that never wrote a WAL file has no
-        // WAL directory, and a restart reads that absence.
-        match self.fs.scan_ids(&queue_path, "wal", Scan::Max).await? {
-            ScanResult::One(id) => Ok(id),
-            _ => Err(WalError::PathError(paths::PathError::NoFilesFound)),
+        match self.backend.find(queue, End::Max).await? {
+            Some(id) => Ok(id),
+            None => Err(WalError::PathError(normfs_fs::PathError::NoFilesFound)),
         }
     }
 
@@ -197,9 +210,8 @@ impl WalStore {
         queue_id: &QueueId,
         file_id: &UintN,
     ) -> Result<Option<UintN>, WalError> {
-        let queue_path = queue_id.to_wal_dir(&self.root);
-
-        match reader::get_wal_range(&self.fs, &queue_path, file_id).await {
+        let file = self.backend.open_read(queue_id, file_id).await?;
+        match reader::get_wal_range_from(file, file_id).await {
             Ok((_, entries)) => Ok(entries.map(|(_, last)| last)),
             Err(WalError::WalEmpty(_)) => Ok(None),
             Err(WalError::WalNotFound) => Ok(None),
@@ -217,9 +229,15 @@ impl WalStore {
         }
     }
 
-    pub fn wal_file_path(&self, queue_id: &QueueId, file_id: &UintN) -> PathBuf {
-        let queue_path = queue_id.to_wal_dir(&self.root);
-        file_id.to_file_path(queue_path.to_str().unwrap(), "wal")
+    /// The whole file into `slot` when it fits; see [`Backend::read_into`].
+    pub async fn read_into(
+        &self,
+        queue_id: &QueueId,
+        file_id: &UintN,
+        slot: PackSlot,
+        cap: usize,
+    ) -> Result<(PackSlot, Fill), WalError> {
+        Ok(self.backend.read_into(queue_id, file_id, slot, cap).await?)
     }
 
     pub async fn get_wal_file_content(
@@ -233,8 +251,8 @@ impl WalStore {
             file_id
         );
 
-        let queue_path = queue_id.to_wal_dir(&self.root);
-        let content = reader::get_wal_content(&self.fs, &queue_path, file_id).await?;
+        let content = self.backend.get(queue_id, file_id).await?;
+        let content = reader::get_wal_content_from(content, file_id)?;
 
         log::debug!(
             "WalStore: retrieved content for queue '{}', file {}, entries: {}, entries_before: {}",
@@ -266,10 +284,9 @@ impl WalStore {
             step
         );
 
-        let queue_path = queue_id.to_wal_dir(&self.root);
-        let result = reader::read_wal_file_range(
-            &self.fs,
-            &queue_path,
+        let file = self.backend.open_read(queue_id, file_id).await?;
+        let result = reader::read_wal_file_range_from(
+            file,
             file_id,
             from_id,
             until_id,
@@ -303,10 +320,7 @@ impl WalStore {
     pub async fn truncate(&self, queue_id: &QueueId) -> Result<(), WalError> {
         log::info!("WalStore: truncating WAL for queue '{}'", queue_id);
 
-        let queue_path = queue_id.to_wal_dir(&self.root);
-
-        self.fs.remove_dir_all(&queue_path).await?;
-        self.fs.mkdir_all(&queue_path).await?;
+        self.backend.clear(queue_id).await?;
 
         Ok(())
     }
@@ -362,9 +376,7 @@ impl WalStore {
             header.id_size_bytes
         );
 
-        // Create WAL directory if needed
-        let queue_fs_path = queue.to_wal_dir(&self.root);
-        self.fs.mkdir_all(&queue_fs_path).await?;
+        self.backend.prepare(queue).await?;
 
         // Note: normfs core already performed recovery and determined the correct file_id to use.
         // The file_id provided here is either:
@@ -373,9 +385,8 @@ impl WalStore {
         // Old completed files will be processed asynchronously via process_old_files()
 
         let writer = WalWriter::new(
-            self.fs.clone(),
+            self.backend.clone(),
             queue,
-            &self.root,
             file_id,
             header,
             settings,
@@ -408,19 +419,17 @@ impl WalStore {
         compression_type: normfs_types::CompressionType,
         encryption_type: normfs_types::EncryptionType,
     ) -> Result<(), WalError> {
-        log::info!(
+        log::debug!(
             "WalStore: processing old files for queue '{}', current file: {} (not included)",
             queue,
             current_file_id
         );
 
-        let queue_fs_path = queue.to_wal_dir(&self.root);
-
-        let file_ids = match self.fs.scan_ids(&queue_fs_path, "wal", Scan::All).await {
-            Ok(ScanResult::All(ids)) => Ok(ids),
-            Ok(_) => Ok(Vec::new()),
-            Err(e) => Err(paths::PathError::Io(e.into())),
-        };
+        let file_ids = self
+            .backend
+            .list(queue)
+            .await
+            .map_err(|e| normfs_fs::PathError::Io(e.into()));
         match file_ids {
             Ok(file_ids) => {
                 let mut sent_count = 0;
@@ -456,14 +465,7 @@ impl WalStore {
                     queue
                 );
             }
-            Err(e) => {
-                log::error!(
-                    "WalStore: error listing wal files for queue '{}': {}",
-                    queue,
-                    e
-                );
-                return Err(WalError::PathError(e));
-            }
+            Err(e) => return Err(WalError::PathError(e)),
         }
 
         Ok(())
@@ -601,8 +603,7 @@ impl WalStore {
             queue_id
         );
 
-        let file_path = queue_id.to_wal_path(&self.root, file_id);
-        self.fs.unlink(&file_path).await?;
+        self.backend.delete(queue_id, file_id).await?;
 
         log::debug!(
             "WalStore: successfully deleted file {} for queue '{}'",
@@ -623,8 +624,8 @@ impl WalStore {
             file_id
         );
 
-        let queue_path = queue_id.to_wal_dir(&self.root);
-        let header = reader::read_wal_header(&self.fs, &queue_path, file_id).await?;
+        let file = self.backend.open_read(queue_id, file_id).await?;
+        let header = reader::read_wal_header_from(file, file_id).await?;
 
         log::debug!(
             "WalStore: file {} for queue '{}' has {} entries before",
@@ -649,8 +650,8 @@ impl WalStore {
             file_id
         );
 
-        let queue_path = queue_id.to_wal_dir(&self.root);
-        match reader::read_wal_header(&self.fs, &queue_path, file_id).await {
+        let file = self.backend.open_read(queue_id, file_id).await?;
+        match reader::read_wal_header_from(file, file_id).await {
             Ok(header) => {
                 log::info!(
                     "WalStore: file {} for queue '{}' - data_size={}, id_size={}, entries_before={}",
@@ -677,9 +678,8 @@ impl WalStore {
     pub async fn get_first_file_id(&self, queue_id: &QueueId) -> Result<Option<UintN>, WalError> {
         log::debug!("WalStore: getting first file ID for queue '{}'", queue_id);
 
-        let queue_path = queue_id.to_wal_dir(&self.root);
-        match self.fs.scan_ids(&queue_path, "wal", Scan::Min).await? {
-            ScanResult::One(id) => {
+        match self.backend.find(queue_id, End::Min).await? {
+            Some(id) => {
                 log::debug!("WalStore: first file ID for queue '{}' is {}", queue_id, id);
                 Ok(Some(id))
             }
@@ -693,9 +693,8 @@ impl WalStore {
     pub async fn get_last_file_id(&self, queue_id: &QueueId) -> Result<Option<UintN>, WalError> {
         log::debug!("WalStore: getting last file ID for queue '{}'", queue_id);
 
-        let queue_path = queue_id.to_wal_dir(&self.root);
-        let last_file = match self.fs.scan_ids(&queue_path, "wal", Scan::Max).await? {
-            ScanResult::One(file) => {
+        let last_file = match self.backend.find(queue_id, End::Max).await? {
+            Some(file) => {
                 log::debug!(
                     "WalStore: last file ID for queue '{}' is {}",
                     queue_id,
@@ -725,32 +724,13 @@ impl WalStore {
             file_id
         );
 
-        let file_path = queue_id.to_wal_path(&self.root, file_id);
-
-        match self
-            .fs
-            .read_whole(&file_path)
-            .await
-            .map_err(std::io::Error::from)
-        {
-            Ok(bytes) => {
-                log::debug!(
-                    "WalStore: read {} bytes for queue '{}', file {}",
-                    bytes.len(),
-                    queue_id,
-                    file_id
-                );
-                Ok(Some(bytes))
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                log::debug!(
-                    "WalStore: file {} not found for queue '{}'",
-                    file_id,
-                    queue_id
-                );
-                Ok(None)
-            }
-            Err(e) => Err(e.into()),
-        }
+        let bytes = self.backend.get(queue_id, file_id).await?;
+        log::debug!(
+            "WalStore: read {:?} bytes for queue '{}', file {}",
+            bytes.as_ref().map(Bytes::len),
+            queue_id,
+            file_id
+        );
+        Ok(bytes)
     }
 }

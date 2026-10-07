@@ -42,8 +42,6 @@ async fn the_tracked_size_follows_completions_and_deletions() {
     let monitor = DiskMonitor::new(
         test_fs(),
         root,
-        None,
-        None,
         Some(forget),
         Arc::new(DiskUsage::default()),
         events::discard(),
@@ -60,7 +58,7 @@ async fn the_tracked_size_follows_completions_and_deletions() {
         },
         offload: false,
     };
-    monitor.add_queue(&queue, config).await.unwrap();
+    monitor.add_queue(&queue, config, None).await.unwrap();
 
     assert!(!store_file_exists(root, &queue, 1));
     assert!(!store_file_exists(root, &queue, 2));
@@ -159,7 +157,7 @@ async fn eviction_never_passes_the_offloaded_bound() {
 }
 
 #[tokio::test]
-async fn delayed_and_duplicate_completions_do_not_count_scanned_files_again() {
+async fn a_file_published_after_the_scan_is_not_counted_again_by_a_rescan() {
     let temp = tempfile::TempDir::new().unwrap();
     let root = temp.path();
     let queue = QueueIdResolver::new("inst").resolve("cam");
@@ -167,17 +165,9 @@ async fn delayed_and_duplicate_completions_do_not_count_scanned_files_again() {
         write_store_file(root, &queue, id, 100);
     }
     let usage = Arc::new(DiskUsage::default());
-    let monitor = DiskMonitor::new(
-        test_fs(),
-        root,
-        None,
-        None,
-        None,
-        usage.clone(),
-        events::discard(),
-    )
-    .await
-    .unwrap();
+    let monitor = DiskMonitor::new(test_fs(), root, None, usage.clone(), events::discard())
+        .await
+        .unwrap();
     monitor
         .add_queue(
             &queue,
@@ -190,11 +180,8 @@ async fn delayed_and_duplicate_completions_do_not_count_scanned_files_again() {
                 },
                 offload: false,
             },
+            None,
         )
-        .await
-        .unwrap();
-    monitor
-        .store_file_done(&queue, UintN::from(1u64))
         .await
         .unwrap();
     let temp_file = root.join("new-store-file");
@@ -211,12 +198,6 @@ async fn delayed_and_duplicate_completions_do_not_count_scanned_files_again() {
     let queue_monitor = monitors.get(&queue).unwrap();
     queue_monitor.rescan_store().await.unwrap();
     drop(monitors);
-    for _ in 0..2 {
-        monitor
-            .store_file_done(&queue, UintN::from(3u64))
-            .await
-            .unwrap();
-    }
     let monitors = monitor.monitors.read().await;
     let queue_monitor = monitors.get(&queue).unwrap();
     assert_eq!(queue_monitor.get_queue_size().await.unwrap(), 300);
@@ -247,7 +228,6 @@ async fn concurrent_rescans_and_out_of_order_publications_preserve_usage() {
         root.to_path_buf(),
         None,
         None,
-        None,
         usage.clone(),
         events::discard(),
     )
@@ -257,7 +237,7 @@ async fn concurrent_rescans_and_out_of_order_publications_preserve_usage() {
     let publish = async {
         for id in (1..=32u64).rev() {
             let temp_file = root.join("new-store-file");
-            tokio::fs::write(&temp_file, vec![0; 100]).await.unwrap();
+            std::fs::write(&temp_file, vec![0; 100]).unwrap();
             usage
                 .publish(
                     &test_fs(),
@@ -306,7 +286,6 @@ async fn seeded_monitor_with(
             offload: false,
         },
         root.to_path_buf(),
-        None,
         None,
         None,
         Arc::new(DiskUsage::default()),

@@ -74,9 +74,9 @@ async fn test_recovery_empty_latest_file() {
     let resolver = QueueIdResolver::new(&instance_id);
     let queue_id = resolver.resolve("test-queue");
     let wal_path = get_queue_wal_path(&path, &queue_id);
-    tokio::fs::create_dir_all(&wal_path).await.unwrap();
+    std::fs::create_dir_all(&wal_path).unwrap();
     let file_2 = UintN::from(2u64).to_file_path(wal_path.to_str().unwrap(), "wal");
-    tokio::fs::write(&file_2, b"").await.unwrap();
+    std::fs::write(&file_2, b"").unwrap();
 
     // Recovery: Start queue again
     {
@@ -105,7 +105,7 @@ async fn test_recovery_empty_latest_file() {
     let queue_id = resolver.resolve("test-queue");
     let wal_path = get_queue_wal_path(&path, &queue_id);
     let file_2 = UintN::from(2u64).to_file_path(wal_path.to_str().unwrap(), "wal");
-    let file_2_content = tokio::fs::read(&file_2).await.unwrap();
+    let file_2_content = std::fs::read(&file_2).unwrap();
     assert!(
         !file_2_content.is_empty(),
         "File 2 should have been reused (empty latest file)"
@@ -145,7 +145,7 @@ async fn test_recovery_multiple_empty_files() {
     let wal_path = get_queue_wal_path(&path, &queue_id);
     for file_num in 2u32..=4u32 {
         let file_path = UintN::from(file_num).to_file_path(wal_path.to_str().unwrap(), "wal");
-        tokio::fs::write(&file_path, b"").await.unwrap();
+        std::fs::write(&file_path, b"").unwrap();
     }
 
     // Recovery: Should walk back from file 4 -> 3 -> 2 -> 1 (found)
@@ -174,7 +174,7 @@ async fn test_recovery_multiple_empty_files() {
     let queue_id = resolver.resolve("test-queue");
     let wal_path = get_queue_wal_path(&path, &queue_id);
     let file_4 = UintN::from(4u64).to_file_path(wal_path.to_str().unwrap(), "wal");
-    let file_4_content = tokio::fs::read(&file_4).await.unwrap();
+    let file_4_content = std::fs::read(&file_4).unwrap();
     assert!(
         !file_4_content.is_empty(),
         "File 4 should have been reused (empty latest file)"
@@ -300,7 +300,7 @@ async fn test_recovery_reuse_header_only_latest_file() {
     let queue_id = resolver.resolve("test-queue");
     let wal_path = get_queue_wal_path(&path, &queue_id);
     let file_2 = UintN::from(2u64).to_file_path(wal_path.to_str().unwrap(), "wal");
-    let file_2_content = tokio::fs::read(&file_2).await.unwrap();
+    let file_2_content = std::fs::read(&file_2).unwrap();
 
     // Should have more than just header (original header + new entry)
     let header_size = 32; // Approximate WAL header size
@@ -316,7 +316,7 @@ async fn test_recovery_reuse_header_only_latest_file() {
     // Verify file 3 was NOT created
     let file_3 = UintN::from(3u64).to_file_path(wal_path.to_str().unwrap(), "wal");
     assert!(
-        !tokio::fs::try_exists(&file_3).await.unwrap(),
+        !std::fs::exists(&file_3).unwrap(),
         "File 3 should not exist - file 2 was reused"
     );
 }
@@ -363,7 +363,7 @@ async fn test_recovery_multiple_header_only_files() {
         let queue_id = resolver.resolve("test-queue");
         let wal_path = get_queue_wal_path(&path, &queue_id);
         let file_2 = UintN::from(2u64).to_file_path(wal_path.to_str().unwrap(), "wal");
-        tokio::fs::read(&file_2).await.unwrap().len()
+        std::fs::read(&file_2).unwrap().len()
     };
 
     // Recovery: Should reuse file 2 (header-only)
@@ -393,7 +393,7 @@ async fn test_recovery_multiple_header_only_files() {
     let queue_id = resolver.resolve("test-queue");
     let wal_path = get_queue_wal_path(&path, &queue_id);
     let file_2 = UintN::from(2u64).to_file_path(wal_path.to_str().unwrap(), "wal");
-    let file_2_content = tokio::fs::read(&file_2).await.unwrap();
+    let file_2_content = std::fs::read(&file_2).unwrap();
 
     assert!(
         file_2_content.len() > header_only_size,
@@ -409,7 +409,7 @@ async fn test_recovery_multiple_header_only_files() {
     // Verify file 3 was NOT created
     let file_3 = UintN::from(3u64).to_file_path(wal_path.to_str().unwrap(), "wal");
     assert!(
-        !tokio::fs::try_exists(&file_3).await.unwrap(),
+        !std::fs::exists(&file_3).unwrap(),
         "File 3 should not exist - file 2 was reused"
     );
 }
@@ -432,11 +432,11 @@ async fn test_recovery_all_empty_files() {
     let resolver = QueueIdResolver::new(&instance_id);
     let queue_id = resolver.resolve("test-queue");
     let wal_path = get_queue_wal_path(&path, &queue_id);
-    tokio::fs::create_dir_all(&wal_path).await.unwrap();
+    std::fs::create_dir_all(&wal_path).unwrap();
 
     for file_num in 1u32..=3u32 {
         let file_path = UintN::from(file_num).to_file_path(wal_path.to_str().unwrap(), "wal");
-        tokio::fs::write(&file_path, b"").await.unwrap();
+        std::fs::write(&file_path, b"").unwrap();
     }
 
     // Recovery: Should start from zero
@@ -485,10 +485,10 @@ async fn test_recovery_gap_in_files() {
     let queue_id = resolver.resolve("test-queue");
     let wal_path = get_queue_wal_path(&path, &queue_id);
     let file_1 = UintN::from(1u64).to_file_path(wal_path.to_str().unwrap(), "wal");
-    tokio::fs::remove_file(&file_1).await.ok();
+    std::fs::remove_file(&file_1).ok();
 
     let file_5 = UintN::from(5u64).to_file_path(wal_path.to_str().unwrap(), "wal");
-    tokio::fs::write(&file_5, b"").await.unwrap();
+    std::fs::write(&file_5, b"").unwrap();
 
     // Recovery: Should find no entries and start from 1
     {
@@ -537,7 +537,7 @@ async fn test_recovery_old_data_different_session() {
     let video_queue_id = resolver.resolve("video-queue");
     let wal_path = get_queue_wal_path(&path, &video_queue_id);
     let file_3 = UintN::from(3u64).to_file_path(wal_path.to_str().unwrap(), "wal");
-    tokio::fs::write(&file_3, b"").await.unwrap();
+    std::fs::write(&file_3, b"").unwrap();
 
     // Session 2: Start queue - OLD BUG would find file 3 (empty) and derive wrong last_id
     {
@@ -597,7 +597,7 @@ async fn test_recovery_store_files_with_empty_wal() {
     let queue_id = resolver.resolve("test-queue");
     let wal_path = get_queue_wal_path(&path, &queue_id);
     let file_5 = UintN::from(5u64).to_file_path(wal_path.to_str().unwrap(), "wal");
-    tokio::fs::write(&file_5, b"").await.unwrap();
+    std::fs::write(&file_5, b"").unwrap();
 
     // Recovery: Should find entries in Store, not be confused by empty WAL
     {
@@ -646,7 +646,7 @@ async fn test_recovery_alternating_empty_files() {
     let wal_path = get_queue_wal_path(&path, &queue_id);
     for file_num in 2u32..=4u32 {
         let file_path = UintN::from(file_num).to_file_path(wal_path.to_str().unwrap(), "wal");
-        tokio::fs::write(&file_path, b"").await.unwrap();
+        std::fs::write(&file_path, b"").unwrap();
     }
 
     // Recovery
@@ -697,9 +697,9 @@ async fn test_recovery_large_file_ids() {
     let large_file = large_id.to_file_path(wal_path.to_str().unwrap(), "wal");
     // Create parent directories
     if let Some(parent) = large_file.parent() {
-        tokio::fs::create_dir_all(parent).await.unwrap();
+        std::fs::create_dir_all(parent).unwrap();
     }
-    tokio::fs::write(&large_file, b"").await.unwrap();
+    std::fs::write(&large_file, b"").unwrap();
 
     // Recovery: Should handle large file ID
     {
@@ -798,7 +798,7 @@ async fn test_recovery_single_entry_file() {
     let queue_id = resolver.resolve("test-queue");
     let wal_path = get_queue_wal_path(&path, &queue_id);
     let file_2 = UintN::from(2u64).to_file_path(wal_path.to_str().unwrap(), "wal");
-    tokio::fs::write(&file_2, b"").await.unwrap();
+    std::fs::write(&file_2, b"").unwrap();
 
     // Recovery
     {
@@ -851,7 +851,7 @@ async fn test_recovery_large_entries() {
     let queue_id = resolver.resolve("test-queue");
     let wal_path = get_queue_wal_path(&path, &queue_id);
     let file_2 = UintN::from(2u64).to_file_path(wal_path.to_str().unwrap(), "wal");
-    tokio::fs::write(&file_2, b"").await.unwrap();
+    std::fs::write(&file_2, b"").unwrap();
 
     // Recovery
     {
@@ -920,7 +920,7 @@ async fn test_recovery_different_header_formats() {
     let queue_id = resolver.resolve("test-queue");
     let wal_path = get_queue_wal_path(&path, &queue_id);
     let file_2 = UintN::from(2u64).to_file_path(wal_path.to_str().unwrap(), "wal");
-    tokio::fs::write(&file_2, b"").await.unwrap();
+    std::fs::write(&file_2, b"").unwrap();
 
     // Recovery: Should preserve data/id size from file 1
     {
@@ -968,7 +968,7 @@ async fn test_recovery_readonly_queue() {
     let wal_path = get_queue_wal_path(&path, &queue_id);
     for file_num in 2u32..=3u32 {
         let file_path = UintN::from(file_num).to_file_path(wal_path.to_str().unwrap(), "wal");
-        tokio::fs::write(&file_path, b"").await.unwrap();
+        std::fs::write(&file_path, b"").unwrap();
     }
 
     // Recovery as readonly
@@ -1018,7 +1018,7 @@ async fn test_recovery_incomplete_write() {
     let queue_id = resolver.resolve("test-queue");
     let wal_path = get_queue_wal_path(&path, &queue_id);
     let file_2 = UintN::from(2u64).to_file_path(wal_path.to_str().unwrap(), "wal");
-    tokio::fs::write(&file_2, b"").await.unwrap();
+    std::fs::write(&file_2, b"").unwrap();
 
     // Recovery after "crash"
     {
@@ -1065,7 +1065,7 @@ async fn test_recovery_scattered_files() {
     let wal_path = get_queue_wal_path(&path, &queue_id);
     for file_num in &[2u32, 4u32, 6u32, 7u32] {
         let file_path = UintN::from(*file_num).to_file_path(wal_path.to_str().unwrap(), "wal");
-        tokio::fs::write(&file_path, b"").await.unwrap();
+        std::fs::write(&file_path, b"").unwrap();
     }
 
     // Recovery: Should walk back from 7 -> 6 -> 5 -> 4 -> 3 -> 2 -> 1 (found)
@@ -1123,7 +1123,7 @@ async fn test_recovery_zero_byte_vs_header_only() {
     let queue_id = resolver.resolve("test-queue");
     let wal_path = get_queue_wal_path(&path, &queue_id);
     let file_3 = UintN::from(3u64).to_file_path(wal_path.to_str().unwrap(), "wal");
-    tokio::fs::write(&file_3, b"").await.unwrap();
+    std::fs::write(&file_3, b"").unwrap();
 
     // Recovery: Should walk back and find file 1
     {
@@ -1177,7 +1177,7 @@ async fn test_recovery_with_batch_writes() {
     let queue_id = resolver.resolve("test-queue");
     let wal_path = get_queue_wal_path(&path, &queue_id);
     let file_2 = UintN::from(2u64).to_file_path(wal_path.to_str().unwrap(), "wal");
-    tokio::fs::write(&file_2, b"").await.unwrap();
+    std::fs::write(&file_2, b"").unwrap();
 
     // Recovery
     {
@@ -1229,7 +1229,7 @@ async fn test_recovery_corrupted_header() {
     let wal_path = get_queue_wal_path(&path, &queue_id);
     let file_2 = UintN::from(2u64).to_file_path(wal_path.to_str().unwrap(), "wal");
     let corrupted_data = vec![0xFF, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x11, 0x22];
-    tokio::fs::write(&file_2, corrupted_data).await.unwrap();
+    std::fs::write(&file_2, corrupted_data).unwrap();
 
     // Recovery: Should skip corrupted file 2 and find file 1
     {
@@ -1276,7 +1276,7 @@ async fn test_recovery_truncated_file() {
     let wal_path = get_queue_wal_path(&path, &queue_id);
     let file_2 = UintN::from(2u64).to_file_path(wal_path.to_str().unwrap(), "wal");
     let truncated_data = vec![0x01, 0x02, 0x03]; // Too short to be valid
-    tokio::fs::write(&file_2, truncated_data).await.unwrap();
+    std::fs::write(&file_2, truncated_data).unwrap();
 
     // Recovery
     {
@@ -1325,7 +1325,7 @@ async fn test_recovery_multiple_corrupted_files() {
     for file_num in 2u32..=5u32 {
         let file_path = UintN::from(file_num).to_file_path(wal_path.to_str().unwrap(), "wal");
         let corrupted = vec![0xDE, 0xAD, 0xBE, 0xEF, (file_num as u8)];
-        tokio::fs::write(&file_path, corrupted).await.unwrap();
+        std::fs::write(&file_path, corrupted).unwrap();
     }
 
     // Recovery: Should walk back from 5 -> 4 -> 3 -> 2 -> 1 (valid)
@@ -1372,17 +1372,17 @@ async fn test_recovery_partial_entry() {
     let queue_id = resolver.resolve("test-queue");
     let wal_path = get_queue_wal_path(&path, &queue_id);
     let file_1 = UintN::from(1u64).to_file_path(wal_path.to_str().unwrap(), "wal");
-    let mut data = tokio::fs::read(&file_1).await.unwrap();
+    let mut data = std::fs::read(&file_1).unwrap();
 
     // Truncate last 10 bytes (corrupt last entry)
     if data.len() > 10 {
         data.truncate(data.len() - 10);
-        tokio::fs::write(&file_1, data).await.unwrap();
+        std::fs::write(&file_1, data).unwrap();
     }
 
     // Create empty file 2
     let file_2 = UintN::from(2u64).to_file_path(wal_path.to_str().unwrap(), "wal");
-    tokio::fs::write(&file_2, b"").await.unwrap();
+    std::fs::write(&file_2, b"").unwrap();
 
     // Recovery: Should handle partial data gracefully
     {
@@ -1428,14 +1428,14 @@ async fn test_recovery_garbage_at_end() {
     let queue_id = resolver.resolve("test-queue");
     let wal_path = get_queue_wal_path(&path, &queue_id);
     let file_1 = UintN::from(1u64).to_file_path(wal_path.to_str().unwrap(), "wal");
-    let mut data = tokio::fs::read(&file_1).await.unwrap();
+    let mut data = std::fs::read(&file_1).unwrap();
     let garbage = vec![0xFF; 100];
     data.extend_from_slice(&garbage);
-    tokio::fs::write(&file_1, data).await.unwrap();
+    std::fs::write(&file_1, data).unwrap();
 
     // Create empty file 2
     let file_2 = UintN::from(2u64).to_file_path(wal_path.to_str().unwrap(), "wal");
-    tokio::fs::write(&file_2, b"").await.unwrap();
+    std::fs::write(&file_2, b"").unwrap();
 
     // Recovery
     {
@@ -1482,13 +1482,11 @@ async fn test_recovery_corrupted_middle_file() {
 
     // Create corrupted file 2
     let file_2 = UintN::from(2u64).to_file_path(wal_path.to_str().unwrap(), "wal");
-    tokio::fs::write(&file_2, vec![0xBA, 0xD0, 0xDA, 0xDA])
-        .await
-        .unwrap();
+    std::fs::write(&file_2, vec![0xBA, 0xD0, 0xDA, 0xDA]).unwrap();
 
     // Create empty file 3 (latest)
     let file_3 = UintN::from(3u64).to_file_path(wal_path.to_str().unwrap(), "wal");
-    tokio::fs::write(&file_3, b"").await.unwrap();
+    std::fs::write(&file_3, b"").unwrap();
 
     // Recovery: Should walk back 3 (empty) -> 2 (corrupted) -> 1 (valid)
     {
@@ -1523,12 +1521,12 @@ async fn test_recovery_all_files_corrupted() {
     let resolver = QueueIdResolver::new(&instance_id);
     let queue_id = resolver.resolve("test-queue");
     let wal_path = get_queue_wal_path(&path, &queue_id);
-    tokio::fs::create_dir_all(&wal_path).await.unwrap();
+    std::fs::create_dir_all(&wal_path).unwrap();
 
     for file_num in 1u32..=3u32 {
         let file_path = UintN::from(file_num).to_file_path(wal_path.to_str().unwrap(), "wal");
         let corrupted = vec![0xBA, 0xD0, file_num as u8];
-        tokio::fs::write(&file_path, corrupted).await.unwrap();
+        std::fs::write(&file_path, corrupted).unwrap();
     }
 
     // Recovery: Should start fresh since all files are corrupted
@@ -1576,7 +1574,7 @@ async fn test_recovery_wrong_file_type() {
     let wal_path = get_queue_wal_path(&path, &queue_id);
     let file_2 = UintN::from(2u64).to_file_path(wal_path.to_str().unwrap(), "wal");
     let wrong_data = b"This is not a WAL file";
-    tokio::fs::write(&file_2, wrong_data).await.unwrap();
+    std::fs::write(&file_2, wrong_data).unwrap();
 
     // Recovery
     {
@@ -1622,7 +1620,7 @@ async fn test_recovery_random_corruption() {
     let wal_path = get_queue_wal_path(&path, &queue_id);
     let file_2 = UintN::from(2u64).to_file_path(wal_path.to_str().unwrap(), "wal");
     let random_data: Vec<u8> = (0..1000).map(|i| ((i * 17 + 42) % 256) as u8).collect();
-    tokio::fs::write(&file_2, random_data).await.unwrap();
+    std::fs::write(&file_2, random_data).unwrap();
 
     // Recovery
     {
@@ -1675,9 +1673,9 @@ async fn test_recovery_skipped_file_in_sequence() {
     // Create empty file 3
     let file_3 = UintN::from(3u64).to_file_path(wal_path.to_str().unwrap(), "wal");
     if let Some(parent) = std::path::Path::new(&file_3).parent() {
-        tokio::fs::create_dir_all(parent).await.unwrap();
+        std::fs::create_dir_all(parent).unwrap();
     }
-    tokio::fs::write(&file_3, b"").await.unwrap();
+    std::fs::write(&file_3, b"").unwrap();
 
     // Recovery: Should walk backward from file 3 to file 1, skipping missing file 2
     {
@@ -1700,10 +1698,9 @@ async fn test_recovery_skipped_file_in_sequence() {
         fs.close().await.unwrap();
     }
 
-    // Checked after close: the writer goes through `tokio::fs::File`, which
-    // accepts bytes before the blocking write places them in the file, so
-    // reading while the queue is open races it.
-    let file_3_content = tokio::fs::read(&file_3).await.unwrap();
+    // Checked after close: the writer's appends run on the fs pool, so
+    // reading while the queue is open races them.
+    let file_3_content = std::fs::read(&file_3).unwrap();
     assert!(
         !file_3_content.is_empty(),
         "File 3 should have been reused (empty latest file)"
@@ -1712,7 +1709,7 @@ async fn test_recovery_skipped_file_in_sequence() {
     // Verify file 2 was NOT created (gap not filled)
     let file_2 = UintN::from(2u64).to_file_path(wal_path.to_str().unwrap(), "wal");
     assert!(
-        !tokio::fs::try_exists(&file_2).await.unwrap(),
+        !std::fs::exists(&file_2).unwrap(),
         "File 2 should not exist - gaps should not be filled"
     );
 }
@@ -1752,9 +1749,9 @@ async fn test_recovery_multiple_skipped_files() {
     // Create empty file 5
     let file_5 = UintN::from(5u64).to_file_path(wal_path.to_str().unwrap(), "wal");
     if let Some(parent) = std::path::Path::new(&file_5).parent() {
-        tokio::fs::create_dir_all(parent).await.unwrap();
+        std::fs::create_dir_all(parent).unwrap();
     }
-    tokio::fs::write(&file_5, b"").await.unwrap();
+    std::fs::write(&file_5, b"").unwrap();
 
     // Recovery: Should walk backward from file 5, skip files 4, 3, 2 (missing), find file 1
     {
@@ -1777,10 +1774,9 @@ async fn test_recovery_multiple_skipped_files() {
         fs.close().await.unwrap();
     }
 
-    // File 5 should have been reused. Checked after close: the writer goes
-    // through `tokio::fs::File`, which accepts bytes before the blocking write
-    // places them in the file, so reading while the queue is open races it.
-    let file_5_content = tokio::fs::read(&file_5).await.unwrap();
+    // File 5 should have been reused. Checked after close: the writer's
+    // appends run on the fs pool, so reading while the queue is open races them.
+    let file_5_content = std::fs::read(&file_5).unwrap();
     assert!(
         !file_5_content.is_empty(),
         "File 5 should have been reused (empty latest file)"
@@ -2559,7 +2555,7 @@ async fn test_wal_async_excludes_current_file() {
     let resolver = QueueIdResolver::new(&instance_id);
     let queue_id = resolver.resolve("test-queue");
     let wal_path = get_queue_wal_path(&path, &queue_id);
-    tokio::fs::create_dir_all(&wal_path).await.unwrap();
+    std::fs::create_dir_all(&wal_path).unwrap();
 
     // Create WAL files 1,2,3 with entries (simulating completed files)
     // Note: In real scenario these would have proper WAL format
@@ -2567,9 +2563,7 @@ async fn test_wal_async_excludes_current_file() {
     for file_num in 1u64..=3u64 {
         let file_id = UintN::from(file_num);
         let file_path = file_id.to_file_path(wal_path.to_str().unwrap(), "wal");
-        tokio::fs::write(&file_path, format!("wal-{}", file_num).as_bytes())
-            .await
-            .unwrap();
+        std::fs::write(&file_path, format!("wal-{}", file_num).as_bytes()).unwrap();
     }
 
     // Start queue - should recover and determine file 4 as next
@@ -2811,9 +2805,9 @@ async fn test_recovery_keeps_a_latest_file_it_cannot_read() {
     let file_2 = UintN::from(2u64).to_file_path(wal_path.to_str().unwrap(), "wal");
 
     // A second file with real records, whose header has one bad byte.
-    let mut bytes = tokio::fs::read(&file_1).await.unwrap();
+    let mut bytes = std::fs::read(&file_1).unwrap();
     bytes[8] ^= 0xFF;
-    tokio::fs::write(&file_2, &bytes).await.unwrap();
+    std::fs::write(&file_2, &bytes).unwrap();
 
     {
         let fs = NormFS::new(path.clone(), NormFsSettings::all_active())
@@ -2828,7 +2822,7 @@ async fn test_recovery_keeps_a_latest_file_it_cannot_read() {
     }
 
     assert_eq!(
-        tokio::fs::read(&file_2).await.unwrap(),
+        std::fs::read(&file_2).unwrap(),
         bytes,
         "a file recovery could not read must be left exactly as it was"
     );

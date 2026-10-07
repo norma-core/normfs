@@ -17,10 +17,10 @@ mod system;
 
 use bytes::Bytes;
 use core::time::Duration;
-use normfs_cloud::CloudDownloader;
 use normfs_crypto::CryptoContext;
 use normfs_fs::{Fs, FsConfig, Runs, TmpMode};
-use normfs_store::PersistStore;
+use normfs_store::layer::LayerError;
+use normfs_store::{Layer, PersistStore};
 use normfs_types::events::{EventSink, SystemEvent};
 use normfs_wal::{WalFile, WalSettings, WalStore};
 use std::collections::HashMap;
@@ -51,9 +51,11 @@ pub struct NormFS {
     store: Arc<PersistStore>,
     mem: Arc<mem::MemStore>,
     disk_monitor: Option<Arc<DiskMonitor>>,
-    cloud_downloader: Option<Arc<CloudDownloader>>,
+    /// `None` without a bucket.
+    offloaders: Option<Arc<offload::offloaders::Offloaders>>,
+    cloud: Option<Arc<Layer>>,
     /// `None` without cloud settings; `new` refuses any rule that asks for cloud then.
-    cloud_sink: Option<Arc<normfs_cloud::CloudSink>>,
+    cloud_sink: Option<Arc<normfs_store::LayerSink>>,
     memory_pointers: Arc<memory_pointers::MemoryPointers>,
     memory_pointer_task: JoinHandle<()>,
     crypto_ctx: Arc<CryptoContext>,
@@ -72,7 +74,7 @@ pub enum Error {
     Wal(WalError),
     Store(StoreError),
     Config(ConfigError),
-    Cloud(normfs_cloud::errors::CloudError),
+    Cloud(LayerError),
     Io(std::io::Error),
     QueueNotFound,
     QueueEmpty,
@@ -221,7 +223,7 @@ impl From<ConfigError> for Error {
 
 impl From<normfs_cloud::errors::CloudError> for Error {
     fn from(e: normfs_cloud::errors::CloudError) -> Self {
-        Error::Cloud(e)
+        Error::Cloud(LayerError::Backend(e.into()))
     }
 }
 
@@ -464,6 +466,7 @@ impl NormFS {
             settings.store_cfg.clone(),
             crypto_ctx.clone(),
             wal.clone(),
+            fs.clone(),
             wal_entry_send.clone(),
         )
         .with_events(events.clone())
@@ -486,7 +489,7 @@ impl NormFS {
         let (cloud_client, cloud_prefix) = if let Some(ref cloud_settings) = settings.cloud_settings
         {
             let endpoint = url::Url::parse(&cloud_settings.endpoint)
-                .map_err(|e| Error::Cloud(normfs_cloud::errors::CloudError::InvalidUrl(e)))?;
+                .map_err(|e| Error::from(normfs_cloud::errors::CloudError::InvalidUrl(e)))?;
 
             match normfs_cloud::S3Client::new(
                 endpoint,
@@ -517,20 +520,15 @@ impl NormFS {
             (None, None)
         };
 
-        // Initialize S3 downloader if S3 client is available
-        let cloud_downloader =
-            if let (Some(client), Some(ref prefix)) = (&cloud_client, &cloud_prefix) {
-                let full_prefix = if prefix.is_empty() {
-                    String::new()
-                } else {
-                    prefix.clone()
-                };
-                log::info!(target: "normfs", "Creating S3 downloader with prefix: {}", full_prefix);
-                Some(Arc::new(CloudDownloader::new(client.clone(), &full_prefix)))
-            } else {
-                log::info!(target: "normfs", "S3 downloader disabled");
-                None
-            };
+        // Files read back from the bucket have their signatures checked whole.
+        let cloud = if let (Some(client), Some(prefix)) = (&cloud_client, &cloud_prefix) {
+            log::info!(target: "normfs", "Cloud layer under prefix: {}", prefix);
+            let backend = normfs_cloud::S3Store::new(client.clone(), prefix);
+            Some(Arc::new(Layer::new(Arc::new(backend), None, true)))
+        } else {
+            log::info!(target: "normfs", "Cloud layer disabled");
+            None
+        };
 
         // Initialize disk monitor if enabled
         let store_arc = Arc::new(store);
@@ -543,8 +541,6 @@ impl NormFS {
             match DiskMonitor::new(
                 fs.clone(),
                 &path,
-                cloud_client.clone(),
-                cloud_prefix.clone(),
                 Some(forget_range),
                 store_arc.disk_usage(),
                 events.clone(),
@@ -562,22 +558,22 @@ impl NormFS {
             None
         };
 
+        let offloaders = cloud.clone().map(|to| {
+            Arc::new(offload::offloaders::Offloaders::new(
+                store_arc.local().clone(),
+                to,
+                wal.backend().clone(),
+                events.clone(),
+            ))
+        });
+
         // Always consume store completions to prevent SendError on the sender side
-        // Forward to offload queue if disk monitor is enabled
-        let monitor_opt = disk_monitor.clone();
+        let offloaders_rx = offloaders.clone();
         tokio::spawn(async move {
             let mut store_done_rx = store_done_rx;
             while let Some((queue_id, file_id)) = store_done_rx.recv().await {
-                if let Some(ref monitor) = monitor_opt {
-                    log::debug!(target: "normfs",
-                        "Received store completion for queue: {}, file_id: {:?}",
-                        queue_id, file_id);
-
-                    if let Err(e) = monitor.store_file_done(&queue_id, file_id.clone()).await {
-                        log::error!(target: "normfs",
-                            "Failed to forward store completion: queue={}, file_id={:?}, error={}",
-                            queue_id, file_id, e);
-                    }
+                if let Some(offloaders) = &offloaders_rx {
+                    offloaders.file_landed(&queue_id, file_id).await;
                 }
             }
             log::info!(target: "normfs", "Store completion forwarding task ended");
@@ -585,12 +581,15 @@ impl NormFS {
 
         log::info!(target: "normfs", "NormFS initialized successfully (disk_monitor: {}, s3: {})",
             if settings.max_disk_usage_per_queue.is_some() { "enabled" } else { "disabled" },
-            if cloud_downloader.is_some() { "enabled" } else { "disabled" });
+            if cloud.is_some() { "enabled" } else { "disabled" });
 
-        let cloud_sink = cloud_downloader.as_ref().map(|downloader| {
-            Arc::new(normfs_cloud::CloudSink::new(
-                downloader.clone(),
-                memory_pointers.clone(),
+        // A queue whose first layer is the bucket keeps nothing local to list
+        // on restart, so its landings are recorded.
+        let cloud_sink = cloud.as_ref().map(|cloud| {
+            let after = normfs_store::AfterLanding::Record(memory_pointers.clone());
+            Arc::new(normfs_store::LayerSink::new(
+                cloud.clone(),
+                after,
                 events.clone(),
             ))
         });
@@ -598,7 +597,7 @@ impl NormFS {
             wal.clone(),
             store_arc.clone(),
             mem.clone(),
-            cloud_downloader.clone(),
+            cloud.clone(),
             Arc::new(settings.queue_settings.clone()),
             memory_pointers.clone(),
         );
@@ -616,7 +615,8 @@ impl NormFS {
             store: store_arc,
             mem,
             disk_monitor,
-            cloud_downloader,
+            offloaders,
+            cloud,
             cloud_sink,
             memory_pointers,
             memory_pointer_task,
@@ -1230,16 +1230,21 @@ impl NormFS {
     ) -> Result<Option<(UintN, UintN)>, Error> {
         let mut landed = self.memory_pointers.last_landed(queue);
         let ask_bucket = persist.cloud && (!persist.store || landed.is_some());
-        let Some(downloader) = self.cloud_downloader.as_ref().filter(|_| ask_bucket) else {
+        let Some(cloud) = self.cloud.as_ref().filter(|_| ask_bucket) else {
             return Ok(landed);
         };
-        let Some(max_file) = downloader.find_max_id(queue).await? else {
+        let max_file = cloud
+            .last_file_id(queue)
+            .await
+            .map_err(|e| Error::Cloud(e.into()))?;
+        let Some(max_file) = max_file else {
             return Ok(landed);
         };
         if landed.as_ref().is_none_or(|(_, f)| max_file > *f) {
-            let (_, last) = downloader
+            let (_, last) = cloud
                 .get_file_range(queue, &max_file)
-                .await?
+                .await
+                .map_err(Error::Cloud)?
                 .ok_or_else(|| {
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
@@ -1395,6 +1400,8 @@ impl NormFS {
                 }
                 Drainer::Page => {
                     let pool = self.mem.pool(queue).ok_or(Error::QueueNotFound)?;
+                    // A sealed page lands in the queue's first layer: the local
+                    // store when it keeps one, else the bucket.
                     let sink: Arc<dyn normfs_store::SealedFileSink> = if persist.store {
                         // `continue_queue` may hand back the latest WAL file
                         // for reuse when it is header-only. This writer never
@@ -1440,8 +1447,14 @@ impl NormFS {
             let compression_type = wal_settings.compression_type;
             let encryption_type = wal_settings.encryption_type;
 
+            // Retried: an old file a failed listing misses is never migrated.
+            // A queue's pool lives as long as that opening of the queue, so
+            // the retries end when it is closed and do not double on reopen.
+            let mem = self.mem.clone();
+            let opened = self.mem.pool(queue).map(|p| Arc::downgrade(&p));
             tokio::spawn(async move {
-                if let Err(e) = wal
+                let mut failures: u32 = 0;
+                while let Err(e) = wal
                     .process_old_files(
                         &queue_clone,
                         &file_id_clone,
@@ -1450,13 +1463,30 @@ impl NormFS {
                     )
                     .await
                 {
-                    log::error!(target: "normfs",
-                        "Failed to process old files for queue: {}",
-                        e
-                    );
+                    failures = failures.saturating_add(1);
+                    if failures.is_power_of_two() {
+                        log::error!(target: "normfs",
+                            "Failed to process old files for queue {} ({} tries): {}, \
+                             retrying in 1 second",
+                            queue_clone, failures, e
+                        );
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    let open = opened.as_ref().is_some_and(|pool| {
+                        mem.pool(&queue_clone)
+                            .is_some_and(|p| std::ptr::eq(pool.as_ptr(), Arc::as_ptr(&p)))
+                    });
+                    if !open {
+                        break;
+                    }
                 }
             });
         }
+
+        let offloader = match (&self.offloaders, persist.store && persist.cloud) {
+            (Some(offloaders), true) => Some(offloaders.start(queue).await),
+            _ => None,
+        };
 
         // The disk monitor watches local store files; a cloud-direct queue
         // has none.
@@ -1472,7 +1502,7 @@ impl NormFS {
                 offload: persist.cloud,
             };
 
-            disk_monitor.add_queue(queue, config).await?;
+            disk_monitor.add_queue(queue, config, offloader).await?;
             log::info!(target: "normfs", "Added queue '{}' to disk monitor with max_size: {}", queue, max_size);
         }
 

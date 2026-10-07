@@ -1,29 +1,21 @@
 use normfs_crypto::CryptoContext;
 use normfs_types::QueueId;
 use normfs_types::events::EventSink;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex, broadcast, mpsc};
 use uintn::UintN;
 
+use crate::WalFile;
+use crate::backend::Body;
+use crate::layer::Layer;
 use crate::pack::Packer;
-use crate::ranges::RangeStore;
 use crate::store_file::{self, SealedFile};
-use crate::{DiskUsage, WalFile};
-use normfs_wal::{PackSlot, WalStore};
-
-/// A WAL file read into a pack slot, or the reason it was not.
-enum Read {
-    Slot(PackSlot, usize),
-    TooLarge(usize),
-}
+use normfs_wal::{Fill, WalStore};
 
 pub struct StoreWriteWorker {
-    root_dir: PathBuf,
     wal_store: Arc<WalStore>,
-    range_store: Arc<RangeStore>,
-    disk_usage: Arc<DiskUsage>,
+    layer: Arc<Layer>,
     crypto_ctx: Arc<CryptoContext>,
     packer: Option<Arc<Packer>>,
     events: EventSink,
@@ -32,19 +24,15 @@ pub struct StoreWriteWorker {
 
 impl StoreWriteWorker {
     pub fn new(
-        root_dir: PathBuf,
         crypto_ctx: Arc<CryptoContext>,
         wal_store: Arc<WalStore>,
-        range_store: Arc<RangeStore>,
-        disk_usage: Arc<DiskUsage>,
+        layer: Arc<Layer>,
         packer: Option<Arc<Packer>>,
         events: EventSink,
     ) -> Self {
         Self {
-            root_dir,
             wal_store,
-            range_store,
-            disk_usage,
+            layer,
             crypto_ctx,
             packer,
             events,
@@ -115,17 +103,8 @@ impl StoreWriteWorker {
             }
         };
 
-        if let Err(e) = store_file::land_local(
-            self.wal_store.fs(),
-            &self.root_dir,
-            queue_id,
-            file_id,
-            &sealed,
-            true,
-            &self.disk_usage,
-        )
-        .await
-        {
+        let body = Body::Runs(sealed.runs());
+        if let Err(e) = self.layer.backend().put(queue_id, file_id, body).await {
             if !self.shutting_down.load(Ordering::Relaxed) {
                 log::error!(target: "normfs-store",
                     "Error writing store file for queue: {}, file_id: {:?}: {:?}",
@@ -161,20 +140,8 @@ impl StoreWriteWorker {
             "Entry range for queue: {}, file_id: {:?}: {:?} to {:?}",
             queue_id, file_id, entries_before, last_id);
 
-        if let Err(e) = self
-            .range_store
-            .record_range(queue_id, file_id, &entries_before, &last_id)
-            .await
-        {
-            if !self.shutting_down.load(Ordering::Relaxed) {
-                log::error!(target: "normfs-store",
-                    "Error recording range for queue: {}, file_id: {:?}: {:?}",
-                    queue_id, file_id, e);
-            }
-        } else {
-            log::debug!(target: "normfs-store",
-                "Recorded range for queue: {}, file_id: {:?}", queue_id, file_id);
-        }
+        self.layer
+            .record_range(queue_id, file_id, &entries_before, &last_id);
 
         if let Err(e) = self.wal_store.delete_wal_file(queue_id, file_id).await {
             if !self.shutting_down.load(Ordering::Relaxed) {
@@ -198,27 +165,15 @@ impl StoreWriteWorker {
     ) -> Result<SealedFile, String> {
         let (queue_id, file_id) = (&wal_file.queue_id, &wal_file.file_id);
         let slot = packer.take().await;
-        let path = self.wal_store.wal_file_path(queue_id, file_id);
         let cap = packer.input_cap();
         let read = self
             .wal_store
-            .fs()
-            .run_blocking(move || {
-                use std::os::unix::fs::FileExt;
-                let file = std::fs::File::open(&path)?;
-                let len = file.metadata()?.len() as usize;
-                if len > cap {
-                    return Ok(Read::TooLarge(len));
-                }
-                let mut slot = slot;
-                file.read_exact_at(&mut slot.buf()[..len], 0)?;
-                Ok(Read::Slot(slot, len))
-            })
+            .read_into(queue_id, file_id, slot, cap)
             .await
-            .map_err(|e| format!("reading WAL file: {:?}", std::io::Error::from(e)))?;
+            .map_err(|e| format!("reading WAL file: {e:?}"))?;
         let (mut slot, len) = match read {
-            Read::Slot(slot, len) => (slot, len),
-            Read::TooLarge(len) => {
+            (slot, Fill::Read(len)) => (slot, len),
+            (_, Fill::TooLarge(len)) => {
                 log::warn!(target: "normfs-store",
                     "WAL file {file_id} of queue {queue_id} is {len} bytes, more than the \
                      {cap} a pack slot holds; reading it whole");

@@ -44,7 +44,7 @@ mod scan_test;
 
 pub use executor::Accounting;
 pub use plan::{Op, PlanError, TmpMode};
-pub use scan::{Scan, ScanResult};
+pub use scan::{PathError, Scan, ScanResult};
 
 use executor::{Executor, Job, PlanJob, Resources, Task};
 use plan::Plan;
@@ -522,6 +522,36 @@ impl Fs {
             // caller stopped waiting.
             provisioned.lock().unwrap().forget(&path);
             removed
+        })
+        .await
+    }
+
+    /// Unlinks the `.{ext}` files directly under `dir` and returns how many
+    /// went. One that cannot be removed is logged and left for the next call.
+    pub async fn remove_files_with_ext(
+        &self,
+        dir: &Path,
+        ext: &'static str,
+    ) -> Result<usize, FsError> {
+        let dir = dir.to_path_buf();
+        self.run_blocking(move || {
+            let entries = match std::fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
+                Err(e) => return Err(e),
+            };
+            let mut removed = 0;
+            for entry in entries {
+                let path = entry?.path();
+                if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some(ext) {
+                    match std::fs::remove_file(&path) {
+                        Ok(()) => removed += 1,
+                        Err(e) => log::warn!(target: "normfs-fs",
+                            "failed to remove {}: {e}", path.display()),
+                    }
+                }
+            }
+            Ok(removed)
         })
         .await
     }

@@ -58,6 +58,13 @@ only its last id survives a restart. `cloud` sends that queue's store files to
 the bucket: offloaded from the local store when there is one, landed there
 directly from the sealed page when there is not.
 
+The WAL, the local store and the bucket are one interface, `Backend`
+(`normfs-wal/src/backend.rs`), so these stages are a queue's file layers in
+order: a sealed file lands in the first, one offloader moves it to the next,
+and reads ask each layer for a file's range and bytes the same way. Appending
+is part of it too; the bucket answers `Unsupported`, since an object cannot
+be appended to.
+
 NormFS records its own work in the queue `normfs/system`, one
 `normfs.system.Event` (`normfs/proto/normfs_system.proto`) per record: each
 store file once it is on the local disk (`ET_FILE_ON_DISK`) and once it is in
@@ -164,7 +171,7 @@ without it is not supported and faults rather than falling back.
 
 ## 📊 Status
 
-**v0.3.0** - Active development, API may change before 1.0
+**v0.4.0** - Active development, API may change before 1.0
 
 WAL files written by 0.1 are read by 0.2 unchanged. 0.2 writes a smaller entry
 format that 0.1 cannot read, so a downgrade needs the queue drained first. 0.3

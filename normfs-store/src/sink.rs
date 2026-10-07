@@ -1,16 +1,15 @@
-use normfs_fs::Fs;
-use normfs_types::QueueId;
-use normfs_types::events::EventSink;
+use normfs_types::events::{EventSink, SystemEvent};
+use normfs_types::{DataSource, QueueId};
 use std::future::Future;
 use std::io;
-use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 use uintn::UintN;
 
-use crate::DiskUsage;
-use crate::ranges::RangeStore;
+use crate::backend::{Backend, Body};
+use crate::layer::Layer;
 use crate::store_file::{self, SealedFile};
 
 /// Where a sealed file goes.
@@ -28,41 +27,57 @@ pub trait SealedFileSink: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>>;
 }
 
-/// The local store directory, as the WAL migration lands a file: temp, sync,
-/// rename, range recorded, offload told.
-pub struct LocalStoreSink {
-    fs: Fs,
-    root: PathBuf,
-    range_store: Arc<RangeStore>,
-    disk_usage: Arc<DiskUsage>,
-    store_done_tx: mpsc::UnboundedSender<(QueueId, UintN)>,
-    events: EventSink,
-    fsync: bool,
+/// Where a queue whose files are kept nowhere local records what has landed,
+/// so a restart knows its last id and last file without listing the bucket.
+///
+/// `mark_landed` returns only once the record is durable: a restart that read
+/// a stale one would start the next file at an id the bucket already holds.
+pub trait LandedIndex: Send + Sync {
+    fn mark_landed<'a>(
+        &'a self,
+        queue: &'a QueueId,
+        last_entry_id: &'a UintN,
+        file_id: &'a UintN,
+    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>>;
 }
 
-impl LocalStoreSink {
-    pub(crate) fn new(
-        fs: Fs,
-        root: PathBuf,
-        range_store: Arc<RangeStore>,
-        disk_usage: Arc<DiskUsage>,
-        store_done_tx: mpsc::UnboundedSender<(QueueId, UintN)>,
-        events: EventSink,
-        fsync: bool,
-    ) -> Self {
+/// What follows once a file is safe in the layer it landed in.
+pub enum AfterLanding {
+    /// A local layer: announced, so the file can move on to the next layer
+    /// and be counted against the queue's disk limit.
+    Announce(mpsc::UnboundedSender<(QueueId, UintN)>),
+    /// No local copy will list it on restart, so the landing is recorded.
+    Record(Arc<dyn LandedIndex>),
+}
+
+/// The first of a queue's file layers: a sealed file lands there, and from a
+/// local layer it is moved on to the next by the offloader.
+pub struct LayerSink {
+    layer: Arc<Layer>,
+    put: Arc<dyn Backend>,
+    after: AfterLanding,
+    events: EventSink,
+}
+
+impl LayerSink {
+    pub fn new(layer: Arc<Layer>, after: AfterLanding, events: EventSink) -> Self {
         Self {
-            fs,
-            root,
-            range_store,
-            disk_usage,
-            store_done_tx,
+            put: layer.backend().clone(),
+            layer,
+            after,
             events,
-            fsync,
         }
+    }
+
+    /// The layer's files written through another backend over the same place,
+    /// as for a queue whose fsync setting differs from the layer's.
+    pub fn with_put(mut self, put: Arc<dyn Backend>) -> Self {
+        self.put = put;
+        self
     }
 }
 
-impl SealedFileSink for LocalStoreSink {
+impl SealedFileSink for LayerSink {
     fn land<'a>(
         &'a self,
         queue: &'a QueueId,
@@ -70,26 +85,47 @@ impl SealedFileSink for LocalStoreSink {
         file: &'a SealedFile,
     ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>> {
         Box::pin(async move {
-            store_file::land_local(
-                &self.fs,
-                &self.root,
-                queue,
-                file_id,
-                file,
-                self.fsync,
-                &self.disk_usage,
-            )
-            .await?;
-            store_file::report_stored(self.events.as_ref(), queue, file_id, file);
+            let source = self.put.source();
+            let started = Instant::now();
+            if let Err(e) = self.put.put(queue, file_id, Body::Runs(file.runs())).await {
+                if source == DataSource::Cloud {
+                    self.events.emit(SystemEvent::UploadFailed {
+                        queue: queue.clone(),
+                        file_id: file_id.clone(),
+                        failure: e.failure(),
+                        message: e.to_string(),
+                    });
+                }
+                return Err(e.into());
+            }
+            let took = started.elapsed();
             if let Some(last) = file.last_entry_id() {
-                self.range_store
-                    .record_range(queue, file_id, &file.entries_before, &last)
-                    .await
-                    .map_err(io::Error::other)?;
+                // Reads consult this before they read the file's header.
+                self.layer
+                    .record_range(queue, file_id, &file.entries_before, &last);
+                if let AfterLanding::Record(index) = &self.after {
+                    index.mark_landed(queue, &last, file_id).await?;
+                }
+            }
+            match source {
+                DataSource::Cloud => match file.facts(queue, file_id) {
+                    // The writer lands a queue's files one at a time and in order.
+                    Ok(facts) => self.events.emit(SystemEvent::FileLanded {
+                        file: facts,
+                        key: self.put.key(queue, file_id),
+                        took,
+                        landed_through: file_id.clone(),
+                    }),
+                    Err(e) => log::warn!(target: "normfs-store",
+                        "queue {queue}: file {file_id} landed but its blocks do not parse: {e}"),
+                },
+                _ => store_file::report_stored(self.events.as_ref(), queue, file_id, file),
             }
             // A receiver that has gone away is the instance shutting down; the
-            // file is on disk either way.
-            let _ = self.store_done_tx.send((queue.clone(), file_id.clone()));
+            // file is where it was sent either way.
+            if let AfterLanding::Announce(tx) = &self.after {
+                let _ = tx.send((queue.clone(), file_id.clone()));
+            }
             Ok(())
         })
     }

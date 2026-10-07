@@ -1,15 +1,13 @@
-use std::fs::File;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
-use normfs_fs::{AppendOutcome, Fs, Runs, TmpMode};
 use normfs_types::QueueId;
 use tokio::sync::{Mutex, Notify, mpsc};
 use tokio::task::JoinHandle;
 use uintn::UintN;
 
+use crate::backend::{AppendTarget, Appended};
 use crate::page_pool::PagePool;
 
 #[derive(Debug, Clone)]
@@ -43,10 +41,8 @@ impl Default for AckFileWriterSettings {
 /// the file is cut back to it, so a torn write cannot leave a partial frame
 /// for the retry to append after -- V1's positional ids turn any stray bytes
 /// into every later entry answering under the wrong id.
-#[derive(Debug)]
 pub(crate) struct FileTail {
-    pub(crate) file: Arc<File>,
-    pub(crate) inode: u64,
+    pub(crate) target: Arc<dyn AppendTarget>,
     pub(crate) flushed_len: u64,
     pub(crate) needs_restore: bool,
 }
@@ -59,21 +55,18 @@ pub(crate) struct FileTail {
 /// bytes again. The APPEND plan does the cutting; an attempt it could not
 /// cut back is followed by a RESTORE before the next one.
 pub(crate) async fn commit(
-    fs: &Fs,
-    path: &Path,
     tail: &mut FileTail,
-    runs: Runs,
+    runs: Vec<Bytes>,
     settings: &AckFileWriterSettings,
 ) -> bool {
-    let total = runs.total();
+    let total: u64 = runs.iter().map(|r| r.len() as u64).sum();
+    let target = tail.target.clone();
+    let name = target.name();
     for attempt in 0..settings.max_retries {
         let at = tail.flushed_len;
         if tail.needs_restore {
-            if let Err(e) = fs
-                .restore_with_inode(tail.file.clone(), tail.inode, path, at)
-                .await
-            {
-                log::error!(target: "normfs", "Cannot restore {} to {at}: {e}", path.display());
+            if let Err(e) = tail.target.restore(at).await {
+                log::error!(target: "normfs", "Cannot restore {name} to {at}: {e}");
                 if attempt + 1 < settings.max_retries {
                     tokio::time::sleep(settings.retry_delay).await;
                 }
@@ -82,28 +75,18 @@ pub(crate) async fn commit(
             tail.needs_restore = false;
         }
         tail.needs_restore = true;
-        match fs
-            .append_sync_with_inode(
-                tail.file.clone(),
-                tail.inode,
-                path,
-                at,
-                runs.clone(),
-                settings.fsync,
-            )
-            .await
-        {
-            Ok(AppendOutcome::Committed) => {
+        match tail.target.append(at, runs.clone(), settings.fsync).await {
+            Ok(Appended::Committed) => {
                 tail.needs_restore = false;
                 tail.flushed_len += total;
                 return true;
             }
-            Ok(AppendOutcome::Failed { err, restored }) => {
+            Ok(Appended::Failed { err, restored }) => {
                 log::error!(
                     target: "normfs",
                     "Failed to commit {} bytes to {} at {} (attempt {}/{}): {}",
                     total,
-                    path.display(),
+                    name,
                     at,
                     attempt + 1,
                     settings.max_retries,
@@ -114,8 +97,8 @@ pub(crate) async fn commit(
             Err(e) => {
                 log::error!(
                     target: "normfs",
-                    "The fs layer could not run the commit to {} (attempt {}/{}): {}",
-                    path.display(),
+                    "The storage layer could not run the commit to {} (attempt {}/{}): {}",
+                    name,
                     attempt + 1,
                     settings.max_retries,
                     e
@@ -176,8 +159,7 @@ pub struct AckFileWriter {
 /// back to be overwritten, so advancing it early would let a record be lost
 /// between being accepted and being on disk.
 async fn flush_pool(
-    fs: &Fs,
-    path: &Path,
+    name: &str,
     file: &Arc<Mutex<FileTail>>,
     state: &Arc<Mutex<WriterState>>,
     ack_sender: &mpsc::UnboundedSender<(QueueId, UintN)>,
@@ -200,19 +182,19 @@ async fn flush_pool(
         "Writing {} run(s), {} bytes, to {}",
         pending.len(),
         total,
-        path.display()
+        name
     );
 
     // Until the commit, take_pending hands the same runs out again by itself.
     let mut tail_guard = file.lock().await;
-    let runs = Runs(pending.iter().map(|(_, b)| b.clone()).collect());
-    let flushed = commit(fs, path, &mut tail_guard, runs, settings).await;
+    let runs = pending.iter().map(|(_, b)| b.clone()).collect();
+    let flushed = commit(&mut tail_guard, runs, settings).await;
     if !flushed {
         log::error!(
             target: "normfs",
             "Every attempt to write entries ..={last} to {} failed; they stay pending for \
              the next flush",
-            path.display()
+            name
         );
         return false;
     }
@@ -255,40 +237,23 @@ async fn flush_pool(
         log::error!(
             target: "normfs",
             "Failed to report entries in {} durable: the ack channel is closed",
-            path.display(),
+            name,
         );
     }
     true
 }
 
 impl AckFileWriter {
-    pub async fn new(
-        fs: Fs,
-        path: impl AsRef<Path>,
+    /// Over `target`, already holding a durable header of `initial_size`.
+    pub(crate) async fn new(
+        target: Arc<dyn AppendTarget>,
         settings: AckFileWriterSettings,
         ack_sender: mpsc::UnboundedSender<(QueueId, UintN)>,
-        header: Bytes,
+        initial_size: u64,
         pool: Option<Arc<PagePool>>,
         epoch: u64,
     ) -> std::io::Result<Self> {
-        if let Some(parent) = path.as_ref().parent() {
-            fs.mkdir_all(parent).await?;
-        }
-
-        // Only successful creation certifies the header; recovery must still
-        // accept a torn header left by a crash before creation completed.
-        let initial_size = header.len() as u64;
-        let (file, inode) = fs
-            .create_durable_with_inode(
-                path.as_ref(),
-                Runs(vec![header]),
-                TmpMode::Trunc,
-                settings.fsync,
-            )
-            .await?;
-        let file = Arc::new(file);
-
-        let path = path.as_ref().to_path_buf();
+        let name = target.name().to_string();
 
         // Pooled records live in the pool's pages; reserving max_buffer_size
         // per open file would make memory grow with the number of queues.
@@ -312,14 +277,12 @@ impl AckFileWriter {
             p.set_flush_signal(buffer_full_notify.clone());
         }
         let tail = Arc::new(Mutex::new(FileTail {
-            file,
-            inode,
+            target,
             flushed_len: initial_size,
             needs_restore: false,
         }));
         let writer_handle = tokio::spawn(writer_task(
-            fs.clone(),
-            path.clone(),
+            name,
             tail.clone(),
             state.clone(),
             settings.clone(),
@@ -417,8 +380,7 @@ impl AckFileWriter {
 }
 
 async fn writer_task(
-    fs: Fs,
-    path: PathBuf,
+    name: String,
     file: Arc<Mutex<FileTail>>,
     state: Arc<Mutex<WriterState>>,
     settings: AckFileWriterSettings,
@@ -439,10 +401,10 @@ async fn writer_task(
                 // everything owed. Mid-life flushes may fail and retry, but a
                 // failure here has no next flush behind it, and `close()`
                 // must not report a file complete that is missing its tail.
-                return flush(&fs, &path, &file, &state, &ack_sender, &pool, epoch, &settings).await;
+                return flush(&name, &file, &state, &ack_sender, &pool, epoch, &settings).await;
             }
             _ = buffer_full_notify.notified() => {
-                let _ = flush(&fs, &path, &file, &state, &ack_sender, &pool, epoch, &settings).await;
+                let _ = flush(&name, &file, &state, &ack_sender, &pool, epoch, &settings).await;
             }
             // The timer is what a queue nobody writes to often depends on:
             // nothing else on this path can start a flush, so one record on an
@@ -453,7 +415,7 @@ async fn writer_task(
             // the pool lock and walking every page.
             _ = interval.tick() => {
                 if has_pending(&state, &pool).await {
-                    let _ = flush(&fs, &path, &file, &state, &ack_sender, &pool, epoch, &settings).await;
+                    let _ = flush(&name, &file, &state, &ack_sender, &pool, epoch, &settings).await;
                 }
             }
         }
@@ -480,8 +442,7 @@ async fn has_pending(state: &Arc<Mutex<WriterState>>, pool: &Option<Arc<PagePool
 /// writer was given one, the entry buffer otherwise. False when something
 /// owed to the file is still unwritten.
 async fn flush(
-    fs: &Fs,
-    path: &Path,
+    name: &str,
     file: &Arc<Mutex<FileTail>>,
     state: &Arc<Mutex<WriterState>>,
     ack_sender: &mpsc::UnboundedSender<(QueueId, UintN)>,
@@ -499,11 +460,11 @@ async fn flush(
     // the file; going on to write pages would put later records in front of
     // them, and V1's positional ids would hand every payload after that point
     // out under the wrong id.
-    if !flush_buffer(fs, path, file, state, ack_sender, settings).await {
+    if !flush_buffer(name, file, state, ack_sender, settings).await {
         return false;
     }
     if let Some(pool) = pool {
-        return flush_pool(fs, path, file, state, ack_sender, pool, epoch, settings).await;
+        return flush_pool(name, file, state, ack_sender, pool, epoch, settings).await;
     }
     true
 }
@@ -511,8 +472,7 @@ async fn flush(
 /// False when the buffer still owes the file bytes, so nothing may be written
 /// after them.
 async fn flush_buffer(
-    fs: &Fs,
-    path: &Path,
+    name: &str,
     file: &Arc<Mutex<FileTail>>,
     state: &Arc<Mutex<WriterState>>,
     ack_sender: &mpsc::UnboundedSender<(QueueId, UintN)>,
@@ -546,19 +506,12 @@ async fn flush_buffer(
     log::debug!(
         target: "normfs",
         "Writing to file {}, block size: {}",
-        path.display(),
+        name,
         data_to_write.len()
     );
 
     let mut tail_guard = file.lock().await;
-    let write_successful = commit(
-        fs,
-        path,
-        &mut tail_guard,
-        Runs(vec![data_to_write.clone()]),
-        settings,
-    )
-    .await;
+    let write_successful = commit(&mut tail_guard, vec![data_to_write.clone()], settings).await;
     drop(tail_guard);
 
     if write_successful {

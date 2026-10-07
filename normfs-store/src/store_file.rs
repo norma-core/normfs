@@ -1,16 +1,13 @@
 use bytes::{Bytes, BytesMut};
 use normfs_crypto::CryptoContext;
-use normfs_fs::{Fs, PublishSpec, Runs, TmpMode};
 use normfs_types::QueueId;
 use normfs_types::events::{FileFacts, SystemEvent, SystemEvents};
 use std::io;
-use std::path::Path;
 use uintn::UintN;
-use uuid::Uuid;
 
+use crate::StoreError;
 use crate::header::{CompressionType, EncryptionType, FileAuthentication, StoreHeader};
 use crate::store_header_v1::{AnyStoreHeader, StoreHeaderV1};
-use crate::{DiskUsage, StoreError};
 
 /// A store file's bytes before they go anywhere: `auth ++ header ++ body`.
 ///
@@ -55,6 +52,14 @@ impl SealedFile {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// The file as runs to write or send; one when it was built in one buffer.
+    pub fn runs(&self) -> Vec<Bytes> {
+        match &self.whole {
+            Some(whole) => vec![whole.clone()],
+            None => vec![self.auth.clone(), self.header.clone(), self.body.clone()],
+        }
     }
 
     pub fn to_bytes(&self) -> Bytes {
@@ -225,51 +230,4 @@ fn compress_and_encrypt(
     }
 
     Ok(out)
-}
-
-/// Writes `file` under `root` as `queue`'s store file `file_id`: temp file,
-/// sync, rename, then the directory synced so the name survives a crash too.
-/// The fs layer's PUBLISH plan is that sequence, and its proof is what says
-/// the name never resolves to a torn file.
-pub async fn land_local(
-    fs: &Fs,
-    root: &Path,
-    queue: &QueueId,
-    file_id: &UintN,
-    file: &SealedFile,
-    fsync: bool,
-    usage: &DiskUsage,
-) -> io::Result<()> {
-    let store_path = queue.to_store_path(root, file_id);
-    let parent = store_path
-        .parent()
-        .ok_or_else(|| io::Error::other("store path has no parent"))?;
-    fs.mkdir_all(parent).await?;
-
-    let tmp_dir = root.join("tmp");
-    fs.mkdir_all(&tmp_dir).await?;
-    let temp_path = tmp_dir.join(format!("{}.tmp", Uuid::new_v4()));
-
-    usage
-        .publish(
-            fs,
-            queue,
-            PublishSpec {
-                tmp: temp_path,
-                dst: store_path.clone(),
-                runs: Runs(vec![
-                    file.auth.clone(),
-                    file.header.clone(),
-                    file.body.clone(),
-                ]),
-                tmp_mode: TmpMode::Excl,
-                sync: fsync,
-            },
-        )
-        .await?;
-
-    log::debug!(target: "normfs-store",
-        "Landed store file for queue {}, file {}: {} bytes at {:?}",
-        queue, file_id, file.len(), store_path);
-    Ok(())
 }

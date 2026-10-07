@@ -10,9 +10,8 @@ use tokio::time;
 use uintn::UintN;
 
 use crate::Error;
-use normfs_cloud::offloader::QueueOffloader;
-use normfs_cloud::S3Client;
 use normfs_fs::Fs;
+use normfs_store::offloader::QueueOffloader;
 use normfs_store::{DiskUsage, QueueBytes, StoreError};
 use normfs_types::events::{self, EventSink, EvictionBlock, SystemEvent};
 use normfs_types::QueueId;
@@ -433,7 +432,7 @@ struct QueueMonitor {
     config: DiskMonitorConfig,
     store_dir: PathBuf,
     wal_dir: PathBuf,
-    offloader: Option<QueueOffloader>,
+    offloader: Option<Arc<QueueOffloader>>,
     store_bytes: Arc<QueueBytes>,
     /// The last eviction's `next`. Publication takes `store_bytes`' shared side, so
     /// cleanup starts here instead of walking the store for its oldest file.
@@ -458,26 +457,12 @@ impl QueueMonitor {
         queue_id: QueueId,
         config: DiskMonitorConfig,
         root_path: PathBuf,
-        client: Option<Arc<S3Client>>,
-        prefix: Option<&str>,
+        offloader: Option<Arc<QueueOffloader>>,
         forget_range: Option<ForgetRange>,
         disk_usage: Arc<DiskUsage>,
         events: EventSink,
     ) -> Result<Self, Error> {
-        let offloader = match (client, prefix) {
-            (Some(client), Some(prefix)) if config.offload => Some(
-                QueueOffloader::new(
-                    fs.clone(),
-                    queue_id.clone(),
-                    root_path.clone(),
-                    client,
-                    prefix,
-                    events.clone(),
-                )
-                .await,
-            ),
-            _ => None,
-        };
+        let offloader = offloader.filter(|_| config.offload);
 
         let store_dir = queue_id.to_store_dir(&root_path);
         let wal_dir = queue_id.to_wal_dir(&root_path);
@@ -758,8 +743,6 @@ pub struct DiskMonitor {
     monitors: Arc<RwLock<std::collections::HashMap<QueueId, QueueMonitor>>>,
     root_path: PathBuf,
     _handle: Option<tokio::task::JoinHandle<()>>,
-    client: Option<Arc<S3Client>>,
-    prefix: Option<String>,
     forget_range: Option<ForgetRange>,
     disk_usage: Arc<DiskUsage>,
     events: EventSink,
@@ -769,8 +752,6 @@ impl DiskMonitor {
     pub async fn new(
         fs: Fs,
         root_path: impl AsRef<Path>,
-        client: Option<Arc<S3Client>>,
-        prefix: Option<String>,
         forget_range: Option<ForgetRange>,
         disk_usage: Arc<DiskUsage>,
         events: EventSink,
@@ -811,48 +792,17 @@ impl DiskMonitor {
             monitors,
             root_path: root_path.as_ref().to_path_buf(),
             _handle: Some(handle),
-            client,
-            prefix,
             forget_range,
             disk_usage,
             events,
         })
     }
 
-    pub async fn store_file_done(&self, queue_id: &QueueId, file_id: UintN) -> Result<(), Error> {
-        let monitors = self.monitors.read().await;
-        if let Some(monitor) = monitors.get(queue_id) {
-            if let Some(ref offloader) = monitor.offloader {
-                if let Err(e) = offloader.enqueue_file(file_id.clone()).await {
-                    log::error!(
-                        target: "normfs::disk_monitor",
-                        "Failed to enqueue file for offload: queue={}, file_id={:?}, error={}",
-                        queue_id, file_id, e
-                    );
-                }
-                Ok(())
-            } else {
-                log::debug!(
-                    target: "normfs::disk_monitor",
-                    "No offloader configured for queue '{}', skipping offload for file {:?}",
-                    queue_id, file_id
-                );
-                Ok(())
-            }
-        } else {
-            log::warn!(
-                target: "normfs::disk_monitor",
-                "Queue '{}' not found in disk monitor, cannot enqueue file {:?} for offload",
-                queue_id, file_id
-            );
-            Err(Error::Store(StoreError::FileNotFound))
-        }
-    }
-
     pub async fn add_queue(
         &self,
         queue_id: &QueueId,
         config: DiskMonitorConfig,
+        offloader: Option<Arc<QueueOffloader>>,
     ) -> Result<(), Error> {
         config.validate()?;
 
@@ -861,8 +811,7 @@ impl DiskMonitor {
             queue_id.clone(),
             config,
             self.root_path.clone(),
-            self.client.clone(),
-            self.prefix.as_deref(),
+            offloader,
             self.forget_range.clone(),
             self.disk_usage.clone(),
             self.events.clone(),

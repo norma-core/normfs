@@ -1,7 +1,6 @@
 use super::{DataSource, PrefetchHandle, ReadContext, ReadEntry, ReaderState};
 use crate::{mem::MemStore, Error};
-use normfs_cloud::CloudDownloader;
-use normfs_store::PersistStore;
+use normfs_store::{Layer, PersistStore};
 use normfs_types::{QueueId, ReadPosition};
 use normfs_wal::WalStore;
 use std::sync::Arc;
@@ -20,7 +19,7 @@ pub struct ReaderFSM {
     pub(crate) wal: Arc<WalStore>,
     pub(crate) store: Arc<PersistStore>,
     pub(crate) mem: Arc<MemStore>,
-    pub(crate) s3_downloader: Option<Arc<CloudDownloader>>,
+    pub(crate) cloud: Option<Arc<Layer>>,
     queue_settings: Arc<crate::QueueSettings>,
     pointers: Arc<crate::memory_pointers::MemoryPointers>,
 }
@@ -30,7 +29,7 @@ impl ReaderFSM {
         wal: Arc<WalStore>,
         store: Arc<PersistStore>,
         mem: Arc<MemStore>,
-        s3_downloader: Option<Arc<CloudDownloader>>,
+        cloud: Option<Arc<Layer>>,
         queue_settings: Arc<crate::QueueSettings>,
         pointers: Arc<crate::memory_pointers::MemoryPointers>,
     ) -> Self {
@@ -38,7 +37,7 @@ impl ReaderFSM {
             wal,
             store,
             mem,
-            s3_downloader,
+            cloud,
             queue_settings,
             pointers,
         }
@@ -284,14 +283,18 @@ impl ReaderFSM {
         }
 
         // Try S3 (if available)
-        if let Some(s3) = &self.s3_downloader {
+        if let Some(s3) = &self.cloud {
             match s3.get_store_bytes(&queue, &file_id).await {
                 Ok(Some(store_bytes)) => {
                     log::info!(target: "normfs-reader-fsm",
                         "Prefetch: got {} bytes from S3 for file {}",
                         store_bytes.len(), file_id);
-                    // Extract WAL bytes (decrypt/decompress) - verify signatures for S3 files
-                    match store.extract_wal_bytes(&queue, &file_id, store_bytes, true) {
+                    match store.extract_wal_bytes(
+                        &queue,
+                        &file_id,
+                        store_bytes,
+                        s3.verifies_bodies(),
+                    ) {
                         Ok(wal_bytes) => {
                             log::debug!(target: "normfs-reader-fsm",
                                 "Prefetch successful from S3: queue={}, file_id={}, wal_bytes={}",
@@ -316,7 +319,7 @@ impl ReaderFSM {
                     log::error!(target: "normfs-reader-fsm",
                         "Prefetch: S3 error: queue={}, file_id={}, error={:?}",
                         queue, file_id, e);
-                    return Err(Error::Cloud(e));
+                    return Err(Error::Cloud(e.into()));
                 }
             }
         }
@@ -519,7 +522,7 @@ impl ReaderFSM {
             &start_id,
             store,
             wal,
-            self.s3_downloader.as_ref(),
+            self.cloud.as_ref(),
             self.cloud_last(&queue),
         )
         .await
@@ -629,7 +632,7 @@ impl ReaderFSM {
                     "File not found in WAL: queue={}, file_id={}",
                     ctx.queue, ctx.file_id);
                 // Not in WAL, try S3 if available, otherwise move to next file
-                if self.s3_downloader.is_some() {
+                if self.cloud.is_some() {
                     log::trace!(target: "normfs-reader-fsm",
                         "Trying S3: queue={}, file_id={}",
                         ctx.queue, ctx.file_id);
@@ -667,14 +670,12 @@ impl ReaderFSM {
     }
 
     async fn handle_read_s3(&self, ctx: ReadContext) -> Result<ReaderState, Error> {
-        use normfs_cloud::errors::CloudError;
-
         // Check if sender is still open
         if ctx.sender.is_closed() {
             return Ok(ReaderState::Failed(Error::ClientDisconnected));
         }
 
-        let s3_downloader = match &self.s3_downloader {
+        let cloud = match &self.cloud {
             Some(s3) => s3,
             None => {
                 log::error!(target: "normfs-reader-fsm",
@@ -689,10 +690,7 @@ impl ReaderFSM {
             ctx.queue, ctx.file_id, ctx.next_id, ctx.last_id);
 
         // Get store bytes from S3
-        match s3_downloader
-            .get_store_bytes(&ctx.queue, &ctx.file_id)
-            .await
-        {
+        match cloud.get_store_bytes(&ctx.queue, &ctx.file_id).await {
             Ok(Some(store_bytes)) => {
                 log::info!(target: "normfs-reader-fsm",
                     "Downloaded {} bytes from S3: queue={}, file_id={}",
@@ -715,23 +713,12 @@ impl ReaderFSM {
                     prefetch_handle: None,
                 })
             }
-            Err(CloudError::NoFilesFound) => {
-                log::info!(target: "normfs-reader-fsm",
-                    "No files found in S3, moving to next file: queue={}, file_id={}",
-                    ctx.queue, ctx.file_id);
-                // No files found, move to next file
-                Ok(ReaderState::ReadNextFile {
-                    current_file: ctx.file_id.clone(),
-                    ctx,
-                    prefetch_handle: None,
-                })
-            }
             Err(e) => {
                 log::error!(target: "normfs-reader-fsm",
                     "S3 download error (network/auth/etc): queue={}, file_id={}, error={:?}",
                     ctx.queue, ctx.file_id, e);
                 // Network error, auth error, or other transient S3 error - fail the read
-                Ok(ReaderState::Failed(Error::Cloud(e)))
+                Ok(ReaderState::Failed(Error::Cloud(e.into())))
             }
         }
     }

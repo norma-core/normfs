@@ -11,7 +11,7 @@ pub enum WalError {
     AnyWalHeaderError(AnyWalHeaderError),
     WalEntryError(WalEntryError),
     WalEntryV1Error(WalEntryV1Error),
-    PathError(uintn::paths::PathError),
+    PathError(normfs_fs::PathError),
     SendError,
     WalNotFound,
     WriterNotFound,
@@ -88,6 +88,12 @@ impl From<WalEntryV1Error> for WalError {
 impl From<std::io::Error> for WalError {
     fn from(e: std::io::Error) -> Self {
         WalError::IoError(e)
+    }
+}
+
+impl From<crate::backend::BackendError> for WalError {
+    fn from(e: crate::backend::BackendError) -> Self {
+        WalError::IoError(e.into())
     }
 }
 

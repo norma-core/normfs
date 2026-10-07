@@ -1,5 +1,6 @@
 use bytes::Bytes;
 use normfs_cloud::{CloudSettings, S3Client};
+use normfs_store::{Backend, Body, End};
 use std::env;
 
 /// Helper function to get cloud settings from standard AWS environment variables
@@ -524,13 +525,13 @@ async fn test_create_bucket_is_idempotent() {
     client.create_bucket().await.expect("second create");
 }
 
-/// A downloader over a prefix no other run shares, and the queue under it.
+/// The bucket under a prefix no other run shares, and a queue under it.
 async fn fresh_queue(
     settings: &CloudSettings,
     list_page_size: Option<usize>,
 ) -> (
     std::sync::Arc<S3Client>,
-    normfs_cloud::CloudDownloader,
+    normfs_cloud::S3Store,
     normfs_types::QueueId,
 ) {
     let mut client = create_client(settings).unwrap();
@@ -540,21 +541,21 @@ async fn fresh_queue(
     client.create_bucket().await.unwrap();
     let client = std::sync::Arc::new(client);
     let prefix = format!("{}/ids-{}", settings.prefix, uuid::Uuid::new_v4());
-    let downloader = normfs_cloud::CloudDownloader::new(client.clone(), &prefix);
+    let store = normfs_cloud::S3Store::new(client.clone(), &prefix);
     let queue = normfs_types::QueueIdResolver::new("0123456789abcdef").resolve("q");
-    (client, downloader, queue)
+    (client, store, queue)
 }
 
 async fn put_ids(
     client: &S3Client,
-    downloader: &normfs_cloud::CloudDownloader,
+    store: &normfs_cloud::S3Store,
     queue: &normfs_types::QueueId,
     ids: impl IntoIterator<Item = u64>,
 ) {
     for id in ids {
         let status = client
             .put_object(
-                &downloader.key(queue, &uintn::UintN::from(id)),
+                &store.key(queue, &uintn::UintN::from(id)),
                 Bytes::from_static(b"x"),
             )
             .await
@@ -568,41 +569,35 @@ async fn test_find_ids_across_directory_levels() {
     let Some(settings) = skip_if_no_s3() else {
         return;
     };
-    let (client, downloader, queue) = fresh_queue(&settings, None).await;
+    let (client, store, queue) = fresh_queue(&settings, None).await;
 
     // fff.store, 001/000.store, 002/fff.store, 001/000/000.store
-    put_ids(
-        &client,
-        &downloader,
-        &queue,
-        [0xfff, 0x1000, 0x2fff, 0x1000000],
-    )
-    .await;
+    put_ids(&client, &store, &queue, [0xfff, 0x1000, 0x2fff, 0x1000000]).await;
     assert_eq!(
-        downloader.find_max_id(&queue).await.unwrap(),
+        store.find(&queue, End::Max).await.unwrap(),
         Some(uintn::UintN::from(0x1000000u64))
     );
     assert_eq!(
-        downloader.find_min_id(&queue).await.unwrap(),
+        store.find(&queue, End::Min).await.unwrap(),
         Some(uintn::UintN::from(0xfffu64))
     );
 
-    let (client, downloader, queue) = fresh_queue(&settings, None).await;
-    put_ids(&client, &downloader, &queue, [0x2fff, 0x1000]).await;
+    let (client, store, queue) = fresh_queue(&settings, None).await;
+    put_ids(&client, &store, &queue, [0x2fff, 0x1000]).await;
     assert_eq!(
-        downloader.find_min_id(&queue).await.unwrap(),
+        store.find(&queue, End::Min).await.unwrap(),
         Some(uintn::UintN::from(0x1000u64))
     );
     assert_eq!(
-        downloader.find_max_id(&queue).await.unwrap(),
+        store.find(&queue, End::Max).await.unwrap(),
         Some(uintn::UintN::from(0x2fffu64))
     );
 
     // 001/000/000.store sorts before 002/000.store but is the larger id.
-    let (client, downloader, queue) = fresh_queue(&settings, None).await;
-    put_ids(&client, &downloader, &queue, [0x1000000, 0x2000]).await;
+    let (client, store, queue) = fresh_queue(&settings, None).await;
+    put_ids(&client, &store, &queue, [0x1000000, 0x2000]).await;
     assert_eq!(
-        downloader.find_min_id(&queue).await.unwrap(),
+        store.find(&queue, End::Min).await.unwrap(),
         Some(uintn::UintN::from(0x2000u64))
     );
 }
@@ -612,10 +607,10 @@ async fn test_find_ids_ignores_keys_outside_the_layout() {
     let Some(settings) = skip_if_no_s3() else {
         return;
     };
-    let (client, downloader, queue) = fresh_queue(&settings, None).await;
+    let (client, store, queue) = fresh_queue(&settings, None).await;
 
-    put_ids(&client, &downloader, &queue, [5]).await;
-    let key = downloader.key(&queue, &uintn::UintN::from(5u64));
+    put_ids(&client, &store, &queue, [5]).await;
+    let key = store.key(&queue, &uintn::UintN::from(5u64));
     let queue_prefix = key.strip_suffix("005.store").unwrap();
     for stray in [
         "ffff.store",
@@ -630,7 +625,7 @@ async fn test_find_ids_ignores_keys_outside_the_layout() {
             .unwrap();
     }
     assert_eq!(
-        downloader.find_max_id(&queue).await.unwrap(),
+        store.find(&queue, End::Max).await.unwrap(),
         Some(uintn::UintN::from(5u64))
     );
 }
@@ -640,16 +635,16 @@ async fn test_find_ids_follows_every_listing_page() {
     let Some(settings) = skip_if_no_s3() else {
         return;
     };
-    let (client, downloader, queue) = fresh_queue(&settings, Some(4)).await;
+    let (client, store, queue) = fresh_queue(&settings, Some(4)).await;
 
-    put_ids(&client, &downloader, &queue, 1..=11).await;
-    put_ids(&client, &downloader, &queue, (1..=11).map(|d| d << 12)).await;
+    put_ids(&client, &store, &queue, 1..=11).await;
+    put_ids(&client, &store, &queue, (1..=11).map(|d| d << 12)).await;
     assert_eq!(
-        downloader.find_max_id(&queue).await.unwrap(),
+        store.find(&queue, End::Max).await.unwrap(),
         Some(uintn::UintN::from(11u64 << 12))
     );
     assert_eq!(
-        downloader.find_min_id(&queue).await.unwrap(),
+        store.find(&queue, End::Min).await.unwrap(),
         Some(uintn::UintN::from(1u64))
     );
 }
@@ -660,15 +655,79 @@ async fn test_find_ids_under_a_prefix_the_server_would_encode() {
         return;
     };
     settings.prefix = format!("{} with space+plus", settings.prefix);
-    let (client, downloader, queue) = fresh_queue(&settings, None).await;
+    let (client, store, queue) = fresh_queue(&settings, None).await;
 
-    put_ids(&client, &downloader, &queue, [1, 0x1000]).await;
+    put_ids(&client, &store, &queue, [1, 0x1000]).await;
     assert_eq!(
-        downloader.find_max_id(&queue).await.unwrap(),
+        store.find(&queue, End::Max).await.unwrap(),
         Some(uintn::UintN::from(0x1000u64))
     );
     assert_eq!(
-        downloader.find_min_id(&queue).await.unwrap(),
+        store.find(&queue, End::Min).await.unwrap(),
         Some(uintn::UintN::from(1u64))
     );
+}
+
+#[tokio::test]
+async fn test_s3_store_reads_back_what_it_put() {
+    let Some(settings) = skip_if_no_s3() else {
+        return;
+    };
+    let (_, store, queue) = fresh_queue(&settings, None).await;
+    let id = uintn::UintN::from(0x1001u64);
+
+    assert!(store.get(&queue, &id).await.unwrap().is_none());
+    assert!(store.size(&queue, &id).await.unwrap().is_none());
+    assert!(store.find(&queue, End::Max).await.unwrap().is_none());
+
+    let runs = vec![Bytes::from_static(b"head"), Bytes::from_static(b"-body")];
+    store.put(&queue, &id, Body::Runs(runs)).await.unwrap();
+    let body = Body::Runs(vec![Bytes::from_static(b"x")]);
+    store
+        .put(&queue, &uintn::UintN::from(2u64), body)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store.get(&queue, &id).await.unwrap().unwrap(),
+        &b"head-body"[..]
+    );
+    assert_eq!(
+        store.get_range(&queue, &id, 2, 4).await.unwrap().unwrap(),
+        &b"ad-b"[..]
+    );
+    assert_eq!(
+        store.get_range(&queue, &id, 6, 100).await.unwrap().unwrap(),
+        &b"ody"[..]
+    );
+    assert_eq!(store.size(&queue, &id).await.unwrap(), Some(9));
+    assert_eq!(
+        store.find(&queue, End::Min).await.unwrap(),
+        Some(uintn::UintN::from(2u64))
+    );
+    assert_eq!(store.find(&queue, End::Max).await.unwrap(), Some(id));
+}
+
+#[tokio::test]
+async fn test_s3_store_reads_empty_ranges_as_the_local_store_does() {
+    let Some(settings) = skip_if_no_s3() else {
+        return;
+    };
+    let (_, bucket, queue) = fresh_queue(&settings, None).await;
+    let temp = tempfile::tempdir().unwrap();
+    let fs = normfs_wal::Fs::new(normfs_wal::FsConfig::default()).unwrap();
+    let local = normfs_store::local_store(fs, temp.path(), false, Default::default());
+    let (kept, missing) = (uintn::UintN::from(1u64), uintn::UintN::from(2u64));
+    for store in [&bucket as &dyn Backend, &local] {
+        let body = Body::Runs(vec![Bytes::from_static(b"nine byte")]);
+        store.put(&queue, &kept, body).await.unwrap();
+    }
+
+    for (offset, len) in [(0, 0), (4, 0), (9, 0), (9, 5), (20, 5)] {
+        for id in [&kept, &missing] {
+            let remote = bucket.get_range(&queue, id, offset, len).await.unwrap();
+            let here = local.get_range(&queue, id, offset, len).await.unwrap();
+            assert_eq!(remote, here, "file {id} at {offset}+{len}");
+        }
+    }
 }

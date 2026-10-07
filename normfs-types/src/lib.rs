@@ -126,6 +126,13 @@ impl QueueIdResolver {
     }
 }
 
+/// The lowest or highest file id a queue has in some storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum End {
+    Min,
+    Max,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DataSource {
     None,

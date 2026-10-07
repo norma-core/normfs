@@ -40,6 +40,7 @@ fn fixture(pages: usize) -> Fixture {
         },
         crypto.clone(),
         wal,
+        normfs_fs::Fs::new(normfs_fs::FsConfig::default()).unwrap(),
         written_tx,
     ));
     let queue = QueueIdResolver::new(crypto.instance_id_hex()).resolve("pages");
