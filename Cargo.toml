@@ -29,14 +29,14 @@ prost = "0.12"
 log = "0.4.28"
 
 # Internal workspace crates
-uintn = { path = "uintn-rs" }
-normfs-types = { path = "normfs-types" }
-normfs-time = { path = "normfs-time" }
-normfs-wal = { path = "normfs-wal" }
-normfs-store = { path = "normfs-store" }
-normfs-cloud = { path = "normfs-cloud" }
-normfs-crypto = { path = "normfs-crypto" }
-normfs-fs = { path = "normfs-fs" }
+uintn = { version = "0.4.0", path = "uintn-rs" }
+normfs-types = { version = "0.4.0", path = "normfs-types" }
+normfs-time = { version = "0.4.0", path = "normfs-time" }
+normfs-wal = { version = "0.4.0", path = "normfs-wal" }
+normfs-store = { version = "0.4.0", path = "normfs-store" }
+normfs-cloud = { version = "0.4.0", path = "normfs-cloud" }
+normfs-crypto = { version = "0.4.0", path = "normfs-crypto" }
+normfs-fs = { version = "0.4.0", path = "normfs-fs" }
 
 # Dev dependencies
 tempfile = "3.25"
