@@ -1448,7 +1448,12 @@ impl NormFS {
             let encryption_type = wal_settings.encryption_type;
 
             // Retried: an old file a failed listing misses is never migrated.
+            // A queue's pool lives as long as that opening of the queue, so
+            // the retries end when it is closed and do not double on reopen.
+            let mem = self.mem.clone();
+            let opened = self.mem.pool(queue).map(|p| Arc::downgrade(&p));
             tokio::spawn(async move {
+                let mut failures: u32 = 0;
                 while let Err(e) = wal
                     .process_old_files(
                         &queue_clone,
@@ -1458,11 +1463,22 @@ impl NormFS {
                     )
                     .await
                 {
-                    log::error!(target: "normfs",
-                        "Failed to process old files for queue {}: {}, retrying in 1 second",
-                        queue_clone, e
-                    );
+                    failures = failures.saturating_add(1);
+                    if failures.is_power_of_two() {
+                        log::error!(target: "normfs",
+                            "Failed to process old files for queue {} ({} tries): {}, \
+                             retrying in 1 second",
+                            queue_clone, failures, e
+                        );
+                    }
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    let open = opened.as_ref().is_some_and(|pool| {
+                        mem.pool(&queue_clone)
+                            .is_some_and(|p| std::ptr::eq(pool.as_ptr(), Arc::as_ptr(&p)))
+                    });
+                    if !open {
+                        break;
+                    }
                 }
             });
         }

@@ -419,7 +419,7 @@ impl WalStore {
         compression_type: normfs_types::CompressionType,
         encryption_type: normfs_types::EncryptionType,
     ) -> Result<(), WalError> {
-        log::info!(
+        log::debug!(
             "WalStore: processing old files for queue '{}', current file: {} (not included)",
             queue,
             current_file_id
@@ -465,14 +465,7 @@ impl WalStore {
                     queue
                 );
             }
-            Err(e) => {
-                log::error!(
-                    "WalStore: error listing wal files for queue '{}': {}",
-                    queue,
-                    e
-                );
-                return Err(WalError::PathError(e));
-            }
+            Err(e) => return Err(WalError::PathError(e)),
         }
 
         Ok(())
