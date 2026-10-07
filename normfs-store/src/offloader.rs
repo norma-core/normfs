@@ -203,6 +203,7 @@ struct Moved {
     above: BTreeSet<UintN>,
     held: Option<Held>,
     start_failures: u32,
+    list_failures: u32,
 }
 
 struct Held {
@@ -261,11 +262,14 @@ impl Moved {
                         Ok(ids) => Listed::Ids(ids),
                         Err(BackendError::Unsupported(_)) => Listed::Unsupported,
                         Err(e) => {
-                            warn!(
-                                "queue {}: cannot list its files ({}); the offloaded bound \
-                                 waits",
-                                worker.queue_id, e
-                            );
+                            self.list_failures = self.list_failures.saturating_add(1);
+                            if self.list_failures.is_power_of_two() {
+                                warn!(
+                                    "queue {}: cannot list its files ({}, {} tries); the \
+                                     offloaded bound waits",
+                                    worker.queue_id, e, self.list_failures
+                                );
+                            }
                             break;
                         }
                     };
@@ -315,8 +319,8 @@ impl Moved {
         if !held.logged && held.since.elapsed() >= HELD_WARN {
             held.logged = true;
             warn!(
-                "queue {}: file {:?} has held the offloaded bound for over {:?} with later \
-                 files moved; eviction stops below it until it moves or can no longer land",
+                "queue {}: the offloaded bound has stayed below file {:?} for over {:?} with \
+                 later files moved; eviction stops there until the bound passes it",
                 worker.queue_id, held.id, HELD_WARN
             );
         }
