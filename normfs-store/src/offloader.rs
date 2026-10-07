@@ -289,21 +289,20 @@ impl Moved {
             self.held = None;
             return;
         };
-        if self.held.as_ref().is_none_or(|held| &held.id != next) {
-            self.held = Some(Held {
+        let held = match self.held.take() {
+            Some(held) if &held.id == next => held,
+            _ => Held {
                 id: next.clone(),
                 since: Instant::now(),
                 logged: false,
-            });
-        }
-        let Some(held) = self.held.as_mut() else {
-            return;
+            },
         };
+        let held = self.held.insert(held);
         if !held.logged && held.since.elapsed() >= HELD_WARN {
             held.logged = true;
             warn!(
                 "queue {}: file {:?} has held the offloaded bound for over {:?} with later \
-                 files moved; eviction stops below it until it moves or leaves the WAL",
+                 files moved; eviction stops below it until it moves or can no longer land",
                 worker.queue_id, held.id, HELD_WARN
             );
         }
@@ -473,7 +472,7 @@ impl QueueOffloaderWorker {
             mut first_put,
         } = tried;
         loop {
-            match self.is_file_offloaded(file_id).await {
+            let failed = match self.is_file_offloaded(file_id).await {
                 Ok(true) => {
                     // A put this worker saw fail can still have landed.
                     let landed =
@@ -490,49 +489,35 @@ impl QueueOffloaderWorker {
                         };
                     return Outcome::Moved(landed.map(Box::new));
                 }
-                Ok(false) => {}
-                Err(OffloadError::LocalFileError(e)) => {
-                    error!("File {:?} does not exist locally, skipping: {}", file_id, e);
-                    return Outcome::Gone;
-                }
-                Err(OffloadError::LocalReadError(e)) => {
+                Ok(false) => {
                     attempt = attempt.saturating_add(1);
-                    if attempt.is_power_of_two() {
-                        error!(
-                            "Cannot read file {:?} locally, trying it later: {}",
-                            file_id, e
-                        );
+                    first_put.get_or_insert_with(Instant::now);
+                    match self.upload_file(file_id, attempt).await {
+                        Ok(uploaded) => {
+                            info!("Successfully uploaded file {:?}", file_id);
+                            let landed = uploaded.facts.map(|file| SystemEvent::FileLanded {
+                                file,
+                                key: uploaded.key,
+                                took: uploaded.took,
+                                landed_through: file_id.clone(),
+                            });
+                            return Outcome::Moved(landed.map(Box::new));
+                        }
+                        Err(e) => e,
                     }
-                    return Outcome::Later(Tried { attempt, first_put });
                 }
-                Err(OffloadError::RemoteError(e)) => {
-                    error!(
-                        "Failed to check if file {:?} is offloaded: {}, retrying in 1 second",
-                        file_id, e
-                    );
-                    tokio::time::sleep(RETRY_DELAY).await;
-                    continue;
+                Err(e @ OffloadError::LocalReadError(_)) => {
+                    attempt = attempt.saturating_add(1);
+                    e
                 }
-            }
-
-            attempt = attempt.saturating_add(1);
-            first_put.get_or_insert_with(Instant::now);
-            match self.upload_file(file_id, attempt).await {
-                Ok(uploaded) => {
-                    info!("Successfully uploaded file {:?}", file_id);
-                    let landed = uploaded.facts.map(|file| SystemEvent::FileLanded {
-                        file,
-                        key: uploaded.key,
-                        took: uploaded.took,
-                        landed_through: file_id.clone(),
-                    });
-                    return Outcome::Moved(landed.map(Box::new));
-                }
-                Err(OffloadError::LocalFileError(e)) => {
+                Err(e) => e,
+            };
+            match failed {
+                OffloadError::LocalFileError(e) => {
                     error!("File {:?} does not exist locally, skipping: {}", file_id, e);
                     return Outcome::Gone;
                 }
-                Err(OffloadError::LocalReadError(e)) => {
+                OffloadError::LocalReadError(e) => {
                     if attempt.is_power_of_two() {
                         error!(
                             "Cannot read file {:?} locally, trying it later: {}",
@@ -541,9 +526,9 @@ impl QueueOffloaderWorker {
                     }
                     return Outcome::Later(Tried { attempt, first_put });
                 }
-                Err(OffloadError::RemoteError(e)) => {
+                OffloadError::RemoteError(e) => {
                     error!(
-                        "Failed to upload file {:?}: {}, retrying in 1 second",
+                        "Failed to move file {:?}: {}, retrying in 1 second",
                         file_id, e
                     );
                     tokio::time::sleep(RETRY_DELAY).await;
