@@ -227,18 +227,51 @@ impl Moved {
             }
         }
         if let Some(next) = self.next.as_mut() {
+            let mut listed = Listed::NotYet;
             loop {
                 if self.above.remove(next) {
                     *next = next.increment();
                     continue;
                 }
-                if self.above.range(next.clone()..).next().is_none() {
+                let Some(moved) = self.above.range(next.clone()..).next().cloned() else {
                     break;
-                }
+                };
                 if worker.may_land(shared, next).await {
                     break;
                 }
-                *next = next.increment();
+                // Jumps to the next id anything is known of, so an empty gap
+                // costs one listing rather than a look at every id in it.
+                let after = next.increment();
+                if let Listed::NotYet = listed {
+                    listed = match worker.list_ids().await {
+                        Ok(ids) => Listed::Ids(ids),
+                        Err(BackendError::Unsupported(_)) => Listed::Unsupported,
+                        Err(e) => {
+                            warn!(
+                                "queue {}: cannot list its files ({}); the offloaded bound \
+                                 waits",
+                                worker.queue_id, e
+                            );
+                            break;
+                        }
+                    };
+                }
+                let ids = match &listed {
+                    Listed::Ids(ids) => ids,
+                    _ => {
+                        *next = after;
+                        continue;
+                    }
+                };
+                let waiting = shared
+                    .pending
+                    .lock()
+                    .unwrap()
+                    .range(after.clone()..)
+                    .next()
+                    .cloned();
+                let known = ids.range(after..).next().cloned();
+                *next = [waiting, known].into_iter().flatten().fold(moved, Ord::min);
             }
         }
         self.note_held(worker);
@@ -275,6 +308,12 @@ impl Moved {
             );
         }
     }
+}
+
+enum Listed {
+    NotYet,
+    Ids(BTreeSet<UintN>),
+    Unsupported,
 }
 
 enum Outcome {
@@ -385,6 +424,17 @@ impl QueueOffloaderWorker {
         lower(self.from.backend().find(&self.queue_id, End::Min).await?);
         lower(shared.pending.lock().unwrap().first().cloned());
         Ok(first)
+    }
+
+    /// The files in the WAL and in the first layer, the WAL first as in
+    /// [`Self::may_land`].
+    async fn list_ids(&self) -> Result<BTreeSet<UintN>, BackendError> {
+        let mut ids = BTreeSet::new();
+        if let Some(wal) = &self.wal {
+            ids.extend(wal.list(&self.queue_id).await?);
+        }
+        ids.extend(self.from.backend().list(&self.queue_id).await?);
+        Ok(ids)
     }
 
     /// Whether `file_id` may still reach the next layer through this worker.

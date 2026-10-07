@@ -657,7 +657,7 @@ async fn files_far_apart_are_found_without_a_look_at_every_id_between() {
     put(local.as_ref(), &queue, far).await;
 
     let remote = Arc::new(Memory::default());
-    let _offloader = QueueOffloader::new(
+    let offloader = QueueOffloader::new(
         Arc::new(Layer::new(local, None, false)),
         Arc::new(Layer::new(remote.clone(), None, true)),
         None,
@@ -667,6 +667,10 @@ async fn files_far_apart_are_found_without_a_look_at_every_id_between() {
     .await;
     wait_for("both files in the next layer", async || {
         remote.files.lock().unwrap().len() == 2
+    })
+    .await;
+    wait_for("the bound over the far file", async || {
+        offloader.get_latest_offloaded_id().await == Some(UintN::from(far))
     })
     .await;
 }
