@@ -541,3 +541,46 @@ async fn a_file_put_while_the_wal_scan_fails_is_reported_landed_once_it_recovers
     assert_eq!(landed(), vec![(file_id.clone(), file_id)]);
     drop(offloader);
 }
+
+#[tokio::test]
+async fn a_file_that_cannot_be_read_for_a_while_is_moved_once_it_can() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::TempDir::new().unwrap();
+    let local = local_layer(&temp);
+    let queue = QueueIdResolver::new("inst").resolve("cam");
+    for id in 1..=3 {
+        put(local.as_ref(), &queue, id).await;
+    }
+    let two = queue.to_store_path(temp.path(), &UintN::from(2u64));
+    let mode = |mode| std::fs::set_permissions(&two, std::fs::Permissions::from_mode(mode));
+    mode(0o000).unwrap();
+
+    let remote = Arc::new(Memory::default());
+    let offloader = QueueOffloader::new(
+        Arc::new(Layer::new(local, None, false)),
+        Arc::new(Layer::new(remote.clone(), None, true)),
+        None,
+        queue.clone(),
+        events::discard(),
+    )
+    .await;
+    wait_for("file 3 in the next layer", async || {
+        remote
+            .size(&queue, &UintN::from(3u64))
+            .await
+            .unwrap()
+            .is_some()
+    })
+    .await;
+    assert_eq!(
+        offloader.get_latest_offloaded_id().await,
+        Some(UintN::from(1u64))
+    );
+
+    mode(0o644).unwrap();
+    wait_for("the bound over file 3", async || {
+        offloader.get_latest_offloaded_id().await == Some(UintN::from(3u64))
+    })
+    .await;
+}

@@ -4,7 +4,7 @@ use log::{error, info, warn};
 use normfs_types::QueueId;
 use normfs_types::events::{EventSink, FileFacts, SystemEvent, UploadFailure};
 use normfs_wal::WAL_HEADER_V1_MIN_SIZE;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
@@ -19,37 +19,35 @@ const RETRY_DELAY: Duration = Duration::from_secs(1);
 
 #[derive(Debug)]
 pub enum OffloadError {
+    /// The file is no longer in the first layer.
     LocalFileError(String),
+    /// The file is there but could not be read this time.
+    LocalReadError(String),
     RemoteError(String),
+}
+
+impl OffloadError {
+    fn local(e: BackendError) -> Self {
+        let e = std::io::Error::from(e);
+        if e.kind() == std::io::ErrorKind::NotFound {
+            OffloadError::LocalFileError(e.to_string())
+        } else {
+            OffloadError::LocalReadError(e.to_string())
+        }
+    }
 }
 
 impl std::fmt::Display for OffloadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             OffloadError::LocalFileError(msg) => write!(f, "Local file error: {}", msg),
+            OffloadError::LocalReadError(msg) => write!(f, "Local read error: {}", msg),
             OffloadError::RemoteError(msg) => write!(f, "Remote error: {}", msg),
         }
     }
 }
 
 impl std::error::Error for OffloadError {}
-
-impl From<std::io::Error> for OffloadError {
-    fn from(err: std::io::Error) -> Self {
-        match err.kind() {
-            std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied => {
-                OffloadError::LocalFileError(err.to_string())
-            }
-            _ => OffloadError::RemoteError(err.to_string()),
-        }
-    }
-}
-
-impl From<BackendError> for OffloadError {
-    fn from(e: BackendError) -> Self {
-        OffloadError::from(std::io::Error::from(e))
-    }
-}
 
 /// Moves a queue's files from one of its layers to the next: today the local
 /// store to the bucket. A file counts as moved once the next layer holds it
@@ -125,12 +123,23 @@ impl QueueOffloader {
         let mut moved = Moved::default();
         // Records of files this worker put, held until there is a bound to carry.
         let mut landed = Vec::new();
+        // Files that could not be read, with the attempts made so far.
+        let mut later = BTreeMap::new();
+        let mut retry_at = Instant::now();
 
         loop {
+            if !later.is_empty() && Instant::now() >= retry_at {
+                shared.pending.lock().unwrap().extend(later.keys().cloned());
+            }
             let next = shared.pending.lock().unwrap().pop_first();
             let Some(file_id) = next else {
-                if moved.has_gap() || !landed.is_empty() {
-                    let _ = tokio::time::timeout(GAP_RECHECK, shared.wake.notified()).await;
+                if moved.has_gap() || !landed.is_empty() || !later.is_empty() {
+                    let until = if later.is_empty() {
+                        Instant::now() + GAP_RECHECK
+                    } else {
+                        retry_at
+                    };
+                    let _ = tokio::time::timeout_at(until, shared.wake.notified()).await;
                     let through = moved.advance(&worker, &shared).await;
                     worker.emit_landed(&mut landed, through);
                 } else {
@@ -138,9 +147,17 @@ impl QueueOffloader {
                 }
                 continue;
             };
-            if let Outcome::Moved(put) = worker.move_file(&file_id).await {
-                moved.mark(file_id);
-                landed.extend(put.map(|put| *put));
+            let tried = later.remove(&file_id).unwrap_or(0);
+            match worker.move_file(&file_id, tried).await {
+                Outcome::Moved(put) => {
+                    moved.mark(file_id);
+                    landed.extend(put.map(|put| *put));
+                }
+                Outcome::Later(tried) => {
+                    later.insert(file_id, tried);
+                    retry_at = Instant::now() + RETRY_DELAY;
+                }
+                Outcome::Gone => {}
             }
             let through = moved.advance(&worker, &shared).await;
             worker.emit_landed(&mut landed, through);
@@ -242,6 +259,8 @@ impl Moved {
 enum Outcome {
     /// In the next layer, with the record to emit when this worker put it.
     Moved(Option<Box<SystemEvent>>),
+    /// Still in the first layer but unreadable, after this many attempts.
+    Later(u32),
     /// No longer in the first layer.
     Gone,
 }
@@ -362,8 +381,7 @@ impl QueueOffloaderWorker {
         false
     }
 
-    async fn move_file(&self, file_id: &UintN) -> Outcome {
-        let mut attempt: u32 = 0;
+    async fn move_file(&self, file_id: &UintN, mut attempt: u32) -> Outcome {
         let mut first_put: Option<Instant> = None;
         loop {
             match self.is_file_offloaded(file_id).await {
@@ -387,6 +405,16 @@ impl QueueOffloaderWorker {
                 Err(OffloadError::LocalFileError(e)) => {
                     error!("File {:?} does not exist locally, skipping: {}", file_id, e);
                     return Outcome::Gone;
+                }
+                Err(OffloadError::LocalReadError(e)) => {
+                    attempt = attempt.saturating_add(1);
+                    if attempt.is_power_of_two() {
+                        error!(
+                            "Cannot read file {:?} locally, trying it later: {}",
+                            file_id, e
+                        );
+                    }
+                    return Outcome::Later(attempt);
                 }
                 Err(OffloadError::RemoteError(e)) => {
                     error!(
@@ -412,8 +440,17 @@ impl QueueOffloaderWorker {
                     return Outcome::Moved(landed.map(Box::new));
                 }
                 Err(OffloadError::LocalFileError(e)) => {
-                    error!("Cannot read file {:?} locally, skipping: {}", file_id, e);
+                    error!("File {:?} does not exist locally, skipping: {}", file_id, e);
                     return Outcome::Gone;
+                }
+                Err(OffloadError::LocalReadError(e)) => {
+                    if attempt.is_power_of_two() {
+                        error!(
+                            "Cannot read file {:?} locally, trying it later: {}",
+                            file_id, e
+                        );
+                    }
+                    return Outcome::Later(attempt);
                 }
                 Err(OffloadError::RemoteError(e)) => {
                     error!(
@@ -435,7 +472,7 @@ impl QueueOffloaderWorker {
                     self.from.backend().key(&self.queue_id, file_id)
                 )));
             }
-            Err(e) => return Err(OffloadError::from(e)),
+            Err(e) => return Err(OffloadError::local(e)),
         };
 
         match self.to.backend().size(&self.queue_id, file_id).await {
@@ -460,7 +497,7 @@ impl QueueOffloaderWorker {
         let (body, head) = match self.read(file_id).await {
             Ok(read) => read,
             Err(e) => {
-                let e = OffloadError::from(e);
+                let e = OffloadError::local(e);
                 if report {
                     self.report_failure(file_id, UploadFailure::LocalRead, &e);
                 }
