@@ -126,7 +126,6 @@ impl QueueOffloader {
         // Records of files this worker put, held until there is a bound to carry.
         let mut landed = Vec::new();
         let mut dropped: u64 = 0;
-        // Files that could not be read, with the attempts made so far.
         let mut later = BTreeMap::new();
         let mut retry_at = Instant::now();
 
@@ -150,7 +149,7 @@ impl QueueOffloader {
                 }
                 continue;
             };
-            let tried = later.remove(&file_id).unwrap_or(0);
+            let tried = later.remove(&file_id).unwrap_or_default();
             match worker.move_file(&file_id, tried).await {
                 Outcome::Moved(put) => {
                     moved.mark(file_id);
@@ -281,10 +280,17 @@ impl Moved {
 enum Outcome {
     /// In the next layer, with the record to emit when this worker put it.
     Moved(Option<Box<SystemEvent>>),
-    /// Still in the first layer but unreadable, after this many attempts.
-    Later(u32),
+    /// Still in the first layer but unreadable this time.
+    Later(Tried),
     /// No longer in the first layer.
     Gone,
+}
+
+/// What a file set aside for a later try carries into it.
+#[derive(Default)]
+struct Tried {
+    attempt: u32,
+    first_put: Option<Instant>,
 }
 
 struct Uploaded {
@@ -411,8 +417,11 @@ impl QueueOffloaderWorker {
         false
     }
 
-    async fn move_file(&self, file_id: &UintN, mut attempt: u32) -> Outcome {
-        let mut first_put: Option<Instant> = None;
+    async fn move_file(&self, file_id: &UintN, tried: Tried) -> Outcome {
+        let Tried {
+            mut attempt,
+            mut first_put,
+        } = tried;
         loop {
             match self.is_file_offloaded(file_id).await {
                 Ok(true) => {
@@ -444,7 +453,7 @@ impl QueueOffloaderWorker {
                             file_id, e
                         );
                     }
-                    return Outcome::Later(attempt);
+                    return Outcome::Later(Tried { attempt, first_put });
                 }
                 Err(OffloadError::RemoteError(e)) => {
                     error!(
@@ -480,7 +489,7 @@ impl QueueOffloaderWorker {
                             file_id, e
                         );
                     }
-                    return Outcome::Later(attempt);
+                    return Outcome::Later(Tried { attempt, first_put });
                 }
                 Err(OffloadError::RemoteError(e)) => {
                     error!(

@@ -593,6 +593,61 @@ async fn a_file_that_cannot_be_read_for_a_while_is_moved_once_it_can() {
 }
 
 #[tokio::test]
+async fn a_put_that_landed_is_reported_after_a_read_error_on_the_next_try() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let crypto = CryptoContext::open(temp.path()).unwrap();
+    let queue = QueueIdResolver::new("inst").resolve("cam");
+    let file_id = UintN::from(1u64);
+    let file = store_file::build(
+        &queue,
+        &file_id,
+        CompressionType::Zstd,
+        EncryptionType::Aes,
+        UintN::from(10u64),
+        UintN::from(3u64),
+        &Bytes::from_static(b"entries"),
+        &crypto,
+    )
+    .unwrap();
+    let local = Arc::new(Flaky::default());
+    local
+        .put(&queue, &file_id, Body::Runs(vec![file.to_bytes()]))
+        .await
+        .unwrap();
+
+    let remote = Arc::new(Memory::default());
+    *remote.lose.lock().unwrap() = 1;
+    let recorded = Arc::new(Recorded::default());
+    let events: events::EventSink = recorded.clone();
+    let offloader = QueueOffloader::new(
+        Arc::new(Layer::new(local.clone(), None, false)),
+        Arc::new(Layer::new(remote.clone(), None, true)),
+        None,
+        queue.clone(),
+        events,
+    )
+    .await;
+    wait_for("the put that failed to keep the file", async || {
+        remote.size(&queue, &file_id).await.unwrap().is_some()
+    })
+    .await;
+    local.unreadable.lock().unwrap().insert(file_id.clone());
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    local.unreadable.lock().unwrap().clear();
+
+    wait_for("file 1 reported landed", async || {
+        recorded
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, SystemEvent::FileLanded { .. }))
+    })
+    .await;
+    drop(offloader);
+}
+
+#[tokio::test]
 async fn files_far_apart_are_found_without_a_look_at_every_id_between() {
     let temp = tempfile::TempDir::new().unwrap();
     let local = local_layer(&temp);
