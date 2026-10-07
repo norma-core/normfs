@@ -477,3 +477,67 @@ async fn dropping_an_idle_offloader_ends_its_worker() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn a_file_put_while_the_wal_scan_fails_is_reported_landed_once_it_recovers() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let crypto = CryptoContext::open(temp.path()).unwrap();
+    let local = local_layer(&temp);
+    let queue = QueueIdResolver::new("inst").resolve("cam");
+    let file_id = UintN::from(2u64);
+    let file = store_file::build(
+        &queue,
+        &file_id,
+        CompressionType::Zstd,
+        EncryptionType::Aes,
+        UintN::from(20u64),
+        UintN::from(3u64),
+        &Bytes::from_static(b"entries"),
+        &crypto,
+    )
+    .unwrap();
+    local
+        .put(&queue, &file_id, Body::Runs(vec![file.to_bytes()]))
+        .await
+        .unwrap();
+    let wal = Arc::new(Flaky::default());
+    wal.broken.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let remote = Arc::new(Memory::default());
+    let recorded = Arc::new(Recorded::default());
+    let events: events::EventSink = recorded.clone();
+    let offloader = QueueOffloader::new(
+        Arc::new(Layer::new(local, None, false)),
+        Arc::new(Layer::new(remote.clone(), None, true)),
+        Some(wal.clone()),
+        queue.clone(),
+        events,
+    )
+    .await;
+    wait_for("file 2 in the next layer", async || {
+        remote.size(&queue, &file_id).await.unwrap().is_some()
+    })
+    .await;
+
+    wal.broken.store(false, std::sync::atomic::Ordering::SeqCst);
+    let landed = || -> Vec<_> {
+        recorded
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                SystemEvent::FileLanded {
+                    file,
+                    landed_through,
+                    ..
+                } => Some((file.file_id.clone(), landed_through.clone())),
+                _ => None,
+            })
+            .collect()
+    };
+    wait_for("file 2 reported landed", async || !landed().is_empty()).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(landed(), vec![(file_id.clone(), file_id)]);
+    drop(offloader);
+}

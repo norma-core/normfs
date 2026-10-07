@@ -120,32 +120,27 @@ impl QueueOffloader {
         info!("Starting offload worker for queue_id: {}", worker.queue_id);
         worker.queue_existing(&shared).await;
         let mut moved = Moved::default();
+        // Records of files this worker put, held until there is a bound to carry.
+        let mut landed = Vec::new();
 
         loop {
             let next = shared.pending.lock().unwrap().pop_first();
             let Some(file_id) = next else {
-                if moved.has_gap() {
+                if moved.has_gap() || !landed.is_empty() {
                     let _ = tokio::time::timeout(GAP_RECHECK, shared.wake.notified()).await;
-                    moved.advance(&worker, &shared).await;
+                    let through = moved.advance(&worker, &shared).await;
+                    worker.emit_landed(&mut landed, through);
                 } else {
                     shared.wake.notified().await;
                 }
                 continue;
             };
-            let landed = match worker.move_file(&file_id).await {
-                Outcome::Moved(landed) => {
-                    moved.mark(file_id);
-                    landed
-                }
-                Outcome::Gone => None,
-            };
-            let through = moved.advance(&worker, &shared).await;
-            if let (Some(mut landed), Some(through)) = (landed, through) {
-                if let SystemEvent::FileLanded { landed_through, .. } = landed.as_mut() {
-                    *landed_through = through;
-                }
-                worker.events.emit(*landed);
+            if let Outcome::Moved(put) = worker.move_file(&file_id).await {
+                moved.mark(file_id);
+                landed.extend(put.map(|put| *put));
             }
+            let through = moved.advance(&worker, &shared).await;
+            worker.emit_landed(&mut landed, through);
         }
     }
 }
@@ -512,6 +507,18 @@ impl QueueOffloaderWorker {
                 )
             })
             .ok()
+    }
+
+    fn emit_landed(&self, landed: &mut Vec<SystemEvent>, through: Option<UintN>) {
+        let Some(through) = through else {
+            return;
+        };
+        for mut event in landed.drain(..) {
+            if let SystemEvent::FileLanded { landed_through, .. } = &mut event {
+                *landed_through = through.clone();
+            }
+            self.events.emit(event);
+        }
     }
 
     fn report_failure(&self, file_id: &UintN, failure: UploadFailure, e: &dyn std::fmt::Display) {
