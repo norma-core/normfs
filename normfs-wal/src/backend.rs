@@ -22,7 +22,8 @@ pub type BackendFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, BackendErr
 /// A file on its way to a backend.
 pub enum Body {
     Runs(Vec<Bytes>),
-    /// Read as it is sent, so a file of any size takes a chunk of memory.
+    /// A bucket reads it as it sends it, so a file of any size takes a chunk
+    /// of memory; the local store reads it whole first.
     Stream {
         file: ReadFile,
         len: u64,
