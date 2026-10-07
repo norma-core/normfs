@@ -348,17 +348,29 @@ async fn an_id_that_can_no_longer_land_does_not_hold_the_bound() {
     .expect("the bound passes an id that can no longer land");
 }
 
-/// A WAL whose lookups fail while `broken` is set.
+/// A backend whose lookups fail while `broken` is set, and whose files in
+/// `unreadable` cannot be read.
 #[derive(Default)]
 struct Flaky {
     inner: Memory,
     broken: std::sync::atomic::AtomicBool,
+    unreadable: Mutex<std::collections::BTreeSet<UintN>>,
 }
 
 impl Flaky {
     fn check(&self) -> Result<(), BackendError> {
         if self.broken.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(BackendError::Io(std::io::Error::other("scan failed")));
+        }
+        Ok(())
+    }
+
+    fn check_file(&self, id: &UintN) -> Result<(), BackendError> {
+        self.check()?;
+        if self.unreadable.lock().unwrap().contains(id) {
+            return Err(BackendError::Io(
+                std::io::ErrorKind::PermissionDenied.into(),
+            ));
         }
         Ok(())
     }
@@ -379,14 +391,14 @@ impl Backend for Flaky {
 
     fn get<'a>(&'a self, q: &'a QueueId, id: &'a UintN) -> BackendFuture<'a, Option<Bytes>> {
         Box::pin(async move {
-            self.check()?;
+            self.check_file(id)?;
             self.inner.get(q, id).await
         })
     }
 
     fn body<'a>(&'a self, q: &'a QueueId, id: &'a UintN) -> BackendFuture<'a, Option<Body>> {
         Box::pin(async move {
-            self.check()?;
+            self.check_file(id)?;
             self.inner.body(q, id).await
         })
     }
@@ -399,14 +411,14 @@ impl Backend for Flaky {
         len: u64,
     ) -> BackendFuture<'a, Option<Bytes>> {
         Box::pin(async move {
-            self.check()?;
+            self.check_file(id)?;
             self.inner.get_range(q, id, offset, len).await
         })
     }
 
     fn size<'a>(&'a self, q: &'a QueueId, id: &'a UintN) -> BackendFuture<'a, Option<u64>> {
         Box::pin(async move {
-            self.check()?;
+            self.check_file(id)?;
             self.inner.size(q, id).await
         })
     }
@@ -544,21 +556,16 @@ async fn a_file_put_while_the_wal_scan_fails_is_reported_landed_once_it_recovers
 
 #[tokio::test]
 async fn a_file_that_cannot_be_read_for_a_while_is_moved_once_it_can() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let temp = tempfile::TempDir::new().unwrap();
-    let local = local_layer(&temp);
     let queue = QueueIdResolver::new("inst").resolve("cam");
+    let local = Arc::new(Flaky::default());
     for id in 1..=3 {
         put(local.as_ref(), &queue, id).await;
     }
-    let two = queue.to_store_path(temp.path(), &UintN::from(2u64));
-    let mode = |mode| std::fs::set_permissions(&two, std::fs::Permissions::from_mode(mode));
-    mode(0o000).unwrap();
+    local.unreadable.lock().unwrap().insert(UintN::from(2u64));
 
     let remote = Arc::new(Memory::default());
     let offloader = QueueOffloader::new(
-        Arc::new(Layer::new(local, None, false)),
+        Arc::new(Layer::new(local.clone(), None, false)),
         Arc::new(Layer::new(remote.clone(), None, true)),
         None,
         queue.clone(),
@@ -578,7 +585,7 @@ async fn a_file_that_cannot_be_read_for_a_while_is_moved_once_it_can() {
         Some(UintN::from(1u64))
     );
 
-    mode(0o644).unwrap();
+    local.unreadable.lock().unwrap().clear();
     wait_for("the bound over file 3", async || {
         offloader.get_latest_offloaded_id().await == Some(UintN::from(3u64))
     })
