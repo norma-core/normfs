@@ -348,12 +348,13 @@ async fn an_id_that_can_no_longer_land_does_not_hold_the_bound() {
     .expect("the bound passes an id that can no longer land");
 }
 
-/// A backend whose lookups fail while `broken` is set, and whose files in
-/// `unreadable` cannot be read.
+/// A backend whose lookups fail while `broken` is set, whose listing fails
+/// while `unlisted` is, and whose files in `unreadable` cannot be read.
 #[derive(Default)]
 struct Flaky {
     inner: Memory,
     broken: std::sync::atomic::AtomicBool,
+    unlisted: std::sync::atomic::AtomicBool,
     unreadable: Mutex<std::collections::BTreeSet<UintN>>,
 }
 
@@ -427,6 +428,21 @@ impl Backend for Flaky {
         Box::pin(async move {
             self.check()?;
             self.inner.find(q, end).await
+        })
+    }
+
+    fn list<'a>(&'a self, q: &'a QueueId) -> BackendFuture<'a, Vec<UintN>> {
+        Box::pin(async move {
+            self.check()?;
+            if self.unlisted.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(BackendError::Io(std::io::Error::other("listing failed")));
+            }
+            let files = self.inner.files.lock().unwrap();
+            Ok(files
+                .keys()
+                .filter(|(k, _)| *k == q.to_string())
+                .map(|(_, id)| id.clone())
+                .collect())
         })
     }
 }
@@ -710,6 +726,46 @@ async fn files_in_a_directory_the_scan_cannot_read_are_moved_once_it_can() {
     mode(0o755).unwrap();
     wait_for("the bound over file 0x1000", async || {
         offloader.get_latest_offloaded_id().await == Some(UintN::from(0x1000u64))
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_failing_startup_scan_does_not_stop_files_landed_after_it() {
+    let queue = QueueIdResolver::new("inst").resolve("cam");
+    let local = Arc::new(Flaky::default());
+    put(local.as_ref(), &queue, 1).await;
+    put(local.as_ref(), &queue, 2).await;
+    local
+        .unlisted
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let remote = Arc::new(Memory::default());
+    let offloader = QueueOffloader::new(
+        Arc::new(Layer::new(local.clone(), None, false)),
+        Arc::new(Layer::new(remote.clone(), None, true)),
+        None,
+        queue.clone(),
+        events::discard(),
+    )
+    .await;
+    put(local.as_ref(), &queue, 3).await;
+    offloader.file_landed(UintN::from(3u64));
+    wait_for("file 3 in the next layer", async || {
+        remote
+            .size(&queue, &UintN::from(3u64))
+            .await
+            .unwrap()
+            .is_some()
+    })
+    .await;
+    assert_eq!(offloader.get_latest_offloaded_id().await, None);
+
+    local
+        .unlisted
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    wait_for("the bound over files 1 to 3", async || {
+        offloader.get_latest_offloaded_id().await == Some(UintN::from(3u64))
     })
     .await;
 }

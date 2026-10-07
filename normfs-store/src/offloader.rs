@@ -121,7 +121,11 @@ impl QueueOffloader {
 
     async fn offload_worker(worker: QueueOffloaderWorker, shared: Arc<Shared>) {
         info!("Starting offload worker for queue_id: {}", worker.queue_id);
-        worker.queue_existing(&shared).await;
+        // Files landed meanwhile move while the scan is retried; the bound
+        // waits for it, since a file it has not found may lie below.
+        let mut scanned = false;
+        let mut scan_failures: u32 = 0;
+        let mut scan_at = Instant::now();
         let mut moved = Moved::default();
         // Records of files this worker put, held until there is a bound to carry.
         let mut landed = Vec::new();
@@ -130,20 +134,28 @@ impl QueueOffloader {
         let mut retry_at = Instant::now();
 
         loop {
+            if !scanned && Instant::now() >= scan_at {
+                scanned = worker.queue_existing(&shared, &mut scan_failures).await;
+                scan_at = Instant::now() + RETRY_DELAY;
+            }
             if !later.is_empty() && Instant::now() >= retry_at {
                 shared.pending.lock().unwrap().extend(later.keys().cloned());
             }
             let next = shared.pending.lock().unwrap().pop_first();
             let Some(file_id) = next else {
-                if moved.has_gap() || !landed.is_empty() || !later.is_empty() {
-                    let until = if later.is_empty() {
-                        Instant::now() + GAP_RECHECK
-                    } else {
-                        retry_at
-                    };
+                if !scanned || moved.has_gap() || !landed.is_empty() || !later.is_empty() {
+                    let mut until = Instant::now() + GAP_RECHECK;
+                    if !later.is_empty() {
+                        until = until.min(retry_at);
+                    }
+                    if !scanned {
+                        until = until.min(scan_at);
+                    }
                     let _ = tokio::time::timeout_at(until, shared.wake.notified()).await;
-                    let through = moved.advance(&worker, &shared).await;
-                    worker.emit_landed(&mut landed, through);
+                    if scanned {
+                        let through = moved.advance(&worker, &shared).await;
+                        worker.emit_landed(&mut landed, through);
+                    }
                 } else {
                     shared.wake.notified().await;
                 }
@@ -174,8 +186,10 @@ impl QueueOffloader {
                 }
                 Outcome::Gone => {}
             }
-            let through = moved.advance(&worker, &shared).await;
-            worker.emit_landed(&mut landed, through);
+            if scanned {
+                let through = moved.advance(&worker, &shared).await;
+                worker.emit_landed(&mut landed, through);
+            }
         }
     }
 }
@@ -347,20 +361,22 @@ struct QueueOffloaderWorker {
 }
 
 impl QueueOffloaderWorker {
-    /// The files already in the layer when the worker starts.
-    /// A failed scan is retried: files it would miss stay below the bound and
-    /// would hold it for good.
-    async fn queue_existing(&self, shared: &Shared) {
-        let found = loop {
-            match self.scan_existing().await {
-                Ok(found) => break found,
-                Err(e) => {
+    /// Queues the files already in the layer when the worker starts. `false`
+    /// when the scan failed: files it would miss stay below the bound and
+    /// would hold it for good, so it is tried again.
+    async fn queue_existing(&self, shared: &Shared, failures: &mut u32) -> bool {
+        let found = match self.scan_existing().await {
+            Ok(found) => found,
+            Err(e) => {
+                *failures = failures.saturating_add(1);
+                if failures.is_power_of_two() {
                     error!(
-                        "Failed to scan store files of queue {}: {}, retrying in 1 second",
-                        self.queue_id, e
+                        "Failed to scan store files of queue {} ({} tries): {}, retrying \
+                         in 1 second",
+                        self.queue_id, failures, e
                     );
-                    tokio::time::sleep(RETRY_DELAY).await;
                 }
+                return false;
             }
         };
         if let (Some(first), Some(last)) = (found.first(), found.last()) {
@@ -372,6 +388,7 @@ impl QueueOffloaderWorker {
             );
         }
         shared.pending.lock().unwrap().extend(found);
+        true
     }
 
     async fn scan_existing(&self) -> Result<BTreeSet<UintN>, BackendError> {
