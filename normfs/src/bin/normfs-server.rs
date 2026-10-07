@@ -4,6 +4,12 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+#[path = "normfs-server/size.rs"]
+mod size;
+#[cfg(test)]
+#[path = "normfs-server/size_test.rs"]
+mod size_test;
+
 #[cfg(unix)]
 fn setup_ulimits() -> Result<(), Box<dyn std::error::Error>> {
     use libc::{getrlimit, rlimit, setrlimit, RLIMIT_NOFILE};
@@ -37,7 +43,8 @@ fn setup_ulimits() -> Result<(), Box<dyn std::error::Error>> {
 
 /// NormFS TCP Server - A standalone TCP server for NormFS
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version, about, long_about = None,
+    after_help = "Sizes accept bytes or case-insensitive units: KiB/MiB/GiB/TiB/PiB/EiB (powers of 1024), KB/MB/GB/TB/PB/EB (powers of 1000). Fractions must resolve to whole bytes, e.g. 1.5GiB.")]
 struct Args {
     /// TCP address to listen on
     #[arg(short, long, default_value = "0.0.0.0:8888")]
@@ -47,9 +54,33 @@ struct Args {
     #[arg(short, long, default_value = "./normfs_data")]
     data_dir: PathBuf,
 
-    /// Maximum queue disk size in bytes (default: 32GB)
-    #[arg(long, default_value = "34359738368")]
+    /// Active page budget in bytes; excludes other process memory
+    #[arg(long, default_value_t = NormFsSettings::default().max_memory_usage,
+        value_parser = size::parse_memory)]
+    max_memory_usage: usize,
+
+    /// Active page size in bytes; a record plus framing must fit in one page
+    #[arg(long, default_value_t = NormFsSettings::default().mem_page_size,
+        value_parser = size::parse_memory)]
+    mem_page_size: usize,
+
+    /// Passive page budget in bytes, separate from the active budget
+    #[arg(long, default_value_t = NormFsSettings::default().max_passive_memory_usage,
+        value_parser = size::parse_memory)]
+    max_passive_memory_usage: usize,
+
+    /// Passive page size in bytes
+    #[arg(long, default_value_t = NormFsSettings::default().mem_passive_page_size,
+        value_parser = size::parse_memory)]
+    mem_passive_page_size: usize,
+
+    /// Per-queue WAL + store retention threshold in bytes
+    #[arg(long, default_value = "32GiB", value_parser = size::parse_bytes)]
     max_queue_disk_size: u64,
+
+    /// Disable disk retention limits and size-triggered deletion
+    #[arg(long, conflicts_with = "max_queue_disk_size")]
+    unlimited_disk: bool,
 
     /// S3 bucket name for cloud offloading (optional)
     #[arg(long)]
@@ -80,14 +111,28 @@ struct Args {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    setup_ulimits()?;
-
     let args = Args::parse();
+
+    setup_ulimits()?;
 
     log::info!("NormFS TCP Server starting...");
     log::info!("TCP address: {}", args.addr);
     log::info!("Data directory: {:?}", args.data_dir);
-    log::info!("Max queue disk size: {} bytes", args.max_queue_disk_size);
+    log::info!(
+        "Active page budget: {} bytes, page size: {} bytes",
+        args.max_memory_usage,
+        args.mem_page_size
+    );
+    log::info!(
+        "Passive page budget: {} bytes, page size: {} bytes",
+        args.max_passive_memory_usage,
+        args.mem_passive_page_size
+    );
+    if args.unlimited_disk {
+        log::info!("Queue disk retention: unlimited");
+    } else {
+        log::info!("Max queue disk size: {} bytes", args.max_queue_disk_size);
+    }
 
     // All-active until the server grows a way to declare per-queue pool
     // rules: a passive default without that knob would silently cap every
@@ -97,7 +142,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Persist::WAL_STORE
     };
     let mut settings = NormFsSettings {
-        max_disk_usage_per_queue: Some(args.max_queue_disk_size),
+        max_memory_usage: args.max_memory_usage,
+        mem_page_size: args.mem_page_size,
+        max_passive_memory_usage: args.max_passive_memory_usage,
+        mem_passive_page_size: args.mem_passive_page_size,
+        max_disk_usage_per_queue: if args.unlimited_disk {
+            None
+        } else {
+            Some(args.max_queue_disk_size)
+        },
         queue_settings: QueueSettings::all_active().with_default_persist(persist),
         ..NormFsSettings::default()
     };

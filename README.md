@@ -123,6 +123,35 @@ cargo build --release --features server-bin --bin normfs-server
 ./target/release/normfs-server --data-dir /tmp/normfs-data --addr 0.0.0.0:8888
 ```
 
+Server settings use CLI flags; there is no config file. Sizes accept plain bytes
+or case-insensitive units: `KiB`, `MiB`, `GiB`, `TiB`, `PiB`, `EiB` use powers of
+1024; `KB`, `MB`, `GB`, `TB`, `PB`, `EB` use powers of 1000. Fractions such as
+`1.5GiB` are accepted when they resolve to whole bytes.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--max-memory-usage` | `256MiB` | Shared active page budget |
+| `--mem-page-size` | `256KiB` | Active page size; each record plus framing must fit |
+| `--max-passive-memory-usage` | `8MiB` | Separate passive page budget |
+| `--mem-passive-page-size` | `32KiB` | Passive page size |
+| `--max-queue-disk-size` | `32GiB` | Per-queue WAL + store retention threshold |
+| `--unlimited-disk` | off | Disable disk retention limits and size-triggered deletion |
+
+The server puts queues in the active pool. Each pool budget must hold at least
+two of its pages. These budgets do not cap process RSS: buffers and metadata
+add overhead, and queues can receive extra pages when the shared pool is full.
+Disk cleanup is periodic, so usage can exceed the threshold between checks;
+without S3 it deletes the oldest eligible files, and with S3 it waits for upload.
+`--unlimited-disk` conflicts with an explicit `--max-queue-disk-size`; `0` is
+not an unlimited value. Unlimited retention can fill the filesystem.
+
+For a 512 MiB active budget, 1 MiB pages, and unlimited disk retention:
+
+```bash
+./target/release/normfs-server --data-dir /var/lib/normfs \
+  --max-memory-usage 512MiB --mem-page-size 1MiB --unlimited-disk
+```
+
 ### Client Libraries
 
 See language-specific documentation:
