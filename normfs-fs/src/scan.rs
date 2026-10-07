@@ -98,7 +98,11 @@ pub(crate) fn get_files_ids(base_path: &Path, extension: &str) -> Result<Vec<Uin
     for entry in WalkDir::new(base_path) {
         let entry = match entry {
             Ok(entry) => entry,
-            Err(_) => continue,
+            // A file or directory removed during the walk, as eviction does.
+            Err(e) if e.io_error().map(io::Error::kind) == Some(io::ErrorKind::NotFound) => {
+                continue;
+            }
+            Err(e) => return Err(PathError::Io(e.into())),
         };
         let path = entry.path();
 

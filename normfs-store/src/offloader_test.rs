@@ -608,3 +608,42 @@ async fn files_far_apart_are_found_without_a_look_at_every_id_between() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn files_in_a_directory_the_scan_cannot_read_are_moved_once_it_can() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::TempDir::new().unwrap();
+    let local = local_layer(&temp);
+    let queue = QueueIdResolver::new("inst").resolve("cam");
+    put(local.as_ref(), &queue, 0xfff).await;
+    put(local.as_ref(), &queue, 0x1000).await;
+    let shard = queue
+        .to_store_path(temp.path(), &UintN::from(0x1000u64))
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let mode = |mode| std::fs::set_permissions(&shard, std::fs::Permissions::from_mode(mode));
+    mode(0o000).unwrap();
+    if std::fs::read_dir(&shard).is_ok() {
+        // Permissions do not stop root.
+        mode(0o755).unwrap();
+        return;
+    }
+
+    let remote = Arc::new(Memory::default());
+    let offloader = QueueOffloader::new(
+        Arc::new(Layer::new(local, None, false)),
+        Arc::new(Layer::new(remote.clone(), None, true)),
+        None,
+        queue.clone(),
+        events::discard(),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    mode(0o755).unwrap();
+    wait_for("the bound over file 0x1000", async || {
+        offloader.get_latest_offloaded_id().await == Some(UintN::from(0x1000u64))
+    })
+    .await;
+}

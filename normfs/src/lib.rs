@@ -1447,8 +1447,9 @@ impl NormFS {
             let compression_type = wal_settings.compression_type;
             let encryption_type = wal_settings.encryption_type;
 
+            // Retried: an old file a failed listing misses is never migrated.
             tokio::spawn(async move {
-                if let Err(e) = wal
+                while let Err(e) = wal
                     .process_old_files(
                         &queue_clone,
                         &file_id_clone,
@@ -1458,9 +1459,10 @@ impl NormFS {
                     .await
                 {
                     log::error!(target: "normfs",
-                        "Failed to process old files for queue: {}",
-                        e
+                        "Failed to process old files for queue {}: {}, retrying in 1 second",
+                        queue_clone, e
                     );
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
             });
         }
