@@ -402,8 +402,9 @@ impl QueueOffloaderWorker {
     }
 
     /// Where the queue's files start: nothing below the lowest file still in
-    /// the WAL, in the first layer, waiting or moved can land any more. A
-    /// failed look decides nothing.
+    /// the WAL, in the first layer, waiting or moved can land any more. The
+    /// WAL is looked at first, as in [`Self::may_land`]; a failed look
+    /// decides nothing.
     async fn first_id(
         &self,
         shared: &Shared,
@@ -437,9 +438,10 @@ impl QueueOffloaderWorker {
     }
 
     /// Whether `file_id` may still reach the next layer through this worker.
-    /// A file lands in the first layer before its WAL file is deleted and WAL
-    /// files are made in id order, so an id below a moved one that is in
-    /// neither place never will.
+    /// A file lands in the first layer before its WAL file is deleted, so the
+    /// WAL is looked at first; WAL files are made in id order, so an id below
+    /// a moved one that is in neither place never will. A failed look counts
+    /// as "may".
     async fn may_land(&self, shared: &Shared, file_id: &UintN) -> bool {
         if shared.pending.lock().unwrap().contains(file_id) {
             return true;
