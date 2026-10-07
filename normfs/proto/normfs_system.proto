@@ -10,9 +10,12 @@ import "normfs.proto";
 // Where a store file is reported depends on the queue's Persist:
 //   store only             FILE_ON_DISK
 //   store + cloud          FILE_ON_DISK when it is written locally, then
-//                          FILE_IN_CLOUD once the offloader has uploaded it;
-//                          only after that may the disk monitor delete the local
-//                          copy, DISK_FILE_DELETED with in_cloud set
+//                          FILE_IN_CLOUD once the offloader has uploaded it.
+//                          The disk monitor deletes the local copy, as
+//                          DISK_FILE_DELETED with in_cloud set, only once it is
+//                          in the bucket. A file uploaded just before the
+//                          process stopped can lack FILE_IN_CLOUD: the next run
+//                          finds it in the bucket and does not report it.
 //   cloud without store    FILE_IN_CLOUD only, uploaded straight from memory
 // A failed upload is retried and reported as CLOUD_UPLOAD_FAILED until it
 // goes through. WAL files are reported only when the disk monitor deletes them.
