@@ -157,7 +157,7 @@ async fn eviction_never_passes_the_offloaded_bound() {
 }
 
 #[tokio::test]
-async fn delayed_and_duplicate_completions_do_not_count_scanned_files_again() {
+async fn a_file_published_after_the_scan_is_not_counted_again_by_a_rescan() {
     let temp = tempfile::TempDir::new().unwrap();
     let root = temp.path();
     let queue = QueueIdResolver::new("inst").resolve("cam");
