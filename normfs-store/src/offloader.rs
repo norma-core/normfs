@@ -308,7 +308,6 @@ impl QueueOffloaderWorker {
     /// A failed scan is retried: files it would miss stay below the bound and
     /// would hold it for good.
     async fn queue_existing(&self, shared: &Shared) {
-        let from = self.from.backend();
         let found = loop {
             match self.scan_existing().await {
                 Ok(found) => break found,
@@ -321,33 +320,42 @@ impl QueueOffloaderWorker {
                 }
             }
         };
-        let Some((mut id, last)) = found else {
-            return;
-        };
-        info!("Found store files from {:?} to {:?}", id, last);
-        loop {
-            // A file whose size cannot be read is still tried: skipping it
-            // would hold the bound below it for good.
-            if !matches!(from.size(&self.queue_id, &id).await, Ok(None)) {
-                shared.pending.lock().unwrap().insert(id.clone());
-            }
-            if id >= last {
-                break;
-            }
-            id = id.increment();
+        if let (Some(first), Some(last)) = (found.first(), found.last()) {
+            info!(
+                "Found {} store files from {:?} to {:?}",
+                found.len(),
+                first,
+                last
+            );
         }
+        shared.pending.lock().unwrap().extend(found);
     }
 
-    async fn scan_existing(&self) -> Result<Option<(UintN, UintN)>, BackendError> {
+    async fn scan_existing(&self) -> Result<BTreeSet<UintN>, BackendError> {
         let from = self.from.backend();
-        let Some(first) = from.find(&self.queue_id, End::Min).await? else {
-            return Ok(None);
+        match from.list(&self.queue_id).await {
+            Err(BackendError::Unsupported(_)) => {}
+            listed => return listed.map(BTreeSet::from_iter),
+        }
+        let mut found = BTreeSet::new();
+        let Some(mut id) = from.find(&self.queue_id, End::Min).await? else {
+            return Ok(found);
         };
         let last = from
             .find(&self.queue_id, End::Max)
             .await?
-            .unwrap_or(first.clone());
-        Ok(Some((first, last)))
+            .unwrap_or(id.clone());
+        loop {
+            // A file whose size cannot be read is still tried: skipping it
+            // would hold the bound below it for good.
+            if !matches!(from.size(&self.queue_id, &id).await, Ok(None)) {
+                found.insert(id.clone());
+            }
+            if id >= last {
+                return Ok(found);
+            }
+            id = id.increment();
+        }
     }
 
     /// Where the queue's files start: nothing below the lowest file still in

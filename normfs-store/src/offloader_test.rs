@@ -584,3 +584,27 @@ async fn a_file_that_cannot_be_read_for_a_while_is_moved_once_it_can() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn files_far_apart_are_found_without_a_look_at_every_id_between() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let local = local_layer(&temp);
+    let queue = QueueIdResolver::new("inst").resolve("cam");
+    let far = 1u64 << 40;
+    put(local.as_ref(), &queue, 1).await;
+    put(local.as_ref(), &queue, far).await;
+
+    let remote = Arc::new(Memory::default());
+    let _offloader = QueueOffloader::new(
+        Arc::new(Layer::new(local, None, false)),
+        Arc::new(Layer::new(remote.clone(), None, true)),
+        None,
+        queue.clone(),
+        events::discard(),
+    )
+    .await;
+    wait_for("both files in the next layer", async || {
+        remote.files.lock().unwrap().len() == 2
+    })
+    .await;
+}
