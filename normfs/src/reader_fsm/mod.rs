@@ -45,6 +45,8 @@ pub struct ReadContext {
     pub step: u64,
     pub last_id: Option<UintN>,
     pub sender: mpsc::Sender<ReadEntry>,
+    /// Where a read of this file stopped for a full channel.
+    pub resume: Option<normfs_wal::WalBytesPause>,
 }
 
 impl ReadContext {
@@ -63,11 +65,19 @@ impl ReadContext {
             step,
             last_id,
             sender,
+            resume: None,
         }
     }
 
     pub fn with_file_id(mut self, file_id: UintN) -> Self {
         self.file_id = file_id;
+        self.resume = None;
+        self
+    }
+
+    pub fn paused(mut self, pause: normfs_wal::WalBytesPause) -> Self {
+        self.next_id = pause.next_id.clone();
+        self.resume = Some(pause);
         self
     }
 

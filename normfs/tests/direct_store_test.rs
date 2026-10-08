@@ -137,6 +137,59 @@ async fn a_full_page_is_one_store_file_and_there_is_no_wal() {
 }
 
 #[tokio::test]
+async fn reads_nobody_drains_do_not_hold_up_other_store_reads() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let fs = std::sync::Arc::new(open(temp.path(), store_settings()).await);
+    let queue = fs.resolve("cam0");
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    write(&fs, &queue, 40 * PER_PAGE).await;
+    fs.flush_queue(&queue).await.unwrap();
+
+    // As many stalled reads as there are load slots, each on its own file.
+    let mut stalled = Vec::new();
+    for from in [0, 5 * PER_PAGE] {
+        let (tx, rx) = mpsc::channel(1);
+        let (fs, queue) = (fs.clone(), queue.clone());
+        let read = tokio::spawn(async move {
+            fs.read(
+                &queue,
+                ReadPosition::Absolute(UintN::from(from)),
+                PER_PAGE,
+                1,
+                tx,
+            )
+            .await
+        });
+        stalled.push((read, rx));
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let sources = timeout(
+        Duration::from_secs(5),
+        read_all(&fs, &queue, 10 * PER_PAGE, PER_PAGE),
+    )
+    .await
+    .expect("a read of another file waited on the stalled ones");
+    assert_eq!(sources[0], DataSource::DiskStore);
+
+    for (i, (read, mut rx)) in stalled.into_iter().enumerate() {
+        let from = [0, 5 * PER_PAGE][i];
+        for id in from..from + PER_PAGE {
+            let entry = timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(entry.id.to_u64().unwrap(), id);
+        }
+        timeout(Duration::from_secs(5), read)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+}
+
+#[tokio::test]
 async fn nothing_lands_until_a_page_fills_or_a_flush_asks() {
     let temp = tempfile::TempDir::new().unwrap();
     let fs = open(temp.path(), store_settings()).await;

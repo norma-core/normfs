@@ -3,7 +3,7 @@ use super::{DataSource, Fetched, Prefetch, PrefetchHandle, ReadContext, ReadEntr
 use crate::{mem::MemStore, Error};
 use normfs_store::{Layer, PersistStore, StoreError};
 use normfs_types::{QueueId, ReadPosition};
-use normfs_wal::{ReadRangeResult, WalError, WalStore};
+use normfs_wal::{PausableRead, ReadRangeResult, WalError, WalStore};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use uintn::UintN;
@@ -805,19 +805,42 @@ impl ReaderFSM {
             self.warn_gap(&ctx, &header.num_entries_before);
         }
 
-        // Parse and send entries from WAL bytes
-        let result = self
-            .wal
-            .read_wal_content_range(
-                &wal_bytes,
-                &ctx.next_id,
-                &ctx.last_id,
-                ctx.step as usize,
-                &ctx.sender,
-                data_source,
-            )
-            .await;
+        // A send never waits here: a stalled consumer would keep the file,
+        // and its slot, for as long as it stalls.
+        let result = normfs_wal::read_wal_bytes_range_pausing(
+            &wal_bytes,
+            ctx.resume.as_ref(),
+            &ctx.next_id,
+            &ctx.last_id,
+            ctx.step as usize,
+            &ctx.sender,
+            data_source,
+        )
+        .await;
+        let result = match result {
+            Ok(PausableRead::Done(result)) => Ok(result),
+            Ok(PausableRead::Paused(pause)) => {
+                drop(wal_bytes);
+                drop(prefetch_handle);
+                return Ok(self.wait_for_room(ctx.paused(pause)).await);
+            }
+            Err(e) => Err(e),
+        };
         Ok(self.after_range(ctx, result, data_source, prefetch_handle))
+    }
+
+    /// Waits for the consumer to take half its channel, then comes back to
+    /// the file: from the recent file if it is still kept, else loaded again.
+    async fn wait_for_room(&self, ctx: ReadContext) -> ReaderState {
+        log::debug!(target: "normfs-reader-fsm",
+            "Channel full, letting go of file {} of queue {} until it drains",
+            ctx.file_id, ctx.queue.short());
+        let room = (ctx.sender.max_capacity() / 2).max(1);
+        match ctx.sender.reserve_many(room).await {
+            Ok(permits) => drop(permits),
+            Err(_) => return ReaderState::Failed(Error::ClientDisconnected),
+        }
+        ReaderState::ReadFile { ctx }
     }
 
     fn after_range(

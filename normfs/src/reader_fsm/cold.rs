@@ -11,6 +11,8 @@ use uintn::UintN;
 /// Long enough for a page of neighbouring reads to land in the same file.
 const KEEP_RECENT: Duration = Duration::from_secs(10);
 
+const SLOW_SLOT: Duration = Duration::from_secs(10);
+
 /// A file and whether it came from the cloud rather than the local store.
 pub(crate) type FileKey = (QueueId, UintN, bool);
 
@@ -152,7 +154,16 @@ impl ColdFiles {
         self.waiting.fetch_add(1, Ordering::SeqCst);
         // The kept file may be what holds the slot.
         self.recent.lock().unwrap().file = None;
-        let permit = self.slots.clone().acquire_owned().await;
+        let permit = match tokio::time::timeout(SLOW_SLOT, self.slots.clone().acquire_owned()).await
+        {
+            Ok(permit) => permit,
+            Err(_) => {
+                log::warn!(target: "normfs-reader-fsm",
+                    "A cold read has waited {:?} for a load slot; the reads holding them are not \
+                     finishing their files", SLOW_SLOT);
+                self.slots.clone().acquire_owned().await
+            }
+        };
         self.waiting.fetch_sub(1, Ordering::SeqCst);
         Some(permit.expect("the semaphore is never closed"))
     }

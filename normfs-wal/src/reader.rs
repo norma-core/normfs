@@ -893,6 +893,33 @@ pub(crate) async fn read_wal_file_range_from(
     Ok(result)
 }
 
+/// Where a pausing read of a V1 file stopped: the next entry to send, and
+/// where its frame starts in the same file's bytes.
+#[derive(Debug, Clone)]
+pub struct WalBytesPause {
+    pub next_id: UintN,
+    offset: usize,
+    index: u64,
+}
+
+#[derive(Debug)]
+pub enum PausableRead {
+    Done(ReadRangeResult),
+    /// The channel was full. Nothing past `next_id` was sent.
+    Paused(WalBytesPause),
+}
+
+impl From<ReadRangeResult> for PausableRead {
+    fn from(result: ReadRangeResult) -> Self {
+        PausableRead::Done(result)
+    }
+}
+
+enum Sending<'a> {
+    Wait,
+    Pause(Option<&'a WalBytesPause>),
+}
+
 pub async fn read_wal_bytes_range(
     content: &Bytes,
     from_id: &UintN,
@@ -901,6 +928,58 @@ pub async fn read_wal_bytes_range(
     target: &mpsc::Sender<ReadEntry>,
     data_source: DataSource,
 ) -> Result<ReadRangeResult, WalError> {
+    let sending = Sending::Wait;
+    match read_bytes_range(
+        content,
+        from_id,
+        until_id,
+        step,
+        target,
+        data_source,
+        sending,
+    )
+    .await?
+    {
+        PausableRead::Done(result) => Ok(result),
+        PausableRead::Paused(_) => unreachable!("a read that waits to send never pauses"),
+    }
+}
+
+/// [`read_wal_bytes_range`] that stops rather than waits when `target` is
+/// full, so the caller can let go of `content` meanwhile. Resuming takes the
+/// same bytes back with the pause and `from_id` set to its `next_id`. A V0
+/// file is read to the end waiting on sends, as before.
+pub async fn read_wal_bytes_range_pausing(
+    content: &Bytes,
+    resume: Option<&WalBytesPause>,
+    from_id: &UintN,
+    until_id: &Option<UintN>,
+    step: usize,
+    target: &mpsc::Sender<ReadEntry>,
+    data_source: DataSource,
+) -> Result<PausableRead, WalError> {
+    let sending = Sending::Pause(resume);
+    read_bytes_range(
+        content,
+        from_id,
+        until_id,
+        step,
+        target,
+        data_source,
+        sending,
+    )
+    .await
+}
+
+async fn read_bytes_range(
+    content: &Bytes,
+    from_id: &UintN,
+    until_id: &Option<UintN>,
+    step: usize,
+    target: &mpsc::Sender<ReadEntry>,
+    data_source: DataSource,
+    sending: Sending<'_>,
+) -> Result<PausableRead, WalError> {
     log::debug!(
         "WAL reader: reading bytes range [{} - {:?}, step {}] from content of size {} bytes",
         from_id,
@@ -918,7 +997,8 @@ pub async fn read_wal_bytes_range(
         return Ok(ReadRangeResult::PartialRead {
             last_read_id: None,
             last_id_in_file: from_id.clone(),
-        });
+        }
+        .into());
     }
 
     let (any_header, header_size) = match AnyWalHeader::from_bytes(content) {
@@ -934,7 +1014,8 @@ pub async fn read_wal_bytes_range(
             return Ok(ReadRangeResult::PartialRead {
                 last_read_id: None,
                 last_id_in_file: from_id.clone(),
-            });
+            }
+            .into());
         }
         Err(e) => return Err(e.into()),
     };
@@ -947,18 +1028,20 @@ pub async fn read_wal_bytes_range(
             .num_entries_before
             .to_u64()
             .map_err(|_| WalHeaderV1Error::ValueTooLarge)?;
-        let mut cursor = header_size;
+        let (mut cursor, mut index) = match &sending {
+            Sending::Pause(Some(pause)) => (pause.offset, pause.index),
+            _ => (header_size, 0),
+        };
         let mut last_read_id: Option<UintN> = None;
         let mut last_processed_id: Option<UintN> = None;
         let mut found_complete = false;
         let step = step.max(1);
         let mut entries_sent = 0u64;
         let mut entries_skipped = 0u64;
-        let mut index = 0u64;
 
         loop {
             if target.is_closed() {
-                return Ok(ReadRangeResult::ChannelClosed);
+                return Ok(ReadRangeResult::ChannelClosed.into());
             }
             if cursor >= content.len() {
                 break;
@@ -983,6 +1066,7 @@ pub async fn read_wal_bytes_range(
             // alive for as long as the entry waits in the channel.
             let record_offset = consumed - record_size - WAL_ENTRY_V1_CRC_SIZE;
             let record = cursor + record_offset..cursor + record_offset + record_size;
+            let frame = cursor;
             cursor += consumed;
 
             let in_range = &entry_id >= from_id
@@ -994,17 +1078,28 @@ pub async fn read_wal_bytes_range(
 
             if in_range {
                 if entry_id.in_step(from_id, step) {
-                    if target
-                        .send(ReadEntry::new(
-                            entry_id.clone(),
-                            Bytes::copy_from_slice(&content[record]),
-                            data_source,
-                        ))
-                        .await
-                        .is_err()
-                    {
-                        return Ok(ReadRangeResult::ChannelClosed);
-                    }
+                    let permit = match &sending {
+                        Sending::Wait => target.reserve().await.ok(),
+                        Sending::Pause(_) => match target.try_reserve() {
+                            Ok(permit) => Some(permit),
+                            Err(mpsc::error::TrySendError::Full(())) => {
+                                return Ok(PausableRead::Paused(WalBytesPause {
+                                    next_id: entry_id,
+                                    offset: frame,
+                                    index: index - 1,
+                                }));
+                            }
+                            Err(mpsc::error::TrySendError::Closed(())) => None,
+                        },
+                    };
+                    let Some(permit) = permit else {
+                        return Ok(ReadRangeResult::ChannelClosed.into());
+                    };
+                    permit.send(ReadEntry::new(
+                        entry_id.clone(),
+                        Bytes::copy_from_slice(&content[record]),
+                        data_source,
+                    ));
 
                     if let Some(until) = until_id
                         && &entry_id >= until
@@ -1057,7 +1152,7 @@ pub async fn read_wal_bytes_range(
             }
         };
 
-        return Ok(result);
+        return Ok(result.into());
     }
 
     let mut cursor = header_size;
@@ -1076,7 +1171,7 @@ pub async fn read_wal_bytes_range(
                 until_id,
                 step
             );
-            return Ok(ReadRangeResult::ChannelClosed);
+            return Ok(ReadRangeResult::ChannelClosed.into());
         }
 
         let remaining_bytes = &content[cursor..];
@@ -1167,7 +1262,7 @@ pub async fn read_wal_bytes_range(
                                 until_id,
                                 step
                             );
-                            return Ok(ReadRangeResult::ChannelClosed);
+                            return Ok(ReadRangeResult::ChannelClosed.into());
                         }
 
                         // Check if we've reached the end of the requested range (if until_id is set)
@@ -1244,5 +1339,5 @@ pub async fn read_wal_bytes_range(
         }
     };
 
-    Ok(result)
+    Ok(result.into())
 }

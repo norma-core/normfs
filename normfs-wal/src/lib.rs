@@ -37,8 +37,8 @@ pub use page_pool::{
     StallListener, StallReport, Stranded, max_record_len,
 };
 pub use reader::{
-    ReadRangeResult, WalContent, count_entries, get_wal_header, read_wal_file_range,
-    read_wal_header,
+    PausableRead, ReadRangeResult, WalBytesPause, WalContent, count_entries, get_wal_header,
+    read_wal_bytes_range_pausing, read_wal_file_range, read_wal_header,
 };
 pub use wal_arena::{POOL_FREE, SlotRange, WalArena};
 pub use wal_entry::{WAL_ENTRY_HEADER_FIXED_OVERHEAD, WalEntryHeader};
