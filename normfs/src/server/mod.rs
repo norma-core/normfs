@@ -4,7 +4,7 @@ pub mod command_processor;
 #[cfg(feature = "websocket")]
 pub mod websocket;
 
-use log::info;
+use log::{info, warn};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -30,6 +30,14 @@ impl Server {
         loop {
             let (stream, addr) = self.listener.accept().await?;
             info!("Accepted connection from {}", addr);
+            // A response is one write, but Nagle would still hold one that
+            // follows an unacknowledged response until the client's delayed ACK.
+            if let Err(e) = stream.set_nodelay(true) {
+                warn!(
+                    "Failed to set TCP_NODELAY (client_addr: {}, error: {})",
+                    addr, e
+                );
+            }
 
             let handler = ClientHandler::new(self.normfs.clone(), addr);
             tokio::spawn(async move {

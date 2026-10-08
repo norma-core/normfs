@@ -195,28 +195,21 @@ impl ClientHandler {
         debug!("Write loop started (client_addr: {})", addr);
 
         while let Some(response) = outgoing_rx.recv().await {
-            let payload = response.encode_to_vec();
-            let size = payload.len() as u64;
-            let size_bytes = size.to_le_bytes();
+            let size = response.encoded_len();
+            let mut message = Vec::with_capacity(8 + size);
+            message.extend_from_slice(&(size as u64).to_le_bytes());
+            response
+                .encode(&mut message)
+                .expect("buffer reserved for the encoded length");
+            // Let go of the payload, and any page it pins, before a slow write.
+            drop(response);
 
-            // Write size
-            if let Err(e) = write_half.write_all(&size_bytes).await {
+            if let Err(e) = write_half.write_all(&message).await {
                 error!(
-                    "Error writing response size (client_addr: {}, error: {})",
+                    "Error writing response (client_addr: {}, error: {})",
                     addr, e
                 );
                 break;
-            }
-
-            // Write payload
-            if size > 0 {
-                if let Err(e) = write_half.write_all(&payload).await {
-                    error!(
-                        "Error writing response payload (client_addr: {}, error: {})",
-                        addr, e
-                    );
-                    break;
-                }
             }
         }
 
