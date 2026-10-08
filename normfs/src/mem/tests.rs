@@ -425,12 +425,10 @@ async fn test_follow_full_with_step() {
     // Add 3 new entries
     mem.enqueue_awaiting(&queue, Bytes::from("data_10"))
         .await
-        .expect("queue is open")
-        .0; // id[10]
+        .expect("queue is open"); // id[10]
     mem.enqueue_awaiting(&queue, Bytes::from("data_11"))
         .await
-        .expect("queue is open")
-        .0; // id[11]
+        .expect("queue is open"); // id[11]
     let id_12 = mem
         .enqueue_awaiting(&queue, Bytes::from("data_12"))
         .await
@@ -582,8 +580,7 @@ async fn test_channel_closed_unsubscribes() {
     // Add new entry - subscription callback should detect closed channel and unsubscribe
     mem.enqueue_awaiting(&queue, Bytes::from("trigger_callback"))
         .await
-        .expect("queue is open")
-        .0;
+        .expect("queue is open");
 
     // Give callback time to fire and unsubscribe
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;

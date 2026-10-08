@@ -19,7 +19,6 @@ const PAGE_COUNT: usize = 2;
 const RECORD: [u8; 16] = [0xAB; 16];
 /// The widest a V1 header gets, which is what the pool is armed with here.
 const HEADER: u64 = 16;
-/// The widest a V1 header gets, as the pool is armed with it in these tests.
 
 fn pool() -> Arc<PagePool> {
     Arc::new(PagePool::new(PAGE_COUNT, PAGE_SIZE, 0))
@@ -175,7 +174,7 @@ async fn the_cap_is_the_page_minus_the_framing() {
 
     let pool = self::pool();
     assert_eq!(
-        pool.place(0, &vec![1u8; PAGE_SIZE]).await,
+        pool.place(0, &[1u8; PAGE_SIZE]).await,
         Err(PoolError::TooLarge),
         "and a record of exactly a page is over by its framing alone"
     );
@@ -950,8 +949,7 @@ async fn eviction_above_a_pinned_page_raises_the_cache_floor() {
 
     // Everything durable, then keep appending until a non-empty page above the
     // pinned one is rotated into.
-    let mut evicted_last = None;
-    loop {
+    let evicted_last = loop {
         pool.mark_durable(pool.next_entry_id());
         let before: Vec<Option<(u64, u64)>> = pool.with_ring(|r| {
             (0..r.page_count())
@@ -964,11 +962,9 @@ async fn eviction_above_a_pinned_page_raises_the_cache_floor() {
         if active_after != active_before
             && let Some((_, last)) = before[active_after]
         {
-            evicted_last = Some(last);
-            break;
+            break last;
         }
-    }
-    let evicted_last = evicted_last.expect("a rotation reused a non-empty page");
+    };
 
     // The pinned page's ids are below the evicted range; serving them would
     // serve a run with a hole where the evicted page was.

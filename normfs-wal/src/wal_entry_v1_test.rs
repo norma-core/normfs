@@ -216,8 +216,7 @@ fn test_wal_entry_v1_iter_next_derives_ids_across_buffer() {
     }
 
     let mut cursor = 0usize;
-    let mut index = 0u64;
-    for record in &records {
+    for (index, record) in (0u64..).zip(&records) {
         let (decoded, entry_id, consumed) =
             WalEntryV1::iter_next(&buffer[cursor..], base, index).unwrap();
         assert_eq!(decoded.record, &record[..]);
@@ -226,7 +225,6 @@ fn test_wal_entry_v1_iter_next_derives_ids_across_buffer() {
         let (_, consumed_decode) = WalEntryV1::from_bytes(&buffer[cursor..]).unwrap();
         assert_eq!(consumed, consumed_decode);
         cursor += consumed;
-        index += 1;
     }
     assert_eq!(cursor, buffer.len());
 }

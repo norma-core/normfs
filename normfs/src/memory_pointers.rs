@@ -176,7 +176,7 @@ impl MemoryPointers {
         snapshot: &HashMap<String, Pointer>,
     ) -> Result<(), Error> {
         let mut entries: Vec<_> = snapshot.iter().collect();
-        entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+        entries.sort_by_key(|(queue, _)| *queue);
 
         let mut out = Vec::new();
         out.extend_from_slice(b"# normfs memory-only pointers v1\n");

@@ -285,7 +285,7 @@ pub(crate) async fn get_wal_range_from(
             }
         }
 
-        let range = first_id.and_then(|first| last_id.map(|last| (first, last)));
+        let range = first_id.zip(last_id);
         log::debug!(
             "WAL reader: file {} contains {} valid V1 entries, range: {:?}",
             file_id,
@@ -351,7 +351,7 @@ pub(crate) async fn get_wal_range_from(
         entry_count += 1;
     }
 
-    let range = first_id.and_then(|first| last_id.map(|last| (first, last)));
+    let range = first_id.zip(last_id);
 
     log::debug!(
         "WAL reader: file {} contains {} valid entries, range: {:?}",

@@ -625,7 +625,7 @@ impl WalRing {
         let base = self.ring.arena;
         let pool = self.ring.pool;
 
-        for k in 0..n {
+        for (k, &pin_count) in pins.iter().enumerate() {
             unsafe {
                 normfs_wal_page_init(
                     pages_ptr.add(k),
@@ -635,7 +635,7 @@ impl WalRing {
                     first_entry_id,
                 );
             }
-            unsafe { (*self.page(k)).pin_count = pins[k] };
+            unsafe { (*self.page(k)).pin_count = pin_count };
         }
         unsafe {
             normfs_wal_ring_init(

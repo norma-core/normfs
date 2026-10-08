@@ -766,7 +766,7 @@ impl WriterState {
                         );
                         return false;
                     }
-                    if attempt % ROTATE_WARN_EVERY == 0 {
+                    if attempt.is_multiple_of(ROTATE_WARN_EVERY) {
                         log::error!(
                             "WAL writer: queue '{}': opening file {} failed ({}); retrying. \
                              Nothing is written or lost while this queue waits, but it is \

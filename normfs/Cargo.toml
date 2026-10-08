@@ -1,6 +1,7 @@
 [package]
 name = "normfs"
 version.workspace = true
+rust-version.workspace = true
 edition = "2021"
 authors.workspace = true
 license.workspace = true
