@@ -769,3 +769,59 @@ async fn a_failing_startup_scan_does_not_stop_files_landed_after_it() {
     })
     .await;
 }
+
+struct MoveFailures(Mutex<Vec<String>>);
+
+impl log::Log for MoveFailures {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::Level::Info
+    }
+
+    fn log(&self, record: &log::Record) {
+        let line = record.args().to_string();
+        let per_try = line.starts_with("Failed to move file") || line.starts_with("Uploading file");
+        if per_try && line.contains("424242") {
+            self.0.lock().unwrap().push(line);
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+static MOVE_FAILURES: MoveFailures = MoveFailures(Mutex::new(Vec::new()));
+
+#[tokio::test(start_paused = true)]
+async fn a_put_that_keeps_failing_is_logged_on_tries_1_2_4_8() {
+    let _ = log::set_logger(&MOVE_FAILURES);
+    log::set_max_level(log::LevelFilter::Info);
+    let queue = QueueIdResolver::new("inst").resolve("cam");
+    let local = Arc::new(Flaky::default());
+    put(local.as_ref(), &queue, 424242).await;
+
+    let remote = Arc::new(Memory::default());
+    *remote.refuse.lock().unwrap() = u32::MAX;
+    let recorded = Arc::new(Recorded::default());
+    let events: events::EventSink = recorded.clone();
+    let _offloader = QueueOffloader::new(
+        Arc::new(Layer::new(local, None, false)),
+        Arc::new(Layer::new(remote.clone(), None, true)),
+        None,
+        queue,
+        events,
+    )
+    .await;
+    wait_for("nine failed puts", async || {
+        *remote.refuse.lock().unwrap() <= u32::MAX - 9
+    })
+    .await;
+
+    assert_eq!(MOVE_FAILURES.0.lock().unwrap().len(), 4);
+    let failed = recorded
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| matches!(e, SystemEvent::UploadFailed { .. }))
+        .count();
+    assert_eq!(failed, 4);
+}
