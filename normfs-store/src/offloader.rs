@@ -494,6 +494,7 @@ impl QueueOffloaderWorker {
             mut attempt,
             mut first_put,
         } = tried;
+        let mut remote_failures: u32 = 0;
         loop {
             let failed = match self.is_file_offloaded(file_id).await {
                 Ok(true) => {
@@ -550,10 +551,13 @@ impl QueueOffloaderWorker {
                     return Outcome::Later(Tried { attempt, first_put });
                 }
                 OffloadError::RemoteError(e) => {
-                    error!(
-                        "Failed to move file {:?}: {}, retrying in 1 second",
-                        file_id, e
-                    );
+                    remote_failures = remote_failures.saturating_add(1);
+                    if remote_failures.is_power_of_two() {
+                        error!(
+                            "Failed to move file {:?} of {} ({} tries): {}, retrying in 1 second",
+                            file_id, self.queue_id, remote_failures, e
+                        );
+                    }
                     tokio::time::sleep(RETRY_DELAY).await;
                 }
             }
