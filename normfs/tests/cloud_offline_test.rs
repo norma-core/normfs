@@ -498,7 +498,7 @@ async fn a_store_queue_after_a_crashed_cloud_life_writes_after_its_objects() {
     .await
     .unwrap();
     fs.ensure_queue_exists_for_write(&queue).await.unwrap();
-    assert_eq!(write(&fs, &queue, PER_PAGE, 2).await[0], 2 * PER_PAGE);
+    assert!(write(&fs, &queue, PER_PAGE, 2).await[0] >= 2 * PER_PAGE);
     fs.flush_queue(&queue).await.unwrap();
     let deadline = Instant::now() + Duration::from_secs(20);
     while objects(&direct, &queue).await < 3 {
@@ -649,7 +649,114 @@ async fn a_store_life_after_a_cloud_life_needs_the_bucket_to_start() {
 }
 
 #[tokio::test]
-async fn a_store_life_with_no_bucket_configured_numbers_past_the_reserve() {
+async fn a_store_life_with_no_bucket_continues_after_a_clean_cloud_life() {
+    let Some((direct, cloud, _proxy)) = s3_behind_proxy(Link::Up).await else {
+        return;
+    };
+    let temp = tempfile::TempDir::new().unwrap();
+    let queue;
+    {
+        let fs = open(temp.path(), &cloud).await;
+        queue = fs.resolve("cam0");
+        fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+        write(&fs, &queue, 5 * PER_PAGE, 1).await;
+        fs.close().await.unwrap();
+    }
+    let store = Persist {
+        wal: false,
+        store: true,
+        cloud: false,
+    };
+    {
+        let mut settings = persist_settings(&cloud, store);
+        settings.cloud_settings = None;
+        let fs = NormFS::new(temp.path().to_path_buf(), settings)
+            .await
+            .unwrap();
+        fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+        assert_eq!(write(&fs, &queue, PER_PAGE, 2).await[0], 5 * PER_PAGE);
+        fs.close().await.unwrap();
+    }
+    assert!(UintN::from(6u64)
+        .to_file_path(queue.to_store_dir(temp.path()).to_str().unwrap(), "store")
+        .exists());
+
+    let fs = NormFS::new(
+        temp.path().to_path_buf(),
+        persist_settings(&cloud, STORE_CLOUD),
+    )
+    .await
+    .unwrap();
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while objects(&direct, &queue).await < 6 {
+        assert!(Instant::now() < deadline, "file 6 was never offloaded");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let mut expected = vec![1u8; 20];
+    expected.extend([2; 4]);
+    assert_eq!(lives(&fs, &queue, 0, 6 * PER_PAGE).await, expected);
+    assert_eq!(lives(&fs, &queue, 18, 4).await, [1, 1, 2, 2]);
+    fs.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_crashed_queue_does_not_hold_back_one_that_closed_cleanly() {
+    let Some((_direct, cloud, _proxy)) = s3_behind_proxy(Link::Up).await else {
+        return;
+    };
+    let temp = tempfile::TempDir::new().unwrap();
+    let (root, life1_cloud) = (temp.path().to_path_buf(), cloud.clone());
+    let crashed = own_runtime_returning(async move {
+        let fs = open(&root, &life1_cloud).await;
+        let queue = fs.resolve("camB");
+        fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+        write(&fs, &queue, PER_PAGE, 1).await;
+        fs.flush_queue(&queue).await.unwrap();
+        queue
+    })
+    .await;
+    let queue;
+    {
+        let fs = open(temp.path(), &cloud).await;
+        queue = fs.resolve("cam0");
+        fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+        write(&fs, &queue, PER_PAGE, 1).await;
+        fs.close().await.unwrap();
+    }
+    let lines = std::fs::read_to_string(temp.path().join(".memory_pointers")).unwrap();
+    let exact = |q: &normfs::QueueId| {
+        lines
+            .lines()
+            .find(|l| l.starts_with(q.as_str()))
+            .is_some_and(|l| l.ends_with("\texact"))
+    };
+    assert!(exact(&queue) && !exact(&crashed), "{lines}");
+
+    let mut settings = persist_settings(
+        &cloud,
+        Persist {
+            wal: false,
+            store: true,
+            cloud: false,
+        },
+    );
+    settings.cloud_settings = None;
+    let fs = NormFS::new(temp.path().to_path_buf(), settings)
+        .await
+        .unwrap();
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    assert_eq!(write(&fs, &queue, 1, 2).await, [PER_PAGE]);
+    assert_needs_bucket(
+        fs.ensure_queue_exists_for_write(&crashed).await,
+        &crashed,
+        "no bucket is configured",
+    );
+    fs.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_store_life_with_no_bucket_needs_one_after_a_crashed_cloud_life() {
     let temp = tempfile::TempDir::new().unwrap();
     let cloud = refusing();
     let queue = recorded(temp.path(), &cloud).await;
@@ -665,14 +772,47 @@ async fn a_store_life_with_no_bucket_configured_numbers_past_the_reserve() {
     let fs = NormFS::new(temp.path().to_path_buf(), settings)
         .await
         .unwrap();
+    assert_needs_bucket(
+        fs.ensure_queue_exists_for_write(&queue).await,
+        &queue,
+        "no bucket is configured",
+    );
+}
+
+#[tokio::test]
+async fn ids_do_not_go_back_when_the_bucket_returns() {
+    let Some((_direct, cloud, proxy)) = s3_behind_proxy(Link::Up).await else {
+        return;
+    };
+    let temp = tempfile::TempDir::new().unwrap();
+    let (root, life1_cloud) = (temp.path().to_path_buf(), cloud.clone());
+    let queue = own_runtime_returning(async move {
+        let fs = open(&root, &life1_cloud).await;
+        let queue = fs.resolve("cam0");
+        fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+        write(&fs, &queue, 2 * PER_PAGE, 1).await;
+        fs.flush_queue(&queue).await.unwrap();
+        queue
+    })
+    .await;
+
+    proxy.set(Link::Down);
+    let (root, life2_cloud, life2_queue) =
+        (temp.path().to_path_buf(), cloud.clone(), queue.clone());
+    let offline = own_runtime_returning(async move {
+        let fs = open(&root, &life2_cloud).await;
+        fs.ensure_queue_exists_for_write(&life2_queue)
+            .await
+            .unwrap();
+        write(&fs, &life2_queue, 2, 2).await
+    })
+    .await;
+    assert!(offline[0] > 2 * PER_PAGE);
+
+    proxy.set(Link::Up);
+    let fs = open(temp.path(), &cloud).await;
     fs.ensure_queue_exists_for_write(&queue).await.unwrap();
-    assert_eq!(write(&fs, &queue, PER_PAGE, 2).await, [8, 9, 10, 11]);
-    fs.flush_queue(&queue).await.unwrap();
-    // The record says file 2 and id 7; a lost hint could hide up to 7 more.
-    assert!(UintN::from(9u64)
-        .to_file_path(queue.to_store_dir(temp.path()).to_str().unwrap(), "store")
-        .exists());
-    assert_eq!(lives(&fs, &queue, 8, PER_PAGE).await, [2; 4]);
+    assert!(write(&fs, &queue, 1, 3).await[0] >= offline[0]);
     fs.close().await.unwrap();
 }
 
@@ -720,7 +860,7 @@ async fn a_queue_the_bucket_held_nothing_for_starts_without_it_later() {
     }
     let fs = open(temp.path(), &refusing()).await;
     fs.ensure_queue_exists_for_write(&queue).await.unwrap();
-    assert_eq!(write(&fs, &queue, 1, 1).await, [1]);
+    assert_eq!(write(&fs, &queue, 1, 1).await, [0]);
 }
 
 #[tokio::test]
@@ -800,15 +940,16 @@ async fn records_taken_offline_land_once_the_bucket_is_back() {
         fs.close().await.unwrap();
     }
     assert_eq!(objects(&direct, &queue).await, 3);
-    let reserve = PER_PAGE - 1 + RESERVE;
+    // A clean close brings the reserve down to the last id landed.
+    let last = 2 * PER_PAGE;
     assert_eq!(
         pointer(temp.path(), &queue),
-        [reserve.to_string(), "3".into()]
+        [last.to_string(), "3".into(), "exact".into()]
     );
 
-    // A restart while offline goes past the reserve. What the closed life
-    // still held in memory is lost: no upload of it started, so the next
-    // life may hand its ids out again.
+    // A restart while offline. What the closed life still held in memory is
+    // lost: no upload of it started, so the next life may hand its ids out
+    // again.
     proxy.set(Link::Down);
     let (root, life2_cloud, life2_queue) =
         (temp.path().to_path_buf(), cloud.clone(), queue.clone());
@@ -817,17 +958,14 @@ async fn records_taken_offline_land_once_the_bucket_is_back() {
         fs.ensure_queue_exists_for_write(&life2_queue)
             .await
             .unwrap();
-        assert_eq!(
-            write(&fs, &life2_queue, 2, 2).await,
-            [reserve + 1, reserve + 2]
-        );
+        assert_eq!(write(&fs, &life2_queue, 2, 2).await, [last + 1, last + 2]);
         assert!(fs.close().await.is_err(), "the bucket is down");
     })
     .await;
     {
         let fs = open(temp.path(), &cloud).await;
         fs.ensure_queue_exists_for_write(&queue).await.unwrap();
-        assert_eq!(write(&fs, &queue, 1, 3).await, [reserve + 1]);
+        assert_eq!(write(&fs, &queue, 1, 3).await, [last + 1]);
         proxy.set(Link::Up);
         timeout(Duration::from_secs(30), fs.flush_queue(&queue))
             .await
@@ -838,17 +976,9 @@ async fn records_taken_offline_land_once_the_bucket_is_back() {
 
     let fs = open(temp.path(), &cloud).await;
     fs.ensure_queue_exists_for_read(&queue).await.unwrap();
-    assert_eq!(lives(&fs, &queue, 0, 9).await, [1; 9]);
-    assert_eq!(lives(&fs, &queue, reserve + 1, 1).await, [3]);
-    assert_eq!(
-        ids(&fs, &queue, 8, reserve).await,
-        [8, reserve + 1],
-        "the read skips the gap"
-    );
-    assert_eq!(
-        fs.get_last_id(&queue).unwrap().to_u64().unwrap(),
-        reserve + 1
-    );
+    let mut expected = vec![1u8; 9];
+    expected.push(3);
+    assert_eq!(lives(&fs, &queue, 0, 10).await, expected);
     assert_eq!(objects(&direct, &queue).await, 4);
     fs.close().await.unwrap();
 }
@@ -872,7 +1002,8 @@ async fn an_upload_that_landed_unrecorded_is_not_written_over() {
         fs.close().await.unwrap();
     }
     assert_eq!(objects(&direct, &queue).await, 2);
-    let reserve = PER_PAGE - 1 + RESERVE;
+    // Life 2 reserves when it uploads file 3, past what life 1 landed.
+    let reserve = 3 * PER_PAGE - 1 + RESERVE;
 
     let (root, life2_cloud, link, life2_direct, life2_queue) = (
         temp.path().to_path_buf(),
@@ -931,6 +1062,11 @@ async fn an_upload_that_landed_unrecorded_is_not_written_over() {
     expected.extend([2; 4]);
     assert_eq!(lives(&fs, &queue, 0, 12).await, expected);
     assert_eq!(lives(&fs, &queue, reserve + 1, PER_PAGE).await, [3; 4]);
+    assert_eq!(
+        ids(&fs, &queue, 3 * PER_PAGE - 1, reserve).await[..2],
+        [3 * PER_PAGE - 1, reserve + 1],
+        "the read skips the reserve gap"
+    );
     fs.close().await.unwrap();
 }
 

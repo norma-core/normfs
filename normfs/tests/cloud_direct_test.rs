@@ -144,8 +144,8 @@ async fn a_full_page_becomes_one_object_and_nothing_touches_the_disk() {
     let cols: Vec<_> = line.split('\t').collect();
     assert_eq!(
         cols[1],
-        (PER_PAGE - 1 + (1 << 16)).to_string(),
-        "the reserve"
+        (40 * PER_PAGE - 1).to_string(),
+        "a clean close brings the reserve down to the last id"
     );
     assert_eq!(cols[2], "40", "last file landed");
 }

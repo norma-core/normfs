@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use normfs_fs::{Fs, PublishSpec, Runs, TmpMode};
 use normfs_types::QueueId;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Error, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -13,6 +13,10 @@ const POINTERS_FILE: &str = ".memory_pointers";
 const POINTERS_TMP_FILE: &str = ".memory_pointers.tmp";
 
 const LEGACY_HEADER: &str = "# normfs memory-only pointers v1\n";
+const HEADER: &str = "# normfs pointers v1: queue, id reserve, last landed file, exact\n";
+/// Fourth column of a queue whose last file no upload can have gone past.
+/// Parsers before 0.4.2 read three columns and ignore the rest.
+const EXACT: &str = "exact";
 
 /// Ids reserved past the one an upload needs, so the file is rewritten once
 /// per this many ids rather than once per upload. A restart that cannot list
@@ -20,8 +24,9 @@ const LEGACY_HEADER: &str = "# normfs memory-only pointers v1\n";
 pub(crate) const RESERVE_AHEAD: u64 = 1 << 16;
 
 /// What survives a restart of a cloud-direct queue: an id no upload has gone
-/// past, and the last file known to have landed. The file is a hint written
-/// with the id or on close; the bucket is the authority for it.
+/// past, and the last file known to have landed. The file is written lazily,
+/// so it is exact only while the queue is settled; otherwise the bucket is the
+/// authority for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Pointer {
     pub id: u64,
@@ -33,6 +38,11 @@ struct PointerState {
     dirty: bool,
     /// A landed file not yet written out; never worth a write on its own.
     hints: bool,
+    /// Queues whose last file on disk may be behind the bucket: an upload
+    /// started since it was written, or the file was not written settled.
+    unsettled: HashSet<String>,
+    /// The last id each queue landed in this life.
+    landed_now: HashMap<String, u64>,
     #[cfg(test)]
     publishes: u64,
 }
@@ -58,18 +68,25 @@ impl MemoryPointers {
             })
             .await
             .map_err(Error::from)?;
-        let queues = match contents {
+        let (queues, exact) = match contents {
             Some(contents) => {
-                let mut queues = parse_pointers(&contents)?;
+                let (mut queues, exact) = parse_pointers(&contents)?;
                 // Before 0.4.2 every memory-only queue kept a line, with no
                 // file; nothing else wrote one without a file then.
                 if contents.starts_with(LEGACY_HEADER) {
                     queues.retain(|_, p| p.file.is_some());
                 }
-                queues
+                (queues, exact)
             }
-            None => HashMap::new(),
+            None => (HashMap::new(), HashSet::new()),
         };
+        // A bare record never had an upload start: the bucket holds nothing
+        // of it.
+        let unsettled = queues
+            .iter()
+            .filter(|(queue, p)| !exact.contains(*queue) && !(p.file.is_none() && p.id == 0))
+            .map(|(queue, _)| queue.clone())
+            .collect();
 
         Ok(Self {
             fs,
@@ -79,6 +96,8 @@ impl MemoryPointers {
                 queues,
                 dirty: false,
                 hints: false,
+                unsettled,
+                landed_now: HashMap::new(),
                 #[cfg(test)]
                 publishes: 0,
             })),
@@ -90,9 +109,22 @@ impl MemoryPointers {
         self.pointer(queue).map(|p| UintN::from(p.id))
     }
 
+    /// The highest id an earlier life may have used; a bare record says none.
+    pub(crate) fn used_id(&self, queue: &QueueId) -> Option<UintN> {
+        self.pointer(queue)
+            .filter(|p| p.id > 0 || p.file.is_some())
+            .map(|p| UintN::from(p.id))
+    }
+
     pub(crate) fn last_landed(&self, queue: &QueueId) -> Option<(UintN, UintN)> {
         let p = self.pointer(queue)?;
         Some((UintN::from(p.id), UintN::from(p.file?)))
+    }
+
+    /// Whether the queue's last file is known to be the bucket's last.
+    pub(crate) fn is_settled(&self, queue: &QueueId) -> bool {
+        let state = self.state.lock().unwrap();
+        state.queues.contains_key(queue.as_str()) && !state.unsettled.contains(queue.as_str())
     }
 
     fn pointer(&self, queue: &QueueId) -> Option<Pointer> {
@@ -109,22 +141,92 @@ impl MemoryPointers {
         last_id: &UintN,
         file_id: &UintN,
     ) -> Result<(), Error> {
+        let last = to_u64(last_id, "id")?;
         self.advance(queue, last_id, Some(file_id))?;
+        {
+            let mut state = self.state.lock().unwrap();
+            let landed = state
+                .landed_now
+                .entry(queue.as_str().to_string())
+                .or_default();
+            *landed = (*landed).max(last);
+        }
         self.flush_if_dirty().await
+    }
+
+    /// What the bucket said it holds: its last file is now exact.
+    pub(crate) async fn settle_from_bucket(
+        &self,
+        queue: &QueueId,
+        last_id: &UintN,
+        file_id: &UintN,
+    ) -> Result<(), Error> {
+        self.advance(queue, last_id, Some(file_id))?;
+        self.settle(queue);
+        self.flush_if_dirty().await
+    }
+
+    /// The bucket answered for the queue, so its last file is exact.
+    pub(crate) fn settle(&self, queue: &QueueId) {
+        let mut state = self.state.lock().unwrap();
+        if state.unsettled.remove(queue.as_str()) {
+            state.hints = true;
+        }
     }
 
     /// Makes sure no restart hands out an id up to `id` again, writing out a
     /// reserve [`RESERVE_AHEAD`] past it when the current one falls short.
+    /// The first upload of a settled queue also writes, since its last file
+    /// stops being exact once that upload may have landed.
     pub(crate) async fn reserve(&self, queue: &QueueId, id: &UintN) -> Result<(), Error> {
-        if self
+        let covered = self
             .pointer(queue)
-            .is_some_and(|p| UintN::from(p.id) >= *id)
-        {
+            .is_some_and(|p| UintN::from(p.id) >= *id);
+        let newly_unsettled = {
+            let mut state = self.state.lock().unwrap();
+            let fresh = state.unsettled.insert(queue.as_str().to_string());
+            if fresh {
+                state.dirty = true;
+            }
+            fresh
+        };
+        if covered && !newly_unsettled {
             return Ok(());
         }
-        let ahead = to_u64(id, "id")?.saturating_add(RESERVE_AHEAD);
-        self.advance(queue, &UintN::from(ahead), None)?;
+        if !covered {
+            let ahead = to_u64(id, "id")?.saturating_add(RESERVE_AHEAD);
+            self.advance(queue, &UintN::from(ahead), None)?;
+        }
         self.flush_if_dirty().await
+    }
+
+    /// After a close that landed everything: each queue that uploaded in this
+    /// life has its reserve brought down to the last id it landed, and its
+    /// last file is exact again.
+    pub(crate) fn settle_landed(&self) {
+        let mut state = self.state.lock().unwrap();
+        let state = &mut *state;
+        for (queue, last) in state.landed_now.drain() {
+            if let Some(entry) = state.queues.get_mut(&queue) {
+                entry.id = last;
+            }
+            state.unsettled.remove(&queue);
+            state.dirty = true;
+        }
+    }
+
+    /// [`MemoryPointers::settle_landed`] for one queue a close drained; the
+    /// next write takes it along.
+    pub(crate) fn settle_landed_queue(&self, queue: &QueueId) {
+        let mut state = self.state.lock().unwrap();
+        let state = &mut *state;
+        if let Some(last) = state.landed_now.remove(queue.as_str()) {
+            if let Some(entry) = state.queues.get_mut(queue.as_str()) {
+                entry.id = last;
+            }
+            state.unsettled.remove(queue.as_str());
+            state.hints = true;
+        }
     }
 
     /// Notes a cloud-direct queue the bucket held nothing for, so a later
@@ -195,7 +297,7 @@ impl MemoryPointers {
             {
                 state.publishes += 1;
             }
-            state.queues.clone()
+            (state.queues.clone(), state.unsettled.clone())
         };
 
         let (fs, tmp, path, state) = (
@@ -208,7 +310,8 @@ impl MemoryPointers {
         // when the caller abandons a close or a cloud landing.
         tokio::spawn(async move {
             let _guard = flush_guard;
-            let result = Self::write_snapshot(&fs, tmp, path, &snapshot).await;
+            let (snapshot, unsettled) = snapshot;
+            let result = Self::write_snapshot(&fs, tmp, path, &snapshot, &unsettled).await;
             if result.is_err() {
                 state.lock().unwrap().dirty = true;
             }
@@ -239,12 +342,13 @@ impl MemoryPointers {
         tmp: PathBuf,
         path: PathBuf,
         snapshot: &HashMap<String, Pointer>,
+        unsettled: &HashSet<String>,
     ) -> Result<(), Error> {
         let mut entries: Vec<_> = snapshot.iter().collect();
         entries.sort_by_key(|(queue, _)| *queue);
 
         let mut out = Vec::new();
-        out.extend_from_slice(b"# normfs pointers v1: queue, id reserve, last landed file\n");
+        out.extend_from_slice(HEADER.as_bytes());
         for (queue, pointer) in entries {
             out.extend_from_slice(queue.as_bytes());
             out.push(b'\t');
@@ -252,6 +356,10 @@ impl MemoryPointers {
             if let Some(f) = pointer.file {
                 out.push(b'\t');
                 out.extend_from_slice(f.to_string().as_bytes());
+                if !unsettled.contains(queue.as_str()) {
+                    out.push(b'\t');
+                    out.extend_from_slice(EXACT.as_bytes());
+                }
             }
             out.push(b'\n');
         }
@@ -304,10 +412,12 @@ fn to_u64(n: &UintN, what: &str) -> Result<u64, Error> {
     })
 }
 
-/// `queue\tid` or `queue\tid\tfile`; the third column is the cloud-direct
-/// queue's last file and a v1 file without it still parses.
-fn parse_pointers(contents: &str) -> Result<HashMap<String, Pointer>, Error> {
+/// `queue\tid`, `queue\tid\tfile` or `queue\tid\tfile\texact`; the third
+/// column is the cloud-direct queue's last file, the fourth says it is exact,
+/// and a v1 file without them still parses.
+fn parse_pointers(contents: &str) -> Result<(HashMap<String, Pointer>, HashSet<String>), Error> {
     let mut queues = HashMap::new();
+    let mut exact = HashSet::new();
     for (line_no, line) in contents.lines().enumerate() {
         let line = line.trim_end();
         if line.is_empty() || line.starts_with('#') {
@@ -331,7 +441,10 @@ fn parse_pointers(contents: &str) -> Result<HashMap<String, Pointer>, Error> {
         };
         let id = parse(id, "id")?;
         let file = cols.next().map(|f| parse(f, "file id")).transpose()?;
+        if cols.next() == Some(EXACT) {
+            exact.insert(queue.to_string());
+        }
         queues.insert(queue.to_string(), Pointer { id, file });
     }
-    Ok(queues)
+    Ok((queues, exact))
 }

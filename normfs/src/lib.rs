@@ -319,13 +319,8 @@ fn bucket_cause(e: &Error) -> (String, bool) {
 
 struct CloudResume {
     landed: Option<(UintN, UintN)>,
-    /// The bucket answered with a file, so its last id is the queue's.
-    exact: bool,
     /// The bucket did not answer: the first file id is still to be checked.
     unchecked: bool,
-    /// The lowest file id that cannot be one of the bucket's, when the bucket
-    /// could not say which it holds.
-    file_floor: Option<UintN>,
 }
 
 /// 32 KiB pages, so a passive queue's permanent 2-page floor is 64 KiB.
@@ -1312,51 +1307,42 @@ impl NormFS {
     /// record nothing proves which ids are free, so the start fails.
     async fn cloud_landed(&self, queue: &QueueId, persist: Persist) -> Result<CloudResume, Error> {
         let landed = self.memory_pointers.last_landed(queue);
-        let recorded = self.memory_pointers.last_id(queue);
-        let not_asked = CloudResume {
-            landed: landed.clone(),
-            exact: false,
-            unchecked: false,
-            file_floor: None,
-        };
-        if !persist.cloud {
-            return self.local_after_cloud(queue, landed, recorded).await;
-        }
+        let recorded = self.memory_pointers.last_id(queue).is_some();
+        let resume = |landed, unchecked| CloudResume { landed, unchecked };
         let Some(cloud) = self.cloud.as_ref() else {
-            return Ok(not_asked);
-        };
-        if persist.store {
-            // Any record, not just a landed file: that one is written lazily,
-            // and a cloud-direct life that crashed left only its reserve.
-            if recorded.is_none() {
-                return Ok(not_asked);
+            if persist.cloud || !recorded || self.memory_pointers.is_settled(queue) {
+                return Ok(resume(landed, false));
             }
-            let found = self.bucket_landed(cloud, queue).await?;
-            return Ok(CloudResume {
-                exact: found.is_some(),
-                landed: found.or(landed),
-                unchecked: false,
-                file_floor: None,
-            });
-        }
-        let empty = CloudResume {
-            landed: None,
-            exact: true,
-            unchecked: false,
-            file_floor: None,
+            return Err(self.local_needs_bucket(queue, "no bucket is configured".into()));
         };
+        if !persist.cloud || persist.store {
+            // A settled pointer names the bucket's last file; otherwise the
+            // one it names may be behind, after a crash or an unrecorded
+            // landing, and local files numbered after it would be offloaded
+            // over objects.
+            if !recorded || self.memory_pointers.is_settled(queue) {
+                return Ok(resume(landed, false));
+            }
+            let checked =
+                tokio::time::timeout(BUCKET_CHECK_TIMEOUT, self.bucket_landed(cloud, queue)).await;
+            return match checked {
+                Ok(Ok(found)) => Ok(resume(found.or(landed), false)),
+                Ok(Err(e)) => Err(self.local_needs_bucket(queue, bucket_cause(&e).0)),
+                Err(_) => Err(self.local_needs_bucket(
+                    queue,
+                    format!("the bucket did not answer within {BUCKET_CHECK_TIMEOUT:?}"),
+                )),
+            };
+        }
         // A seed made by this run is a namespace nothing was written to.
         // Only for its first start in this run: after that the pointer says
         // what it wrote.
-        if self.fresh_instance
-            && queue.as_str().starts_with(&self.instance_prefix())
-            && self.memory_pointers.last_id(queue).is_none()
-        {
+        if self.fresh_instance && queue.as_str().starts_with(&self.instance_prefix()) && !recorded {
             self.memory_pointers
                 .record(queue)
                 .await
                 .map_err(Error::Io)?;
-            return Ok(empty);
+            return Ok(resume(None, false));
         }
         let mut refused = false;
         let cause = match self.bucket_down() {
@@ -1366,30 +1352,22 @@ impl NormFS {
                     tokio::time::timeout(BUCKET_CHECK_TIMEOUT, self.bucket_landed(cloud, queue))
                         .await;
                 let cause = match checked {
-                    Ok(Ok(Some((last, file)))) => {
-                        self.set_bucket_down(None);
-                        // A hint past the bucket's last file means the
-                        // listing is behind; the reserve then still counts.
-                        let (file, exact) = match &landed {
-                            Some((_, hint)) if *hint > file => (hint.clone(), false),
-                            _ => (file, true),
-                        };
-                        return Ok(CloudResume {
-                            landed: Some((last, file)),
-                            exact,
-                            unchecked: false,
-                            file_floor: None,
-                        });
-                    }
-                    Ok(Ok(None)) => {
+                    Ok(Ok(found)) => {
                         self.set_bucket_down(None);
                         self.memory_pointers
                             .record(queue)
                             .await
                             .map_err(Error::Io)?;
-                        // A pointer naming a landed file outweighs a listing
-                        // that shows none.
-                        return Ok(if landed.is_some() { not_asked } else { empty });
+                        // A hint past the bucket's last file means the
+                        // listing is behind; the hint wins.
+                        let landed = match (found, landed) {
+                            (Some((last, file)), Some((_, hint))) if hint > file => {
+                                Some((last, hint))
+                            }
+                            (Some(found), _) => Some(found),
+                            (None, landed) => landed,
+                        };
+                        return Ok(resume(landed, false));
                     }
                     Ok(Err(e)) => {
                         let cause;
@@ -1402,7 +1380,7 @@ impl NormFS {
                 cause
             }
         };
-        if self.memory_pointers.last_id(queue).is_none() {
+        if !recorded {
             return Err(Error::BucketUnreachable {
                 queue: queue.to_string(),
                 cause: format!("it has no local record, and {cause}"),
@@ -1416,12 +1394,17 @@ impl NormFS {
         log::log!(target: "normfs", level,
             "Queue '{}' - starting without the bucket ({}); resuming from the local pointer {:?}",
             queue, cause, landed);
-        Ok(CloudResume {
-            landed,
-            exact: false,
-            unchecked: true,
-            file_floor: None,
-        })
+        Ok(resume(landed, true))
+    }
+
+    fn local_needs_bucket(&self, queue: &QueueId, cause: String) -> Error {
+        Error::BucketUnreachable {
+            queue: queue.to_string(),
+            cause: format!(
+                "its last cloud-direct life ended without recording its last file, which local \
+                 files must be numbered after, and {cause}"
+            ),
+        }
     }
 
     fn instance_prefix(&self) -> String {
@@ -1440,68 +1423,8 @@ impl NormFS {
         *self.bucket_down.lock().unwrap() = cause.map(|c| (std::time::Instant::now(), c));
     }
 
-    /// A local life of a queue that was cloud-direct before. Its landed file
-    /// is written lazily, so the pointer may name one the bucket is already
-    /// past, and local files numbered after it would be offloaded over those
-    /// objects later. So the bucket is asked, and without an answer the queue
-    /// does not start. Without a bucket at all, files start past any a cloud
-    /// life could have landed (each held at least one id, none past the
-    /// reserve); the gap is harmless while nothing is read from a bucket.
-    async fn local_after_cloud(
-        &self,
-        queue: &QueueId,
-        landed: Option<(UintN, UintN)>,
-        recorded: Option<UintN>,
-    ) -> Result<CloudResume, Error> {
-        let Some(reserve) = recorded else {
-            return Ok(CloudResume {
-                landed,
-                exact: false,
-                unchecked: false,
-                file_floor: None,
-            });
-        };
-        let Some(cloud) = &self.cloud else {
-            let floor = reserve.increment().increment();
-            log::warn!(target: "normfs",
-                "Queue '{}' - was cloud-direct and no bucket is configured; its local files \
-                 start at {} so none can share a number with an object",
-                queue, floor);
-            return Ok(CloudResume {
-                landed,
-                exact: false,
-                unchecked: false,
-                file_floor: Some(floor),
-            });
-        };
-        let cause = match tokio::time::timeout(
-            BUCKET_CHECK_TIMEOUT,
-            self.bucket_landed(cloud, queue),
-        )
-        .await
-        {
-            Ok(Ok(found)) => {
-                return Ok(CloudResume {
-                    exact: found.is_some(),
-                    landed: found.or(landed),
-                    unchecked: false,
-                    file_floor: None,
-                });
-            }
-            Ok(Err(e)) => bucket_cause(&e).0,
-            Err(_) => format!("the bucket did not answer within {BUCKET_CHECK_TIMEOUT:?}"),
-        };
-        Err(Error::BucketUnreachable {
-            queue: queue.to_string(),
-            cause: format!(
-                "its local files must be numbered after the objects of its cloud-direct life, \
-                 and {cause}"
-            ),
-        })
-    }
-
     /// The bucket's last file for this queue and the last id in it, noted in
-    /// the pointer, since readers bound their file walk by it.
+    /// the pointer as exact, since readers bound their file walk by it.
     async fn bucket_landed(
         &self,
         cloud: &Layer,
@@ -1512,6 +1435,7 @@ impl NormFS {
             .await
             .map_err(|e| Error::Cloud(e.into()))?;
         let Some(max_file) = max_file else {
+            self.memory_pointers.settle(queue);
             return Ok(None);
         };
         let (_, last) = cloud
@@ -1525,7 +1449,7 @@ impl NormFS {
                 )
             })?;
         self.memory_pointers
-            .mark_landed(queue, &last, &max_file)
+            .settle_from_bucket(queue, &last, &max_file)
             .await
             .map_err(Error::Io)?;
         Ok(Some((last, max_file)))
@@ -1544,11 +1468,6 @@ impl NormFS {
         let (mut file_id, mut header, mut last_id) = self.continue_queue(queue).await?;
 
         let cloud = self.cloud_landed(queue, persist).await?;
-        if let Some(floor) = cloud.file_floor {
-            if floor > file_id {
-                file_id = floor;
-            }
-        }
         if let Some((last, file)) = cloud.landed {
             if file >= file_id {
                 file_id = file.increment();
@@ -1557,13 +1476,11 @@ impl NormFS {
                 last_id = Some(last);
             }
         }
-        // The reserve runs ahead of what landed; the bucket's own answer
-        // makes it moot, since the life that reserved has ended.
-        if !cloud.exact {
-            if let Some(last) = self.memory_pointers.last_id(queue) {
-                if last_id.as_ref().is_none_or(|l| last > *l) {
-                    last_id = Some(last);
-                }
+        // Past the reserve too, even when the bucket answered: ids an earlier
+        // life gave out and never landed are not given out again.
+        if let Some(last) = self.memory_pointers.used_id(queue) {
+            if last_id.as_ref().is_none_or(|l| last > *l) {
+                last_id = Some(last);
             }
         }
 
@@ -1599,7 +1516,7 @@ impl NormFS {
         let persist = queue_config.persist;
         if persist.is_memory() {
             // Past what an earlier cloud life recorded, which may be a reserve.
-            let recorded = self.memory_pointers.last_id(queue);
+            let recorded = self.memory_pointers.used_id(queue);
             let closed = self.memory_ids.read().unwrap().get(queue).cloned();
             let last_entry_id = recorded.max(closed);
             self.mem.start_queue_with(
@@ -2053,6 +1970,8 @@ impl NormFS {
             .create_durable(&dir.join("closed"), Runs::default(), TmpMode::Trunc, true)
             .await?;
 
+        // Everything accepted has landed, so its reserve can come down.
+        self.memory_pointers.settle_landed_queue(queue);
         let last_id = self.mem.closed_last_id(queue);
         if let (Drainer::None, Some(last)) = (drainer, &last_id) {
             self.memory_ids
@@ -2079,6 +1998,9 @@ impl NormFS {
         let store_result = self.store.close().await;
         let wal_result = self.wal.close().await;
         self.memory_pointer_task.abort();
+        if store_result.is_ok() {
+            self.memory_pointers.settle_landed();
+        }
         self.memory_pointers.flush_all().await.map_err(Error::Io)?;
         store_result?;
         wal_result?;
