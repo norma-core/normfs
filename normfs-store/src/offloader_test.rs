@@ -774,12 +774,13 @@ struct MoveFailures(Mutex<Vec<String>>);
 
 impl log::Log for MoveFailures {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
-        metadata.level() <= log::Level::Error
+        metadata.level() <= log::Level::Info
     }
 
     fn log(&self, record: &log::Record) {
         let line = record.args().to_string();
-        if line.starts_with("Failed to move file") && line.contains("424242") {
+        let per_try = line.starts_with("Failed to move file") || line.starts_with("Uploading file");
+        if per_try && line.contains("424242") {
             self.0.lock().unwrap().push(line);
         }
     }
@@ -792,7 +793,7 @@ static MOVE_FAILURES: MoveFailures = MoveFailures(Mutex::new(Vec::new()));
 #[tokio::test(start_paused = true)]
 async fn a_put_that_keeps_failing_is_logged_on_tries_1_2_4_8() {
     let _ = log::set_logger(&MOVE_FAILURES);
-    log::set_max_level(log::LevelFilter::Error);
+    log::set_max_level(log::LevelFilter::Info);
     let queue = QueueIdResolver::new("inst").resolve("cam");
     let local = Arc::new(Flaky::default());
     put(local.as_ref(), &queue, 424242).await;

@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use normfs_types::QueueId;
 use normfs_types::events::{EventSink, FileFacts, SystemEvent, UploadFailure};
 use normfs_wal::WAL_HEADER_V1_MIN_SIZE;
@@ -593,7 +593,7 @@ impl QueueOffloaderWorker {
         let report = attempt.is_power_of_two();
         let key = self.to.backend().key(&self.queue_id, file_id);
 
-        info!("Uploading file {:?} to {}", file_id, key);
+        debug!("Uploading file {:?} to {}", file_id, key);
 
         let (body, head) = match self.read(file_id).await {
             Ok(read) => read,
