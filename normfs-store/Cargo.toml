@@ -16,13 +16,13 @@ pure-rust = ["dep:ruzstd"]
 
 [dependencies]
 log = "0.4"
-uintn = { version = "0.4.1", path = "../uintn-rs" }
-normfs-types = { version = "0.4.1", path = "../normfs-types" }
-normfs-crypto = { version = "0.4.1", path = "../normfs-crypto" }
+uintn = { version = "0.4.2", path = "../uintn-rs" }
+normfs-types = { version = "0.4.2", path = "../normfs-types" }
+normfs-crypto = { version = "0.4.2", path = "../normfs-crypto" }
 tokio = { version = "1", features = ["full"] }
 bytes = "1"
-normfs-wal = { version = "0.4.1", path = "../normfs-wal" }
-normfs-fs = { version = "0.4.1", path = "../normfs-fs" }
+normfs-wal = { version = "0.4.2", path = "../normfs-wal" }
+normfs-fs = { version = "0.4.2", path = "../normfs-fs" }
 
 # Compression libraries - C bindings (default, faster for zstd)
 zstd = { version = "0.13.1", optional = true, default-features = false }

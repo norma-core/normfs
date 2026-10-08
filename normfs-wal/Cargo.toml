@@ -16,9 +16,9 @@ fault-injection = ["normfs-fs/fault-injection"]
 [dependencies]
 log = "0.4"
 bytes = "1"
-uintn = { version = "0.4.1", path = "../uintn-rs" }
-normfs-types = { version = "0.4.1", path = "../normfs-types" }
-normfs-fs = { version = "0.4.1", path = "../normfs-fs" }
+uintn = { version = "0.4.2", path = "../uintn-rs" }
+normfs-types = { version = "0.4.2", path = "../normfs-types" }
+normfs-fs = { version = "0.4.2", path = "../normfs-fs" }
 tokio = { version = "1", features = ["full"] }
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 walkdir = "2"
@@ -33,7 +33,7 @@ xxhash-rust = { version = "0.8", features = ["xxh32"] }
 tempfile = "3"
 # The fault seam is in normfs-fs and this crate's own cfg(test) cannot reach
 # a dependency's feature; the dev-dependency can.
-normfs-fs = { version = "0.4.1", path = "../normfs-fs", features = ["fault-injection"] }
+normfs-fs = { version = "0.4.2", path = "../normfs-fs", features = ["fault-injection"] }
 criterion = "0.5"
 env_logger = { workspace = true }
 rand = "0.8"

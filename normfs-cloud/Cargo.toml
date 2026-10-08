@@ -16,15 +16,15 @@ quick-xml = { version = "0.37", features = ["serialize"] }
 serde = { version = "1.0", features = ["derive"] }
 url = "2.5"
 urlencoding = "2.1"
-uintn = { version = "0.4.1", path = "../uintn-rs" }
-normfs-types = { version = "0.4.1", path = "../normfs-types" }
-normfs-store = { version = "0.4.1", path = "../normfs-store" }
+uintn = { version = "0.4.2", path = "../uintn-rs" }
+normfs-types = { version = "0.4.2", path = "../normfs-types" }
+normfs-store = { version = "0.4.2", path = "../normfs-store" }
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["io"] }
 bytes = "1"
 
 [dev-dependencies]
 env_logger = { workspace = true }
-normfs-wal = { version = "0.4.1", path = "../normfs-wal" }
+normfs-wal = { version = "0.4.2", path = "../normfs-wal" }
 tempfile = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
