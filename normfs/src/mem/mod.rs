@@ -452,6 +452,14 @@ impl MemQueue {
         self.inner.read().unwrap().last_id.clone()
     }
 
+    fn file_room(&self) -> (Option<usize>, u64) {
+        let inner = self.inner.read().unwrap();
+        inner
+            .pool
+            .as_ref()
+            .map_or((None, 0), |pool| pool.file_room())
+    }
+
     pub fn ack(&self, id: &UintN) {
         let mut inner = self.inner.write().unwrap();
         if inner.last_acked_id.as_ref().is_none_or(|last| id > last) {
@@ -1291,6 +1299,11 @@ impl MemStore {
     pub fn get_last_id(&self, queue: &QueueId) -> Option<Option<UintN>> {
         let queues = self.queues.read().unwrap();
         queues.get(queue).map(|q| q.get_last_id())
+    }
+
+    pub fn file_room(&self, queue: &QueueId) -> Option<(Option<usize>, u64)> {
+        let queues = self.queues.read().unwrap();
+        queues.get(queue).map(|q| q.file_room())
     }
 
     pub fn ack(&self, queue: &QueueId, id: &UintN) {

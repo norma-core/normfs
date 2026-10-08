@@ -44,6 +44,34 @@ pub use crate::config::{
 pub use system::SYSTEM_QUEUE;
 pub use uintn::{Error as UintNError, UintN, UintNType};
 
+/// What [`NormFS::file_room`] saw of a queue's open file. A file is what a
+/// queue is stored, offloaded and evicted by; a queue kept only in memory
+/// has none, and its pages stand in.
+#[derive(Debug, Clone, Copy)]
+pub struct FileRoom {
+    room: Option<usize>,
+    file: u64,
+}
+
+impl FileRoom {
+    /// The widest record that still joins the open file, or `None` when the
+    /// next record starts a new one.
+    pub fn room(&self) -> Option<usize> {
+        self.room
+    }
+
+    /// Whether a record of `record_len` bytes would be the first of a file.
+    /// Also true for one wider than a page, which the append refuses.
+    pub fn starts_file(&self, record_len: usize) -> bool {
+        self.room.is_none_or(|room| record_len > room)
+    }
+
+    /// Whether no file started between this look and `later`, within one opening of the queue.
+    pub fn same_file(&self, later: &FileRoom) -> bool {
+        self.file == later.file
+    }
+}
+
 pub struct NormFS {
     path: std::path::PathBuf,
     fs: Fs,
@@ -1646,6 +1674,16 @@ impl NormFS {
         match self.persist_for(queue).drainer() {
             Drainer::Page => Ok(self.store.flush_page_writer(queue).await?),
             Drainer::Wal | Drainer::None => Ok(()),
+        }
+    }
+
+    /// Where the queue's next record would land. Only its writer can act on
+    /// the answer: any append, a flush or a close moves it.
+    pub fn file_room(&self, queue: &QueueId) -> Result<FileRoom, Error> {
+        self.refuse_reserved(queue)?;
+        match self.mem.file_room(queue) {
+            Some((room, file)) => Ok(FileRoom { room, file }),
+            None => Err(Error::QueueNotFound),
         }
     }
 
