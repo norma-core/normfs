@@ -10,6 +10,13 @@ pub enum CloudError {
     InvalidUrl(url::ParseError),
     InvalidStatusCode(u16),
     TruncatedListingWithoutToken,
+    /// An upload that stopped moving: `sent` of `len` bytes were handed to
+    /// the connection, the last of them `waited` ago.
+    Stalled {
+        sent: u64,
+        len: u64,
+        waited: std::time::Duration,
+    },
 }
 
 impl fmt::Display for CloudError {
@@ -25,6 +32,10 @@ impl fmt::Display for CloudError {
             CloudError::TruncatedListingWithoutToken => {
                 write!(f, "listing truncated without a continuation token")
             }
+            CloudError::Stalled { sent, len, waited } => write!(
+                f,
+                "upload stalled: {sent} of {len} bytes sent, nothing moved for {waited:?}"
+            ),
         }
     }
 }
@@ -38,7 +49,9 @@ impl std::error::Error for CloudError {
             CloudError::NoFilesFound => None,
             CloudError::Io(e) => Some(e),
             CloudError::InvalidUrl(e) => Some(e),
-            CloudError::InvalidStatusCode(_) | CloudError::TruncatedListingWithoutToken => None,
+            CloudError::InvalidStatusCode(_)
+            | CloudError::TruncatedListingWithoutToken
+            | CloudError::Stalled { .. } => None,
         }
     }
 }

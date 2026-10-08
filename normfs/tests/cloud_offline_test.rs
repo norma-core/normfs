@@ -32,6 +32,11 @@ enum Link {
     Down,
     /// Requests reach the bucket, answers never come back.
     Swallow,
+    /// Nothing gets through either way, but connections stay open, as on a
+    /// link that drops every packet: the sender's buffers fill and stay full.
+    Stall,
+    /// Requests reach the bucket at 32 KiB/s, 256 kbit/s.
+    Slow,
 }
 
 struct Proxy {
@@ -41,7 +46,12 @@ struct Proxy {
 
 impl Proxy {
     async fn start(upstream: SocketAddr, link: Link) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        // A small receive buffer, so a slow or stalled link backs up into the
+        // sender rather than into this socket.
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.set_recv_buffer_size(16 * 1024).unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = socket.listen(64).unwrap();
         let port = listener.local_addr().unwrap().port();
         let link = Arc::new(Mutex::new(link));
         let state = link.clone();
@@ -73,17 +83,42 @@ async fn pipe(client: TcpStream, upstream: SocketAddr, link: Arc<Mutex<Link>>) {
     };
     let (mut client_rx, mut client_tx) = client.into_split();
     let (mut server_rx, mut server_tx) = server.into_split();
-    let now = |link: &Mutex<Link>| *link.lock().unwrap();
-    let up_link = link.clone();
+    // A connection that lost bytes to a stall stays broken: nothing more
+    // gets through it, its close included.
+    let broken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let now = move |link: &Mutex<Link>, broken: &std::sync::atomic::AtomicBool| {
+        use std::sync::atomic::Ordering;
+        let now = *link.lock().unwrap();
+        if now == Link::Stall {
+            broken.store(true, Ordering::SeqCst);
+        }
+        if broken.load(Ordering::SeqCst) && now != Link::Down {
+            Link::Stall
+        } else {
+            now
+        }
+    };
+    let (up_link, up_broken) = (link.clone(), broken.clone());
     let up = async move {
         let mut buf = vec![0u8; 64 * 1024];
         loop {
-            let n = match client_rx.read(&mut buf).await {
+            let slow = now(&up_link, &up_broken) == Link::Slow;
+            let want = if slow { 4096 } else { buf.len() };
+            let n = match client_rx.read(&mut buf[..want]).await {
                 Ok(0) | Err(_) => return,
                 Ok(n) => n,
             };
-            if now(&up_link) == Link::Down || server_tx.write_all(&buf[..n]).await.is_err() {
-                return;
+            match now(&up_link, &up_broken) {
+                Link::Down => return,
+                Link::Stall => std::future::pending().await,
+                Link::Up | Link::Swallow | Link::Slow => {
+                    if server_tx.write_all(&buf[..n]).await.is_err() {
+                        return;
+                    }
+                }
+            }
+            if slow {
+                tokio::time::sleep(Duration::from_millis(125)).await;
             }
         }
     };
@@ -91,16 +126,19 @@ async fn pipe(client: TcpStream, upstream: SocketAddr, link: Arc<Mutex<Link>>) {
         let mut buf = vec![0u8; 64 * 1024];
         loop {
             let n = match server_rx.read(&mut buf).await {
+                Ok(0) | Err(_) if now(&link, &broken) == Link::Stall => {
+                    std::future::pending().await
+                }
                 Ok(0) | Err(_) => return,
                 Ok(n) => n,
             };
-            match now(&link) {
-                Link::Up => {
+            match now(&link, &broken) {
+                Link::Up | Link::Slow => {
                     if client_tx.write_all(&buf[..n]).await.is_err() {
                         return;
                     }
                 }
-                Link::Swallow => {}
+                Link::Swallow | Link::Stall => {}
                 Link::Down => return,
             }
         }
@@ -471,6 +509,49 @@ async fn a_store_queue_after_a_crashed_cloud_life_writes_after_its_objects() {
     fs.close().await.unwrap();
 }
 
+#[tokio::test]
+async fn a_memory_life_between_cloud_and_store_lives_keeps_the_record() {
+    let Some((direct, cloud, _proxy)) = s3_behind_proxy(Link::Up).await else {
+        return;
+    };
+    let temp = tempfile::TempDir::new().unwrap();
+    let queue;
+    {
+        let fs = open(temp.path(), &cloud).await;
+        queue = fs.resolve("cam0");
+        fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+        write(&fs, &queue, 2 * PER_PAGE, 1).await;
+        fs.close().await.unwrap();
+    }
+    let first = object(&direct, &queue, 1).await.expect("object 1");
+    {
+        let settings = persist_settings(&cloud, Persist::MEMORY);
+        let fs = NormFS::new(temp.path().to_path_buf(), settings)
+            .await
+            .unwrap();
+        fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+        assert!(write(&fs, &queue, 2, 2).await[0] >= 2 * PER_PAGE);
+        fs.close().await.unwrap();
+    }
+
+    let fs = NormFS::new(
+        temp.path().to_path_buf(),
+        persist_settings(&cloud, STORE_CLOUD),
+    )
+    .await
+    .unwrap();
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    assert_eq!(write(&fs, &queue, PER_PAGE, 3).await[0], 2 * PER_PAGE);
+    fs.flush_queue(&queue).await.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while objects(&direct, &queue).await < 3 {
+        assert!(Instant::now() < deadline, "file 3 was never offloaded");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(object(&direct, &queue, 1).await, Some(first));
+    fs.close().await.unwrap();
+}
+
 /// A cloud-direct life lands two objects and crashes before its pointer
 /// names them; a local life follows, then one that offloads.
 async fn local_life_after_a_crashed_cloud_life(offline: bool) {
@@ -592,49 +673,6 @@ async fn a_store_life_with_no_bucket_configured_numbers_past_the_reserve() {
         .to_file_path(queue.to_store_dir(temp.path()).to_str().unwrap(), "store")
         .exists());
     assert_eq!(lives(&fs, &queue, 8, PER_PAGE).await, [2; 4]);
-    fs.close().await.unwrap();
-}
-
-#[tokio::test]
-async fn a_memory_life_between_cloud_and_store_lives_keeps_the_record() {
-    let Some((direct, cloud, _proxy)) = s3_behind_proxy(Link::Up).await else {
-        return;
-    };
-    let temp = tempfile::TempDir::new().unwrap();
-    let queue;
-    {
-        let fs = open(temp.path(), &cloud).await;
-        queue = fs.resolve("cam0");
-        fs.ensure_queue_exists_for_write(&queue).await.unwrap();
-        write(&fs, &queue, 2 * PER_PAGE, 1).await;
-        fs.close().await.unwrap();
-    }
-    let first = object(&direct, &queue, 1).await.expect("object 1");
-    {
-        let settings = persist_settings(&cloud, Persist::MEMORY);
-        let fs = NormFS::new(temp.path().to_path_buf(), settings)
-            .await
-            .unwrap();
-        fs.ensure_queue_exists_for_write(&queue).await.unwrap();
-        assert!(write(&fs, &queue, 2, 2).await[0] >= 2 * PER_PAGE);
-        fs.close().await.unwrap();
-    }
-
-    let fs = NormFS::new(
-        temp.path().to_path_buf(),
-        persist_settings(&cloud, STORE_CLOUD),
-    )
-    .await
-    .unwrap();
-    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
-    assert_eq!(write(&fs, &queue, PER_PAGE, 3).await[0], 2 * PER_PAGE);
-    fs.flush_queue(&queue).await.unwrap();
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while objects(&direct, &queue).await < 3 {
-        assert!(Instant::now() < deadline, "file 3 was never offloaded");
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert_eq!(object(&direct, &queue, 1).await, Some(first));
     fs.close().await.unwrap();
 }
 
@@ -893,6 +931,85 @@ async fn an_upload_that_landed_unrecorded_is_not_written_over() {
     expected.extend([2; 4]);
     assert_eq!(lives(&fs, &queue, 0, 12).await, expected);
     assert_eq!(lives(&fs, &queue, reserve + 1, PER_PAGE).await, [3; 4]);
+    fs.close().await.unwrap();
+}
+
+/// One page of `page` bytes, random so compression does not shrink it.
+async fn write_page(fs: &NormFS, queue: &normfs::QueueId, page: usize) {
+    let record = page / 4 - 64;
+    for _ in 0..4 {
+        let data: Vec<u8> = (0..record).map(|_| fastrand::u8(..)).collect();
+        fs.enqueue(queue, Bytes::from(data)).await.unwrap();
+    }
+}
+
+fn settings_paged(cloud: CloudSettings, page: usize) -> NormFsSettings {
+    NormFsSettings {
+        mem_page_size: page,
+        max_memory_usage: 4 * page,
+        ..settings(cloud)
+    }
+}
+
+#[tokio::test]
+async fn an_upload_stalled_mid_transfer_is_retried_once_the_link_moves() {
+    let Some((direct, cloud, proxy)) = s3_behind_proxy(Link::Up).await else {
+        return;
+    };
+    // More than the socket buffers on both sides hold, so the body stops.
+    let page = 16 << 20;
+    let temp = tempfile::TempDir::new().unwrap();
+    let fs = NormFS::new(temp.path().to_path_buf(), settings_paged(cloud, page))
+        .await
+        .unwrap();
+    let queue = fs.resolve("cam0");
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    write_page(&fs, &queue, page).await;
+
+    proxy.set(Link::Stall);
+    let flush = fs.flush_queue(&queue);
+    tokio::pin!(flush);
+    assert!(
+        timeout(Duration::from_secs(40), &mut flush).await.is_err(),
+        "the upload went through a stalled link"
+    );
+    proxy.set(Link::Up);
+    // The attempt started during the stall fails 30 s in, the next lands.
+    timeout(Duration::from_secs(60), flush)
+        .await
+        .expect("the stalled upload held on past its stall timeout")
+        .unwrap();
+    assert_eq!(objects(&direct, &queue).await, 1);
+    fs.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_slow_upload_that_keeps_moving_finishes() {
+    let Some((direct, cloud, proxy)) = s3_behind_proxy(Link::Slow).await else {
+        return;
+    };
+    // About 48 s at 256 kbit/s: far more than the socket buffers hold, so
+    // the body itself takes longer than the stall timeout to go out.
+    let page = 1536 * 1024;
+    let temp = tempfile::TempDir::new().unwrap();
+    let fs = NormFS::new(temp.path().to_path_buf(), settings_paged(cloud, page))
+        .await
+        .unwrap();
+    let queue = fs.resolve("cam0");
+    proxy.set(Link::Up);
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    proxy.set(Link::Slow);
+    write_page(&fs, &queue, page).await;
+    let started = Instant::now();
+    timeout(Duration::from_secs(120), fs.flush_queue(&queue))
+        .await
+        .expect("the slow upload never finished")
+        .unwrap();
+    assert!(
+        started.elapsed() > Duration::from_secs(40),
+        "the link was not slow"
+    );
+    assert_eq!(objects(&direct, &queue).await, 1);
     fs.close().await.unwrap();
 }
 

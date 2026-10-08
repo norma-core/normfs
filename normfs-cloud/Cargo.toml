@@ -22,6 +22,7 @@ normfs-store = { version = "0.4.2", path = "../normfs-store" }
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["io"] }
 bytes = "1"
+futures-core = "0.3"
 
 [dev-dependencies]
 env_logger = { workspace = true }

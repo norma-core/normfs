@@ -1486,6 +1486,7 @@ version = "0.4.2"
 dependencies = [
  "bytes",
  "env_logger",
+ "futures-core",
  "normfs-store",
  "normfs-types",
  "normfs-wal",
