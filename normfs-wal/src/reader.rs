@@ -940,8 +940,8 @@ pub async fn read_wal_bytes_range(
     };
     let wal_header = WalHeader::from(&any_header);
 
-    // V1: iterate frames from the in-memory buffer with zero-copy record
-    // slices, deriving each id from num_entries_before + running index.
+    // V1: iterate frames from the in-memory buffer, deriving each id from
+    // num_entries_before + running index.
     if any_header.version() == WAL_HEADER_V1_VERSION {
         let num_entries_before = wal_header
             .num_entries_before
@@ -979,10 +979,10 @@ pub async fn read_wal_bytes_range(
                 break;
             }
 
-            // record_offset is the varint length prefix; slice zero-copy.
+            // Copied rather than sliced: a slice would keep the whole file
+            // alive for as long as the entry waits in the channel.
             let record_offset = consumed - record_size - WAL_ENTRY_V1_CRC_SIZE;
-            let record_bytes =
-                content.slice(cursor + record_offset..cursor + record_offset + record_size);
+            let record = cursor + record_offset..cursor + record_offset + record_size;
             cursor += consumed;
 
             let in_range = &entry_id >= from_id
@@ -995,7 +995,11 @@ pub async fn read_wal_bytes_range(
             if in_range {
                 if entry_id.in_step(from_id, step) {
                     if target
-                        .send(ReadEntry::new(entry_id.clone(), record_bytes, data_source))
+                        .send(ReadEntry::new(
+                            entry_id.clone(),
+                            Bytes::copy_from_slice(&content[record]),
+                            data_source,
+                        ))
                         .await
                         .is_err()
                     {
@@ -1119,9 +1123,9 @@ pub async fn read_wal_bytes_range(
                     break;
                 }
 
-                let record_buffer = content.slice(cursor..cursor + record_size);
+                let record_buffer = &content[cursor..cursor + record_size];
 
-                let calculated_hash = xxh64::xxh64(&record_buffer, 0);
+                let calculated_hash = xxh64::xxh64(record_buffer, 0);
                 if calculated_hash != entry_header.xxhash {
                     log::warn!(
                         "WAL reader: corrupted entry {} in bytes range (hash mismatch)",
@@ -1141,7 +1145,7 @@ pub async fn read_wal_bytes_range(
                 if in_range {
                     if entry_header.entry_id.in_step(from_id, step) {
                         let entry_id = entry_header.entry_id.clone();
-                        let record_bytes = record_buffer;
+                        let record_bytes = Bytes::copy_from_slice(record_buffer);
 
                         log::trace!(
                             "WAL reader: sending entry {} from bytes range read, from {} to {:?} step {}",

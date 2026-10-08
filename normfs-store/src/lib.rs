@@ -615,42 +615,43 @@ impl PersistStore {
                 .map_err(|_| StoreError::SignatureVerificationFailed)?;
         }
 
-        let encrypted_content = &content_after_auth[header_size..];
+        let body = auth_size + header_size;
 
         let wal_content_bytes = if store_header.is_encrypted() {
-            if encrypted_content.len() < 12 {
+            if content.len() - body < 12 {
                 log::error!(target: "normfs-store",
                     "Encrypted content too short for queue '{}': {} bytes",
                     queue.short(), content.len());
                 return Err(StoreError::Decrypt);
             }
 
-            let encrypted_bytes = bytes::Bytes::from(encrypted_content.to_vec());
-            let nonce = encrypted_bytes.slice(0..12);
-            let ciphertext = encrypted_bytes.slice(12..);
-
-            self.crypto_ctx
-                .decrypt(queue, file_id, &nonce, &ciphertext)
+            // Decrypted where it lies unless someone else still holds the file.
+            let (mut buf, at) = match content.try_into_mut() {
+                Ok(buf) => (buf, body),
+                Err(shared) => (bytes::BytesMut::from(&shared[body..]), 0),
+            };
+            let (nonce, sealed) = buf[at..].split_at_mut(12);
+            let len = self
+                .crypto_ctx
+                .decrypt_in_place(queue, file_id, nonce, sealed)
                 .map_err(|e| {
                     log::error!(target: "normfs-store",
                         "Decryption failed for queue '{}': {:?}", queue.short(), e);
                     StoreError::Decrypt
-                })?
+                })?;
+            buf.freeze().slice(at + 12..at + 12 + len)
         } else {
-            bytes::Bytes::from(encrypted_content.to_vec())
+            content.slice(body..)
         };
 
         // Handle decompression if needed
         let wal_bytes = if store_header.is_compressed() {
             match store_header.compression() {
-                header::CompressionType::Gzip => {
-                    bytes::Bytes::from(compression::zstd_decompress(wal_content_bytes.as_ref())?)
+                header::CompressionType::Gzip | header::CompressionType::Zstd => {
+                    bytes::Bytes::from(compression::zstd_decompress(&wal_content_bytes)?)
                 }
                 header::CompressionType::Xz => {
-                    bytes::Bytes::from(compression::xz_decompress(wal_content_bytes.as_ref())?)
-                }
-                header::CompressionType::Zstd => {
-                    bytes::Bytes::from(compression::zstd_decompress(wal_content_bytes.as_ref())?)
+                    bytes::Bytes::from(compression::xz_decompress(&wal_content_bytes)?)
                 }
                 header::CompressionType::None => wal_content_bytes,
             }

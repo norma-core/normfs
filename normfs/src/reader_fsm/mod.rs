@@ -1,4 +1,8 @@
+mod cold;
 mod fsm;
+
+#[cfg(test)]
+mod cold_test;
 
 pub use fsm::ReaderFSM;
 pub use normfs_types::{DataSource, QueueId, ReadEntry};
@@ -8,8 +12,29 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use uintn::UintN;
 
-/// Type alias for prefetch operation result
-type PrefetchHandle = Option<JoinHandle<Result<Option<(bytes::Bytes, DataSource)>, Error>>>;
+/// Where a file's entries are to be had.
+#[derive(Debug)]
+pub(crate) enum Fetched {
+    /// Decoded from the store or the cloud.
+    Decoded(bytes::Bytes, DataSource),
+    /// In a WAL file, read from disk as the entries are sent.
+    Wal,
+    Missing,
+    /// A prefetch found every load slot taken.
+    Busy,
+}
+
+/// Aborted on drop, so a read that ends before the next file stops loading it.
+#[derive(Debug)]
+pub(crate) struct Prefetch(JoinHandle<Result<Fetched, Error>>);
+
+impl Drop for Prefetch {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+type PrefetchHandle = Option<Prefetch>;
 
 /// Common context for read operations
 #[derive(Debug)]
@@ -91,13 +116,6 @@ pub enum ReaderState {
 
     /// Try to read from S3 (after Store and WAL failed)
     ReadS3 { ctx: ReadContext },
-
-    /// Extract WAL bytes from store bytes (decrypt/decompress)
-    ExtractWalBytes {
-        ctx: ReadContext,
-        store_bytes: bytes::Bytes,
-        data_source: DataSource,
-    },
 
     /// Parse WAL bytes and send entries
     ParseWalBytes {
