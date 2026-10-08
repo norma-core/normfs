@@ -1464,6 +1464,7 @@ dependencies = [
  "hyper-util",
  "libc",
  "log",
+ "normfs",
  "normfs-cloud",
  "normfs-crypto",
  "normfs-fs",
