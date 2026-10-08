@@ -37,7 +37,7 @@ clap = { version = "4", features = ["derive", "env"], optional = true }
 env_logger = { workspace = true, optional = true }
 
 # Optional websocket dependencies
-fastwebsockets = { version = "0.10.0", optional = true, features = ["upgrade"] }
+fastwebsockets = { version = "0.10.0", optional = true, features = ["upgrade", "unstable-split"] }
 hyper = { version = "1.7.0", optional = true, features = ["http1", "server"] }
 hyper-util = { version = "0.1.6", optional = true, features = ["full"] }
 http-body-util = { version = "0.1", optional = true }
@@ -48,6 +48,8 @@ normfs-wal = { version = "0.4.1", path = "../normfs-wal", features = [
     "fault-injection",
 ] }
 tempfile = { workspace = true }
+# Itself, so the websocket tests build under a plain `cargo test`.
+normfs = { path = ".", features = ["websocket"] }
 env_logger = { workspace = true }
 criterion = { workspace = true, features = ["async_tokio"] }
 fastrand = "2.0"

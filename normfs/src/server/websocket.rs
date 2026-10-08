@@ -16,7 +16,7 @@ use crate::{
     NormFS,
 };
 
-use fastwebsockets::{FragmentCollector, Frame, OpCode};
+use fastwebsockets::{FragmentCollectorRead, Frame, OpCode};
 use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
 
@@ -29,6 +29,17 @@ use hyper_util::rt::TokioIo;
 /// left to append into — the read side deciding how much of the write side's
 /// memory it may hold, which is what back-pressure exists to prevent.
 const RESPONSE_CHANNEL_BUFFER: usize = 10;
+
+/// Pong and close replies the reader owes the peer.
+const CONTROL_CHANNEL_BUFFER: usize = 4;
+
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
 
 /// WebSocket implementation of ResponseSender for normfs
 pub struct WebSocketResponseSender {
@@ -60,76 +71,87 @@ impl ResponseSender for WebSocketResponseSender {
 
 /// Handle a WebSocket connection for NormFS
 ///
-/// This function processes a WebSocket upgrade and handles NormFS protocol messages.
-/// It creates a bidirectional channel for responses and handles sending and receiving
-/// messages in a single task using tokio::select.
+/// Frames are read in a task of their own: `read_frame` is not cancel-safe, and
+/// a `select!` that drops it mid-frame loses the header bytes it has consumed.
 pub async fn handle_websocket(
     ws: fastwebsockets::WebSocket<TokioIo<Upgraded>>,
     normfs: Arc<NormFS>,
     client_id: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut ws = FragmentCollector::new(ws);
+    let (rx, mut tx) = ws.split(tokio::io::split);
+    let mut rx = FragmentCollectorRead::new(rx);
 
-    // Create channel for normfs responses
     let (normfs_response_tx, mut normfs_response_rx) =
         mpsc::channel::<ServerResponse>(RESPONSE_CHANNEL_BUFFER);
+    let (control_tx, mut control_rx) = mpsc::channel::<Frame<'static>>(CONTROL_CHANNEL_BUFFER);
 
-    // Create command processor
     let command_processor = CommandProcessor::new(normfs.clone());
     let response_sender = Arc::new(WebSocketResponseSender::new(
         client_id.clone(),
-        normfs_response_tx.clone(),
+        normfs_response_tx,
     ));
 
-    // Handle incoming and outgoing messages
+    // Dropping this future, e.g. when the connection's task is cancelled,
+    // must not leave the reader running.
+    let _reader = AbortOnDrop(tokio::spawn(async move {
+        let mut send_control = |frame: Frame<'static>| {
+            let control_tx = control_tx.clone();
+            async move {
+                control_tx
+                    .send(frame)
+                    .await
+                    .map_err(|_| "websocket writer has stopped")
+            }
+        };
+        loop {
+            let frame = match rx.read_frame(&mut send_control).await {
+                Ok(frame) => frame,
+                Err(e) => {
+                    debug!("WebSocket read error: {:?}", e);
+                    break;
+                }
+            };
+
+            match frame.opcode {
+                OpCode::Binary => match ClientRequest::decode(frame.payload.as_ref()) {
+                    Ok(request) => {
+                        debug!("Received NormFS ClientRequest");
+                        command_processor
+                            .handle_request(request, response_sender.clone())
+                            .await;
+                    }
+                    Err(e) => {
+                        warn!("Failed to decode ClientRequest: {:?}", e);
+                    }
+                },
+                OpCode::Close => {
+                    debug!("WebSocket close received");
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }));
+
+    // The control channel closes once the reader is done and its replies are written.
     loop {
         tokio::select! {
-            // Handle outgoing normfs responses
             Some(response) = normfs_response_rx.recv() => {
                 let encoded = response.encode_to_vec();
-                let frame = Frame::binary(encoded.into());
-                if let Err(e) = ws.write_frame(frame).await {
+                if let Err(e) = tx.write_frame(Frame::binary(encoded.into())).await {
                     error!("Error writing normfs response: {:?}", e);
                     break;
                 }
             }
-
-            // Handle incoming messages
-            result = ws.read_frame() => {
-                let frame = match result {
-                    Ok(frame) => frame,
-                    Err(e) => {
-                        debug!("WebSocket read error: {:?}", e);
-                        break;
-                    }
-                };
-
-                match frame.opcode {
-                    OpCode::Binary => {
-                        let data = frame.payload;
-
-                        // Try to decode as ClientRequest
-                        match ClientRequest::decode(data.as_ref()) {
-                            Ok(request) => {
-                                debug!("Received NormFS ClientRequest");
-                                command_processor.handle_request(request, response_sender.clone()).await;
-                            }
-                            Err(e) => {
-                                warn!("Failed to decode ClientRequest: {:?}", e);
-                            }
-                        }
-                    }
-                    OpCode::Close => {
-                        debug!("WebSocket close received");
-                        break;
-                    }
-                    OpCode::Ping => {
-                        if let Err(e) = ws.write_frame(Frame::pong(frame.payload)).await {
-                            error!("Error writing pong: {:?}", e);
-                            break;
-                        }
-                    }
-                    _ => {}
+            control = control_rx.recv() => {
+                let Some(frame) = control else { break };
+                let close = frame.opcode == OpCode::Close;
+                if let Err(e) = tx.write_frame(frame).await {
+                    error!("Error writing control frame: {:?}", e);
+                    break;
+                }
+                if close {
+                    break;
                 }
             }
         }

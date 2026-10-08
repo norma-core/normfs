@@ -1,10 +1,11 @@
 use bytes::{Bytes, BytesMut};
 use log::{debug, error, warn};
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::time::SystemTime;
-use tokio::sync::mpsc;
+use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, SystemTime};
+use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 use uintn::UintN;
 
 use crate::proto::OffsetType;
@@ -13,7 +14,7 @@ use crate::proto::{
     ReadResponse, ServerResponse, SetupRequest, SetupResponse, WriteRequest, WriteResponse,
 };
 use crate::{DataSource, Error, NormFS};
-use normfs_types::ReadPosition;
+use normfs_types::{QueueId, ReadPosition};
 
 fn get_local_stamp_ns() -> u64 {
     SystemTime::now()
@@ -109,16 +110,61 @@ pub trait ResponseSender: Send + Sync {
     fn client_id(&self) -> String;
 }
 
+/// Requests other than follows a connection may have running at once. With
+/// all of them taken the connection stops reading requests.
+const MAX_IN_FLIGHT: usize = 1024;
+
+/// Follows a connection may hold. The protocol cannot cancel one, so past this
+/// a follow is refused rather than left waiting for a slot that never frees.
+const MAX_FOLLOWS: usize = 256;
+
+/// How long a queue's writer waits for the next write before it exits.
+const WRITER_IDLE: Duration = Duration::from_secs(10);
+
+type WriteJob = (WriteRequest, OwnedSemaphorePermit);
+type Writers = Mutex<HashMap<QueueId, mpsc::UnboundedSender<WriteJob>>>;
+
 /// Command processor that handles NormFS requests
 /// This is transport-agnostic and can be used with TCP, WebSocket, etc.
 #[derive(Clone)]
 pub struct CommandProcessor {
     normfs: Arc<NormFS>,
+    in_flight: Arc<Semaphore>,
+    follows: Arc<Semaphore>,
+    writers: Arc<Writers>,
 }
 
 impl CommandProcessor {
     pub fn new(normfs: Arc<NormFS>) -> Self {
-        CommandProcessor { normfs }
+        CommandProcessor {
+            normfs,
+            in_flight: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
+            follows: Arc::new(Semaphore::new(MAX_FOLLOWS)),
+            writers: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    async fn in_flight_permit(&self) -> OwnedSemaphorePermit {
+        self.in_flight
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("the semaphore is never closed")
+    }
+
+    async fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) {
+        let permit = self.in_flight_permit().await;
+        Self::spawn_holding(permit, task);
+    }
+
+    fn spawn_holding(
+        permit: OwnedSemaphorePermit,
+        task: impl Future<Output = ()> + Send + 'static,
+    ) {
+        tokio::spawn(async move {
+            task.await;
+            drop(permit);
+        });
     }
 
     /// Process a single client request
@@ -130,33 +176,112 @@ impl CommandProcessor {
         if let Some(setup) = request.setup {
             let processor = self.clone();
             let sender = sender.clone();
-            tokio::spawn(async move {
+            self.spawn(async move {
                 processor.handle_setup(setup, &sender).await;
-            });
+            })
+            .await;
         }
 
         if let Some(ping) = request.ping {
             let processor = self.clone();
             let sender = sender.clone();
-            tokio::spawn(async move {
+            self.spawn(async move {
                 processor.handle_ping(ping, &sender).await;
-            });
+            })
+            .await;
         }
 
         if let Some(write) = request.write {
-            let processor = self.clone();
-            let sender = sender.clone();
-            tokio::spawn(async move {
-                processor.handle_write(write, &sender).await;
-            });
+            let permit = self.in_flight_permit().await;
+            self.queue_write((write, permit), &sender);
         }
 
         if let Some(read) = request.read {
+            let permit = if read.limit == 0 {
+                match self.follows.clone().try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        warn!(
+                            "Follow refused, too many on this connection (client_id: {}, read_id: {}, limit: {})",
+                            sender.client_id(),
+                            read.read_id,
+                            MAX_FOLLOWS
+                        );
+                        let response = ServerResponse {
+                            read: Some(ReadResponse {
+                                read_id: read.read_id,
+                                result: read_response::Result::RrServerError as i32,
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        };
+                        let _ = sender.send_response(response).await;
+                        return;
+                    }
+                }
+            } else {
+                self.in_flight_permit().await
+            };
             let processor = self.clone();
             let sender = sender.clone();
-            tokio::spawn(async move {
+            Self::spawn_holding(permit, async move {
                 processor.handle_read(read, &sender).await;
             });
+        }
+    }
+
+    /// Hands the write to its queue's writer, so a connection's writes to one
+    /// queue land in the order sent while a stuck queue holds up only its own.
+    fn queue_write<T: ResponseSender + 'static>(&self, mut job: WriteJob, sender: &Arc<T>) {
+        let queue = self.normfs.resolve(job.0.queue_id.as_str());
+        // Sent under the lock: a writer only leaves the map under it, after
+        // finding its channel empty.
+        let mut writers = self.writers.lock().unwrap();
+        if let Some(tx) = writers.get(&queue) {
+            match tx.send(job) {
+                Ok(()) => return,
+                Err(mpsc::error::SendError(returned)) => job = returned,
+            }
+        }
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(job).expect("the receiver is still here");
+        tokio::spawn(Self::write_queue(
+            self.normfs.clone(),
+            sender.clone(),
+            Arc::downgrade(&self.writers),
+            queue.clone(),
+            rx,
+        ));
+        writers.insert(queue, tx);
+    }
+
+    async fn write_queue<T: ResponseSender>(
+        normfs: Arc<NormFS>,
+        sender: Arc<T>,
+        writers: Weak<Writers>,
+        queue: QueueId,
+        mut rx: mpsc::UnboundedReceiver<WriteJob>,
+    ) {
+        loop {
+            let (write, permit) = match tokio::time::timeout(WRITER_IDLE, rx.recv()).await {
+                Ok(Some(job)) => job,
+                Ok(None) => return,
+                Err(_) => {
+                    let writers = writers.upgrade();
+                    let mut writers = writers.as_ref().map(|w| w.lock().unwrap());
+                    match rx.try_recv() {
+                        Ok(job) => job,
+                        Err(_) => {
+                            if let Some(writers) = writers.as_mut() {
+                                writers.remove(&queue);
+                            }
+                            return;
+                        }
+                    }
+                }
+            };
+            Self::handle_write(&normfs, write, &sender).await;
+            drop(permit);
         }
     }
 
@@ -198,7 +323,11 @@ impl CommandProcessor {
         let _ = sender.send_response(response).await;
     }
 
-    async fn handle_write<T: ResponseSender>(&self, request: WriteRequest, sender: &Arc<T>) {
+    async fn handle_write<T: ResponseSender>(
+        normfs: &NormFS,
+        request: WriteRequest,
+        sender: &Arc<T>,
+    ) {
         debug!(
             "Handling WriteRequest (client_id: {}, write_id: {}, queue_id: {}, num_packets: {})",
             sender.client_id(),
@@ -224,9 +353,9 @@ impl CommandProcessor {
 
         let packets: Vec<Bytes> = request.packets.into_iter().collect();
 
-        let queue_id = self.normfs.resolve(request.queue_id.as_str());
+        let queue_id = normfs.resolve(request.queue_id.as_str());
 
-        if let Err(e) = self.normfs.ensure_queue_exists_for_write(&queue_id).await {
+        if let Err(e) = normfs.ensure_queue_exists_for_write(&queue_id).await {
             error!(
                 "Failed to ensure queue exists (client_id: {}, write_id: {}, queue_id: {}, error: {:?})",
                 sender.client_id(), write_id, queue_id, e
@@ -244,12 +373,12 @@ impl CommandProcessor {
         }
 
         let result = if packets.len() == 1 {
-            self.normfs
+            normfs
                 .enqueue(&queue_id, packets[0].clone())
                 .await
                 .map(|id| vec![id])
         } else {
-            self.normfs.enqueue_batch(&queue_id, packets).await
+            normfs.enqueue_batch(&queue_id, packets).await
         };
 
         match result {
