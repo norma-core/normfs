@@ -2,11 +2,12 @@
 
 mod common;
 
-use common::memory_fs;
+use bytes::Bytes;
+use common::{entries, memory_fs};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
-use normfs::proto::{ClientRequest, PingRequest, ServerResponse};
+use normfs::proto::{ClientRequest, PingRequest, ServerResponse, WriteRequest};
 use normfs::{NormFS, QueueSettings};
 use prost::Message;
 use std::net::SocketAddr;
@@ -130,4 +131,38 @@ async fn response_written_mid_frame_does_not_drop_the_frame() {
     }
     sequences.sort();
     assert_eq!(sequences, [1, 2]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn writes_from_one_connection_land_in_order() {
+    let temp_dir = TempDir::new().unwrap();
+    let fs = memory_fs(&temp_dir, QueueSettings::default()).await;
+    let mut stream = connect(serve(fs.clone()).await).await;
+
+    const N: u64 = 2000;
+    let mut burst = Vec::new();
+    for i in 0..N {
+        let request = ClientRequest {
+            write: Some(WriteRequest {
+                write_id: i,
+                queue_id: "order".into(),
+                packets: vec![Bytes::copy_from_slice(&i.to_le_bytes())],
+            }),
+            ..Default::default()
+        };
+        burst.extend(frame(&request.encode_to_vec()));
+    }
+    stream.write_all(&burst).await.unwrap();
+    for _ in 0..N {
+        let response = tokio::time::timeout(Duration::from_secs(5), read_response(&mut stream))
+            .await
+            .expect("a write went unanswered");
+        assert_eq!(response.write.unwrap().result, 0);
+    }
+
+    let got = entries(&fs, "order", N as usize).await;
+    assert_eq!(got.len(), N as usize);
+    if let Some(i) = (0..N).position(|i| got[i as usize] != i) {
+        panic!("entry {i} holds write {}", got[i]);
+    }
 }

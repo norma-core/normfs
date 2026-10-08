@@ -26,6 +26,10 @@ impl Server {
         Ok(Server { normfs, listener })
     }
 
+    pub fn local_addr(&self) -> Result<SocketAddr, std::io::Error> {
+        self.listener.local_addr()
+    }
+
     pub async fn run(&self) -> Result<(), std::io::Error> {
         loop {
             let (stream, addr) = self.listener.accept().await?;

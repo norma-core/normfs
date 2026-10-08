@@ -1,9 +1,10 @@
 use bytes::{Bytes, BytesMut};
 use log::{debug, error, warn};
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::time::SystemTime;
+use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, SystemTime};
 use tokio::sync::mpsc;
 use uintn::UintN;
 
@@ -13,7 +14,7 @@ use crate::proto::{
     ReadResponse, ServerResponse, SetupRequest, SetupResponse, WriteRequest, WriteResponse,
 };
 use crate::{DataSource, Error, NormFS};
-use normfs_types::ReadPosition;
+use normfs_types::{QueueId, ReadPosition};
 
 fn get_local_stamp_ns() -> u64 {
     SystemTime::now()
@@ -109,16 +110,25 @@ pub trait ResponseSender: Send + Sync {
     fn client_id(&self) -> String;
 }
 
+/// How long a queue's writer waits for the next write before it exits.
+const WRITER_IDLE: Duration = Duration::from_secs(10);
+
+type Writers = Mutex<HashMap<QueueId, mpsc::UnboundedSender<WriteRequest>>>;
+
 /// Command processor that handles NormFS requests
 /// This is transport-agnostic and can be used with TCP, WebSocket, etc.
 #[derive(Clone)]
 pub struct CommandProcessor {
     normfs: Arc<NormFS>,
+    writers: Arc<Writers>,
 }
 
 impl CommandProcessor {
     pub fn new(normfs: Arc<NormFS>) -> Self {
-        CommandProcessor { normfs }
+        CommandProcessor {
+            normfs,
+            writers: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     /// Process a single client request
@@ -144,11 +154,7 @@ impl CommandProcessor {
         }
 
         if let Some(write) = request.write {
-            let processor = self.clone();
-            let sender = sender.clone();
-            tokio::spawn(async move {
-                processor.handle_write(write, &sender).await;
-            });
+            self.queue_write(write, &sender);
         }
 
         if let Some(read) = request.read {
@@ -157,6 +163,60 @@ impl CommandProcessor {
             tokio::spawn(async move {
                 processor.handle_read(read, &sender).await;
             });
+        }
+    }
+
+    /// Hands the write to its queue's writer, so a connection's writes to one
+    /// queue land in the order sent while a stuck queue holds up only its own.
+    fn queue_write<T: ResponseSender + 'static>(&self, mut write: WriteRequest, sender: &Arc<T>) {
+        let queue = self.normfs.resolve(write.queue_id.as_str());
+        // Sent under the lock: a writer only leaves the map under it, after
+        // finding its channel empty.
+        let mut writers = self.writers.lock().unwrap();
+        if let Some(tx) = writers.get(&queue) {
+            match tx.send(write) {
+                Ok(()) => return,
+                Err(mpsc::error::SendError(returned)) => write = returned,
+            }
+        }
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(write).expect("the receiver is still here");
+        tokio::spawn(Self::write_queue(
+            self.normfs.clone(),
+            sender.clone(),
+            Arc::downgrade(&self.writers),
+            queue.clone(),
+            rx,
+        ));
+        writers.insert(queue, tx);
+    }
+
+    async fn write_queue<T: ResponseSender>(
+        normfs: Arc<NormFS>,
+        sender: Arc<T>,
+        writers: Weak<Writers>,
+        queue: QueueId,
+        mut rx: mpsc::UnboundedReceiver<WriteRequest>,
+    ) {
+        loop {
+            let write = match tokio::time::timeout(WRITER_IDLE, rx.recv()).await {
+                Ok(Some(write)) => write,
+                Ok(None) => return,
+                Err(_) => {
+                    let writers = writers.upgrade();
+                    let mut writers = writers.as_ref().map(|w| w.lock().unwrap());
+                    match rx.try_recv() {
+                        Ok(write) => write,
+                        Err(_) => {
+                            if let Some(writers) = writers.as_mut() {
+                                writers.remove(&queue);
+                            }
+                            return;
+                        }
+                    }
+                }
+            };
+            Self::handle_write(&normfs, write, &sender).await;
         }
     }
 
@@ -198,7 +258,11 @@ impl CommandProcessor {
         let _ = sender.send_response(response).await;
     }
 
-    async fn handle_write<T: ResponseSender>(&self, request: WriteRequest, sender: &Arc<T>) {
+    async fn handle_write<T: ResponseSender>(
+        normfs: &NormFS,
+        request: WriteRequest,
+        sender: &Arc<T>,
+    ) {
         debug!(
             "Handling WriteRequest (client_id: {}, write_id: {}, queue_id: {}, num_packets: {})",
             sender.client_id(),
@@ -224,9 +288,9 @@ impl CommandProcessor {
 
         let packets: Vec<Bytes> = request.packets.into_iter().collect();
 
-        let queue_id = self.normfs.resolve(request.queue_id.as_str());
+        let queue_id = normfs.resolve(request.queue_id.as_str());
 
-        if let Err(e) = self.normfs.ensure_queue_exists_for_write(&queue_id).await {
+        if let Err(e) = normfs.ensure_queue_exists_for_write(&queue_id).await {
             error!(
                 "Failed to ensure queue exists (client_id: {}, write_id: {}, queue_id: {}, error: {:?})",
                 sender.client_id(), write_id, queue_id, e
@@ -244,12 +308,12 @@ impl CommandProcessor {
         }
 
         let result = if packets.len() == 1 {
-            self.normfs
+            normfs
                 .enqueue(&queue_id, packets[0].clone())
                 .await
                 .map(|id| vec![id])
         } else {
-            self.normfs.enqueue_batch(&queue_id, packets).await
+            normfs.enqueue_batch(&queue_id, packets).await
         };
 
         match result {
