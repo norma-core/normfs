@@ -504,6 +504,11 @@ pub fn max_record_len(page_size: usize) -> usize {
     n
 }
 
+/// The widest record a page with `free` bytes left takes, if any.
+fn widest_fitting(free: usize) -> Option<usize> {
+    fits_page(0, free).then(|| max_record_len(free))
+}
+
 /// Whether a record of `record_len` bytes fits an empty page of `page_size`.
 fn fits_page(record_len: usize, page_size: usize) -> bool {
     encoded_len_of(record_len)
@@ -804,6 +809,28 @@ impl PagePool {
     /// How many pages this pool currently holds.
     pub fn page_count(&self) -> usize {
         self.inner.lock().unwrap().ring.page_count()
+    }
+
+    /// The widest record that still joins the file the last record went to,
+    /// `None` when the next record starts a file whatever its width, and a
+    /// number that changes when a file starts. With no file writer the page
+    /// stands in for the file, as eviction drops pages.
+    pub fn file_room(&self) -> (Option<usize>, u64) {
+        let inner = self.inner.lock().unwrap();
+        let ring = &inner.ring;
+        let active = ring.active_page();
+        let free = ring.page_size()
+            - ring.page_bytes(active).len()
+            - PAGE_ENTRY_SLOT * ring.page_len(active) as usize;
+        match &inner.fill {
+            Some(fill) if !fill.has_written => (None, fill.epoch),
+            Some(fill) if fill.used < fill.max => {
+                (Some(max_record_len(ring.page_size())), fill.epoch)
+            }
+            Some(fill) => (widest_fitting(free), fill.epoch),
+            None if ring.page_len(active) == 0 => (None, ring.next_page_id()),
+            None => (widest_fitting(free), ring.next_page_id()),
+        }
     }
 
     /// Bytes per page, which on the page-per-file path is also how wide a
