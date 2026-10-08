@@ -29,6 +29,9 @@ impl S3Client {
 
         let http_client = reqwest::Client::builder()
             .timeout(Duration::from_secs(300))
+            // A blackholed endpoint otherwise holds a request for the OS's
+            // own connect timeout, over a minute.
+            .connect_timeout(Duration::from_secs(5))
             .build()?;
 
         Ok(Self {

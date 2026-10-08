@@ -12,8 +12,15 @@ use uintn::UintN;
 const POINTERS_FILE: &str = ".memory_pointers";
 const POINTERS_TMP_FILE: &str = ".memory_pointers.tmp";
 
-/// What survives a restart for a queue that keeps no local files: the last
-/// id, and for a cloud-direct queue the file that id landed in.
+/// Ids reserved past the one an upload needs, so the file is rewritten once
+/// per this many ids rather than once per upload. A restart that cannot list
+/// the bucket skips what was left of it.
+pub(crate) const RESERVE_AHEAD: u64 = 1 << 16;
+
+/// What survives a restart for a queue that keeps no local files: a memory
+/// queue's last id, or a cloud-direct queue's id no upload has gone past and
+/// the last file known to have landed. That file is a hint written with the
+/// id or on close; the bucket is the authority for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Pointer {
     pub id: u64,
@@ -23,6 +30,10 @@ pub(crate) struct Pointer {
 struct PointerState {
     queues: HashMap<String, Pointer>,
     dirty: bool,
+    /// A landed file not yet written out; never worth a write on its own.
+    hints: bool,
+    #[cfg(test)]
+    publishes: u64,
 }
 
 pub(crate) struct MemoryPointers {
@@ -58,6 +69,9 @@ impl MemoryPointers {
             state: Arc::new(Mutex::new(PointerState {
                 queues,
                 dirty: false,
+                hints: false,
+                #[cfg(test)]
+                publishes: 0,
             })),
             flush_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
@@ -83,9 +97,9 @@ impl MemoryPointers {
         self.advance(queue, id, None)
     }
 
-    /// Records that `file_id` holding ids up to `last_id` is in the cloud, and
-    /// writes it out before returning: the next life starts from this, and a
-    /// stale one would overwrite that object.
+    /// Records that `file_id` holding ids up to `last_id` is in the cloud. Only
+    /// an id past the reserve is written out at once, which happens only when
+    /// the bucket held more than this file recorded.
     pub(crate) async fn mark_landed(
         &self,
         queue: &QueueId,
@@ -94,6 +108,35 @@ impl MemoryPointers {
     ) -> Result<(), Error> {
         self.advance(queue, last_id, Some(file_id))?;
         self.flush_if_dirty().await
+    }
+
+    /// Makes sure no restart hands out an id up to `id` again, writing out a
+    /// reserve [`RESERVE_AHEAD`] past it when the current one falls short.
+    pub(crate) async fn reserve(&self, queue: &QueueId, id: &UintN) -> Result<(), Error> {
+        if self
+            .pointer(queue)
+            .is_some_and(|p| UintN::from(p.id) >= *id)
+        {
+            return Ok(());
+        }
+        let ahead = to_u64(id, "id")?.saturating_add(RESERVE_AHEAD);
+        self.advance(queue, &UintN::from(ahead), None)?;
+        self.flush_if_dirty().await
+    }
+
+    /// Notes a cloud-direct queue the bucket held nothing for, so a later
+    /// start without the bucket knows it is not a stranger. Written once.
+    pub(crate) async fn record(&self, queue: &QueueId) -> Result<(), Error> {
+        if self.pointer(queue).is_some() {
+            return Ok(());
+        }
+        self.advance(queue, &UintN::zero(), None)?;
+        self.flush_if_dirty().await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn publishes(&self) -> u64 {
+        self.state.lock().unwrap().publishes
     }
 
     fn advance(&self, queue: &QueueId, id: &UintN, file: Option<&UintN>) -> Result<(), Error> {
@@ -109,17 +152,26 @@ impl MemoryPointers {
             state.dirty = true;
             return Ok(());
         };
-        // Independent: a memory life can leave the id ahead of the first file a
-        // cloud-direct life lands, and readers bound their walk by the file.
         if id > entry.id {
             entry.id = id;
             state.dirty = true;
         }
         if file.is_some_and(|file| entry.file.is_none_or(|f| file > f)) {
             entry.file = file;
-            state.dirty = true;
+            state.hints = true;
         }
         Ok(())
+    }
+
+    /// Writes out the landed files too; for a close.
+    pub(crate) async fn flush_all(&self) -> Result<(), Error> {
+        {
+            let mut state = self.state.lock().unwrap();
+            if state.hints {
+                state.dirty = true;
+            }
+        }
+        self.flush_if_dirty().await
     }
 
     pub(crate) async fn flush_if_dirty(&self) -> Result<(), Error> {
@@ -130,6 +182,11 @@ impl MemoryPointers {
                 return Ok(());
             }
             state.dirty = false;
+            state.hints = false;
+            #[cfg(test)]
+            {
+                state.publishes += 1;
+            }
             state.queues.clone()
         };
 
@@ -219,6 +276,14 @@ impl normfs_store::LandedIndex for MemoryPointers {
             last_entry_id,
             file_id,
         ))
+    }
+
+    fn reserve<'a>(
+        &'a self,
+        queue: &'a QueueId,
+        last_entry_id: &'a UintN,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Error>> + Send + 'a>> {
+        Box::pin(MemoryPointers::reserve(self, queue, last_entry_id))
     }
 }
 

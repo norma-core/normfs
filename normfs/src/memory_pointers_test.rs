@@ -5,7 +5,7 @@ use normfs_fs::{Fs, FsConfig};
 use normfs_types::QueueIdResolver;
 use uintn::UintN;
 
-use crate::memory_pointers::MemoryPointers;
+use crate::memory_pointers::{MemoryPointers, RESERVE_AHEAD};
 
 #[tokio::test]
 async fn cancelled_flush_keeps_serialization_until_the_snapshot_finishes() {
@@ -52,4 +52,26 @@ async fn failed_flush_retains_dirty_state_for_retry() {
     pointers.flush_if_dirty().await.unwrap();
     let recovered = MemoryPointers::open(fs, dir.path()).await.unwrap();
     assert_eq!(recovered.last_id(&queue), Some(UintN::from(9u64)));
+}
+
+#[tokio::test]
+async fn a_reserve_is_written_once_per_reserve_and_survives_a_crash() {
+    let dir = tempfile::tempdir().unwrap();
+    let fs = Fs::new(FsConfig::default()).unwrap();
+    let pointers = MemoryPointers::open(fs.clone(), dir.path()).await.unwrap();
+    let queue = QueueIdResolver::new("instance").resolve("queue");
+    let ids = 3 * RESERVE_AHEAD;
+    for last in (3..ids).step_by(4) {
+        pointers.reserve(&queue, &UintN::from(last)).await.unwrap();
+        let file = UintN::from(last / 4 + 1);
+        pointers
+            .mark_landed(&queue, &UintN::from(last), &file)
+            .await
+            .unwrap();
+    }
+    assert_eq!(pointers.publishes(), 3);
+
+    drop(pointers);
+    let recovered = MemoryPointers::open(fs, dir.path()).await.unwrap();
+    assert!(recovered.last_id(&queue).unwrap() >= UintN::from(ids - 1));
 }
