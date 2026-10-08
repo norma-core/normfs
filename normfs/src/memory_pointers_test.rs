@@ -17,7 +17,7 @@ async fn cancelled_flush_keeps_serialization_until_the_snapshot_finishes() {
     .unwrap();
     let pointers = MemoryPointers::open(fs.clone(), dir.path()).await.unwrap();
     let queue = QueueIdResolver::new("instance").resolve("queue");
-    pointers.mark(&queue, &UintN::from(7u64)).unwrap();
+    pointers.advance(&queue, &UintN::from(7u64), None).unwrap();
     let (release, blocked) = std::sync::mpsc::channel();
     let mut blocker = Box::pin(fs.run_blocking(move || {
         blocked.recv().unwrap();
@@ -30,7 +30,7 @@ async fn cancelled_flush_keeps_serialization_until_the_snapshot_finishes() {
     drop(first);
     let mut second = Box::pin(pointers.flush_if_dirty());
     assert!(second.as_mut().poll(&mut cx).is_pending());
-    pointers.mark(&queue, &UintN::from(8u64)).unwrap();
+    pointers.advance(&queue, &UintN::from(8u64), None).unwrap();
     release.send(()).unwrap();
     blocker.await.unwrap();
     second.await.unwrap();
@@ -44,7 +44,7 @@ async fn failed_flush_retains_dirty_state_for_retry() {
     let fs = Fs::new(FsConfig::default()).unwrap();
     let pointers = MemoryPointers::open(fs.clone(), dir.path()).await.unwrap();
     let queue = QueueIdResolver::new("instance").resolve("queue");
-    pointers.mark(&queue, &UintN::from(9u64)).unwrap();
+    pointers.advance(&queue, &UintN::from(9u64), None).unwrap();
     let obstruction = dir.path().join(".memory_pointers.tmp");
     std::fs::create_dir(&obstruction).unwrap();
     assert!(pointers.flush_if_dirty().await.is_err());
@@ -74,4 +74,24 @@ async fn a_reserve_is_written_once_per_reserve_and_survives_a_crash() {
     drop(pointers);
     let recovered = MemoryPointers::open(fs, dir.path()).await.unwrap();
     assert!(recovered.last_id(&queue).unwrap() >= UintN::from(ids - 1));
+}
+
+#[tokio::test]
+async fn records_older_versions_kept_for_memory_queues_are_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    let fs = Fs::new(FsConfig::default()).unwrap();
+    let resolver = QueueIdResolver::new("instance");
+    let (memory, cloud) = (resolver.resolve("memory"), resolver.resolve("cloud"));
+    let lines = format!("{}\t5\n{}\t7\t2\n", memory.as_str(), cloud.as_str());
+    let path = dir.path().join(".memory_pointers");
+
+    std::fs::write(&path, format!("# normfs memory-only pointers v1\n{lines}")).unwrap();
+    let old = MemoryPointers::open(fs.clone(), dir.path()).await.unwrap();
+    assert_eq!(old.last_id(&memory), None);
+    assert_eq!(old.last_id(&cloud), Some(UintN::from(7u64)));
+
+    // A reserve written since then has no file either, and stays.
+    std::fs::write(&path, format!("# normfs pointers v1\n{lines}")).unwrap();
+    let new = MemoryPointers::open(fs, dir.path()).await.unwrap();
+    assert_eq!(new.last_id(&memory), Some(UintN::from(5u64)));
 }

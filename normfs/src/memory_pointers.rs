@@ -12,15 +12,16 @@ use uintn::UintN;
 const POINTERS_FILE: &str = ".memory_pointers";
 const POINTERS_TMP_FILE: &str = ".memory_pointers.tmp";
 
+const LEGACY_HEADER: &str = "# normfs memory-only pointers v1\n";
+
 /// Ids reserved past the one an upload needs, so the file is rewritten once
 /// per this many ids rather than once per upload. A restart that cannot list
 /// the bucket skips what was left of it.
 pub(crate) const RESERVE_AHEAD: u64 = 1 << 16;
 
-/// What survives a restart for a queue that keeps no local files: a memory
-/// queue's last id, or a cloud-direct queue's id no upload has gone past and
-/// the last file known to have landed. That file is a hint written with the
-/// id or on close; the bucket is the authority for it.
+/// What survives a restart of a cloud-direct queue: an id no upload has gone
+/// past, and the last file known to have landed. The file is a hint written
+/// with the id or on close; the bucket is the authority for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Pointer {
     pub id: u64,
@@ -58,7 +59,15 @@ impl MemoryPointers {
             .await
             .map_err(Error::from)?;
         let queues = match contents {
-            Some(contents) => parse_pointers(&contents)?,
+            Some(contents) => {
+                let mut queues = parse_pointers(&contents)?;
+                // Before 0.4.2 every memory-only queue kept a line, with no
+                // file; nothing else wrote one without a file then.
+                if contents.starts_with(LEGACY_HEADER) {
+                    queues.retain(|_, p| p.file.is_some());
+                }
+                queues
+            }
             None => HashMap::new(),
         };
 
@@ -89,12 +98,6 @@ impl MemoryPointers {
     fn pointer(&self, queue: &QueueId) -> Option<Pointer> {
         let state = self.state.lock().unwrap();
         state.queues.get(queue.as_str()).copied()
-    }
-
-    /// Records the last accepted id; the flusher writes it out within its
-    /// interval, which is the loss a memory queue accepts.
-    pub(crate) fn mark(&self, queue: &QueueId, id: &UintN) -> Result<(), Error> {
-        self.advance(queue, id, None)
     }
 
     /// Records that `file_id` holding ids up to `last_id` is in the cloud. Only
@@ -139,7 +142,12 @@ impl MemoryPointers {
         self.state.lock().unwrap().publishes
     }
 
-    fn advance(&self, queue: &QueueId, id: &UintN, file: Option<&UintN>) -> Result<(), Error> {
+    pub(crate) fn advance(
+        &self,
+        queue: &QueueId,
+        id: &UintN,
+        file: Option<&UintN>,
+    ) -> Result<(), Error> {
         let id = to_u64(id, "id")?;
         let file = file.map(|f| to_u64(f, "file id")).transpose()?;
 
@@ -217,7 +225,7 @@ impl MemoryPointers {
             loop {
                 tokio::time::sleep(interval).await;
                 if let Err(e) = pointers.flush_if_dirty().await {
-                    log::warn!(target: "normfs", "Failed to flush memory-only pointers: {e}");
+                    log::warn!(target: "normfs", "Failed to write the cloud pointers: {e}");
                 }
             }
         })
@@ -236,7 +244,7 @@ impl MemoryPointers {
         entries.sort_by_key(|(queue, _)| *queue);
 
         let mut out = Vec::new();
-        out.extend_from_slice(b"# normfs memory-only pointers v1\n");
+        out.extend_from_slice(b"# normfs pointers v1: queue, id reserve, last landed file\n");
         for (queue, pointer) in entries {
             out.extend_from_slice(queue.as_bytes());
             out.push(b'\t');

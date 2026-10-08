@@ -596,6 +596,49 @@ async fn a_store_life_with_no_bucket_configured_numbers_past_the_reserve() {
 }
 
 #[tokio::test]
+async fn a_memory_life_between_cloud_and_store_lives_keeps_the_record() {
+    let Some((direct, cloud, _proxy)) = s3_behind_proxy(Link::Up).await else {
+        return;
+    };
+    let temp = tempfile::TempDir::new().unwrap();
+    let queue;
+    {
+        let fs = open(temp.path(), &cloud).await;
+        queue = fs.resolve("cam0");
+        fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+        write(&fs, &queue, 2 * PER_PAGE, 1).await;
+        fs.close().await.unwrap();
+    }
+    let first = object(&direct, &queue, 1).await.expect("object 1");
+    {
+        let settings = persist_settings(&cloud, Persist::MEMORY);
+        let fs = NormFS::new(temp.path().to_path_buf(), settings)
+            .await
+            .unwrap();
+        fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+        assert!(write(&fs, &queue, 2, 2).await[0] >= 2 * PER_PAGE);
+        fs.close().await.unwrap();
+    }
+
+    let fs = NormFS::new(
+        temp.path().to_path_buf(),
+        persist_settings(&cloud, STORE_CLOUD),
+    )
+    .await
+    .unwrap();
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    assert_eq!(write(&fs, &queue, PER_PAGE, 3).await[0], 2 * PER_PAGE);
+    fs.flush_queue(&queue).await.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while objects(&direct, &queue).await < 3 {
+        assert!(Instant::now() < deadline, "file 3 was never offloaded");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(object(&direct, &queue, 1).await, Some(first));
+    fs.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn a_known_instance_without_a_record_needs_the_bucket() {
     let temp = tempfile::TempDir::new().unwrap();
     let cloud = refusing();
@@ -851,4 +894,25 @@ async fn an_upload_that_landed_unrecorded_is_not_written_over() {
     assert_eq!(lives(&fs, &queue, 0, 12).await, expected);
     assert_eq!(lives(&fs, &queue, reserve + 1, PER_PAGE).await, [3; 4]);
     fs.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_durable_queue_ignores_a_record_an_older_version_kept_for_memory() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let cloud = refusing();
+    let queue = known_instance(temp.path(), &cloud).await;
+    std::fs::write(
+        temp.path().join(".memory_pointers"),
+        format!("# normfs memory-only pointers v1\n{}\t5\n", queue.as_str()),
+    )
+    .unwrap();
+    let mut settings = settings(cloud);
+    settings.queue_settings = QueueSettings::all_active().with_default_persist(Persist {
+        store: true,
+        ..Persist::CLOUD
+    });
+    let fs = NormFS::new(temp.path().to_path_buf(), settings)
+        .await
+        .unwrap();
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
 }

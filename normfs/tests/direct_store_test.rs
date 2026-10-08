@@ -386,13 +386,14 @@ async fn a_memory_rule_lives_beside_a_store_rule() {
     }
     let fs = open(temp.path(), mixed).await;
     fs.ensure_queue_exists_for_read(&scratch).await.unwrap();
-    assert_eq!(fs.get_last_id(&scratch).unwrap().to_u64().unwrap(), 1);
-    let (tx, _rx) = mpsc::channel(1);
-    let err = fs
+    assert!(matches!(fs.get_last_id(&scratch), Err(Error::QueueEmpty)));
+    let (tx, mut rx) = mpsc::channel(1);
+    let subscribed = fs
         .read(&scratch, ReadPosition::Absolute(UintN::zero()), 1, 1, tx)
         .await
-        .unwrap_err();
-    assert!(matches!(err, Error::NotFound), "got {err:?}");
+        .unwrap();
+    assert!(!subscribed);
+    assert!(rx.try_recv().is_err());
     assert_eq!(read_all(&fs, &cam, 0, 2).await, [DataSource::DiskStore; 2]);
     fs.close().await.unwrap();
 }

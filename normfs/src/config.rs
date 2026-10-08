@@ -9,8 +9,8 @@ use normfs_types::{CompressionType, EncryptionType};
 /// page becomes one store file directly: no timer, so a crash loses at most
 /// the open page. With `cloud` alone the sealed page becomes one object in
 /// the bucket and nothing touches the local disk but the pointer that names
-/// the last file. With none of the three, the queue lives in memory and only
-/// its last id survives a restart.
+/// the last file. With none of the three, the queue lives in memory and
+/// nothing of it survives a restart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Persist {
     pub wal: bool,

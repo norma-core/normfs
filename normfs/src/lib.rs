@@ -98,6 +98,9 @@ pub struct NormFS {
     /// instance's id.
     fresh_instance: bool,
     bucket_down: std::sync::Mutex<Option<(std::time::Instant, String)>>,
+    /// Where a closed memory-only queue's ids continue in this process. Not
+    /// kept across a restart: none of its records are.
+    memory_ids: RwLock<HashMap<QueueId, UintN>>,
     placer: Placer,
     system_queue: QueueId,
     events: EventSink,
@@ -401,7 +404,6 @@ impl NormFsSettings {
 pub(crate) struct Placer {
     mem: Arc<mem::MemStore>,
     wal: Arc<WalStore>,
-    memory_pointers: Arc<memory_pointers::MemoryPointers>,
     queue_settings: Arc<QueueSettings>,
 }
 
@@ -422,12 +424,7 @@ impl Placer {
             .persist
             .drainer()
         {
-            Drainer::None => {
-                self.memory_pointers
-                    .mark(queue, entry_id)
-                    .map_err(Error::Io)?;
-                self.mem.ack(queue, entry_id);
-            }
+            Drainer::None => self.mem.ack(queue, entry_id),
             Drainer::Wal => {
                 self.wal
                     .enqueue_pooled(queue, entry_id.clone(), data, placement)?;
@@ -692,7 +689,6 @@ impl NormFS {
         let placer = Placer {
             mem: mem.clone(),
             wal: wal.clone(),
-            memory_pointers: memory_pointers.clone(),
             queue_settings: Arc::new(settings.queue_settings.clone()),
         };
         let normfs = Self {
@@ -714,6 +710,7 @@ impl NormFS {
             queue_init_locks: RwLock::new(HashMap::new()),
             fresh_instance,
             bucket_down: std::sync::Mutex::new(None),
+            memory_ids: RwLock::new(HashMap::new()),
             placer,
             system_queue: system.queue().clone(),
             events,
@@ -1601,7 +1598,10 @@ impl NormFS {
         let queue_config = self.get_config_for_queue(queue);
         let persist = queue_config.persist;
         if persist.is_memory() {
-            let last_entry_id = self.memory_pointers.last_id(queue);
+            // Past what an earlier cloud life recorded, which may be a reserve.
+            let recorded = self.memory_pointers.last_id(queue);
+            let closed = self.memory_ids.read().unwrap().get(queue).cloned();
+            let last_entry_id = recorded.max(closed);
             self.mem.start_queue_with(
                 queue,
                 last_entry_id.clone(),
@@ -2054,6 +2054,12 @@ impl NormFS {
             .await?;
 
         let last_id = self.mem.closed_last_id(queue);
+        if let (Drainer::None, Some(last)) = (drainer, &last_id) {
+            self.memory_ids
+                .write()
+                .unwrap()
+                .insert(queue.clone(), last.clone());
+        }
         self.mem.close_queue(queue);
         self.events.emit(SystemEvent::QueueClosed {
             queue: queue.clone(),
