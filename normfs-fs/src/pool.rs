@@ -149,17 +149,15 @@ fn run_plan(job: PlanJob) {
         // The rename replaced the file; a directory sync failing after it does not undo that.
         if let Some(then) = then
             && renamed
-        {
-            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            && std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 then(&PublishReport {
                     old_len: plan.old_len(),
                     new_len: plan.total(),
                 });
             }))
             .is_err()
-            {
-                log::error!("publish committed but its accounting callback panicked");
-            }
+        {
+            log::error!("publish committed but its accounting callback panicked");
         }
         Ok(Finished { plan, file, absent })
     }))
@@ -177,14 +175,10 @@ struct Driven {
 /// The step loop. Errors here are executor faults (a report the planner
 /// refuses); a failing syscall is a report, not an error.
 fn drive(plan: &mut Plan, res: &Resources) -> Result<Driven, FsError> {
-    if plan.kind() == Kind::Publish {
-        if path_of(plan.tmp()) == path_of(plan.dst()) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "publish paths alias",
-            )
-            .into());
-        }
+    if plan.kind() == Kind::Publish && path_of(plan.tmp()) == path_of(plan.dst()) {
+        return Err(
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "publish paths alias").into(),
+        );
     }
     let sync = res.sync;
     let mut owned: Option<OwnedFd> = None;

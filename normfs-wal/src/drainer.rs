@@ -93,7 +93,7 @@ async fn land(backend: &dyn Backend, file: &StrandedFile) -> bool {
                 return false;
             }
             Err(Transient(e)) => {
-                if attempt % DRAIN_WARN_EVERY == 0 {
+                if attempt.is_multiple_of(DRAIN_WARN_EVERY) {
                     log::error!(
                         target: "normfs-wal",
                         "WAL drainer: queue '{}': landing the tail of file {} failed ({}); \

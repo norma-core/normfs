@@ -941,7 +941,7 @@ async fn a_rotation_inside_a_released_run_keeps_the_entries_before_it() {
         .position(|p| p.rotate == crate::RotateHint::Before)
         .expect("one of these records must open a file") as u64;
     assert!(
-        rotating >= 2 && rotating < COUNT - 1,
+        (2..COUNT - 1).contains(&rotating),
         "the rotation has to fall inside a run with an entry either side of it; it is at {rotating}"
     );
 
@@ -961,7 +961,7 @@ async fn a_rotation_inside_a_released_run_keeps_the_entries_before_it() {
                 &queue_id,
                 UintN::from(id),
                 Bytes::new(),
-                placements[id as usize].clone(),
+                placements[id as usize],
             )
             .unwrap();
     }

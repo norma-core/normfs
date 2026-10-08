@@ -47,7 +47,7 @@ impl Exclusive {
     pub fn sub(&self, value: u64) {
         self.bytes
             .bytes
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |b| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |b| {
                 Some(b.saturating_sub(value))
             })
             .ok();
@@ -77,7 +77,7 @@ impl DiskUsage {
             Some(Box::new(move |report: &PublishReport| {
                 tracked
                     .bytes
-                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |b| {
+                    .try_update(Ordering::AcqRel, Ordering::Acquire, |b| {
                         Some(
                             b.saturating_sub(report.old_len.unwrap_or(0))
                                 .saturating_add(report.new_len),

@@ -19,7 +19,6 @@ const PAGE_COUNT: usize = 2;
 const RECORD: [u8; 16] = [0xAB; 16];
 /// The widest a V1 header gets, which is what the pool is armed with here.
 const HEADER: u64 = 16;
-/// The widest a V1 header gets, as the pool is armed with it in these tests.
 
 fn pool() -> Arc<PagePool> {
     Arc::new(PagePool::new(PAGE_COUNT, PAGE_SIZE, 0))
@@ -175,7 +174,7 @@ async fn the_cap_is_the_page_minus_the_framing() {
 
     let pool = self::pool();
     assert_eq!(
-        pool.place(0, &vec![1u8; PAGE_SIZE]).await,
+        pool.place(0, &[1u8; PAGE_SIZE]).await,
         Err(PoolError::TooLarge),
         "and a record of exactly a page is over by its framing alone"
     );
