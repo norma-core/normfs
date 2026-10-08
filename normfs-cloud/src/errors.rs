@@ -44,7 +44,11 @@ impl std::error::Error for CloudError {
 }
 
 impl From<reqwest::Error> for CloudError {
-    fn from(err: reqwest::Error) -> Self {
+    fn from(mut err: reqwest::Error) -> Self {
+        // A presigned URL carries the credential and signature in its query.
+        if let Some(url) = err.url_mut() {
+            url.set_query(None);
+        }
         CloudError::Reqwest(err)
     }
 }
