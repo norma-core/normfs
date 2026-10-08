@@ -524,6 +524,7 @@ impl QueueMonitor {
         Ok(earliest(store.min, wal_min))
     }
 
+    #[cfg(test)]
     async fn get_queue_size(&self) -> Result<u64, Error> {
         let wal = self.scan_dir(&self.wal_dir, FileKind::Wal).await?.total;
         Ok(self.store_bytes.bytes().saturating_add(wal))

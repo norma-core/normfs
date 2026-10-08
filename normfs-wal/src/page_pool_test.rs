@@ -950,8 +950,7 @@ async fn eviction_above_a_pinned_page_raises_the_cache_floor() {
 
     // Everything durable, then keep appending until a non-empty page above the
     // pinned one is rotated into.
-    let mut evicted_last = None;
-    loop {
+    let evicted_last = loop {
         pool.mark_durable(pool.next_entry_id());
         let before: Vec<Option<(u64, u64)>> = pool.with_ring(|r| {
             (0..r.page_count())
@@ -964,11 +963,9 @@ async fn eviction_above_a_pinned_page_raises_the_cache_floor() {
         if active_after != active_before
             && let Some((_, last)) = before[active_after]
         {
-            evicted_last = Some(last);
-            break;
+            break last;
         }
-    }
-    let evicted_last = evicted_last.expect("a rotation reused a non-empty page");
+    };
 
     // The pinned page's ids are below the evicted range; serving them would
     // serve a run with a hole where the evicted page was.

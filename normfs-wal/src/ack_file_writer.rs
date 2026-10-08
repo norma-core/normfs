@@ -138,9 +138,6 @@ pub struct AckFileWriter {
     shutdown_tx: mpsc::Sender<()>,
     buffer_full_notify: Arc<Notify>,
     pooled: bool,
-    /// The pool this writer drains, so `write_maybe_pooled` can tell it which
-    /// entries it has taken responsibility for.
-    pool: Option<Arc<PagePool>>,
     /// Shared with the writer task, so where the file validly ends is still
     /// answerable once that task has finished.
     tail: Arc<Mutex<FileTail>>,
@@ -289,7 +286,7 @@ impl AckFileWriter {
             shutdown_rx,
             buffer_full_notify.clone(),
             ack_sender,
-            pool.clone(),
+            pool,
             epoch,
         ));
 
@@ -300,7 +297,6 @@ impl AckFileWriter {
             shutdown_tx,
             buffer_full_notify,
             pooled,
-            pool,
             tail,
         })
     }
@@ -314,7 +310,7 @@ impl AckFileWriter {
         state.current_size + (size as u64) <= self.settings.max_file_size
     }
 
-    /// Records that an entry belongs to this file, buffering its bytes.
+    #[cfg(test)]
     pub async fn write(&self, queue_id: QueueId, entry_id: UintN, entry: Bytes) {
         self.write_maybe_pooled(queue_id, entry_id, entry, false)
             .await
