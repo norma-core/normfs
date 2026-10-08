@@ -2,7 +2,9 @@ mod common;
 
 use bytes::Bytes;
 use common::{entries, memory_fs};
-use normfs::proto::{ClientRequest, PingRequest, ServerResponse, WriteRequest};
+use normfs::proto::{
+    read_response, ClientRequest, PingRequest, ReadRequest, ServerResponse, WriteRequest,
+};
 use normfs::server::Server;
 use normfs::{NormFS, NormFsSettings, QueueSettings, UintN};
 use prost::Message;
@@ -114,4 +116,55 @@ async fn a_stuck_queue_holds_up_only_its_own_writes() {
     .await;
     normfs_wal::heal(&first_file);
     answered.expect("a stuck queue held up a ping and a write to another queue");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_follow_past_the_limit_is_refused() {
+    const FOLLOWS: u64 = 256;
+    let dir = TempDir::new().unwrap();
+    let fs = memory_fs(&dir, QueueSettings::default()).await;
+    let mut stream = connect(fs).await;
+    stream
+        .write_all(&message(&write_request(0, "follow", vec![1])))
+        .await
+        .unwrap();
+    assert_eq!(read_response(&mut stream).await.write.unwrap().result, 0);
+
+    let mut burst = Vec::new();
+    for read_id in 0..=FOLLOWS {
+        burst.extend(message(&ClientRequest {
+            read: Some(ReadRequest {
+                read_id,
+                queue_id: "follow".into(),
+                step: 1,
+                offset: None,
+                limit: 0,
+            }),
+            ..Default::default()
+        }));
+    }
+    burst.extend(message(&ClientRequest {
+        ping: Some(PingRequest {
+            sequence: 1,
+            client_timestamp_ns: 0,
+        }),
+        ..Default::default()
+    }));
+    stream.write_all(&burst).await.unwrap();
+
+    let (mut refused, mut ponged) = (false, false);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !(refused && ponged) {
+            let response = read_response(&mut stream).await;
+            if let Some(read) = response.read {
+                if read.result == read_response::Result::RrServerError as i32 {
+                    assert_eq!(read.read_id, FOLLOWS);
+                    refused = true;
+                }
+            }
+            ponged |= response.ping.is_some();
+        }
+    })
+    .await
+    .expect("the extra follow was not refused or the ping went unanswered");
 }
