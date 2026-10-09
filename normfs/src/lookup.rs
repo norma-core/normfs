@@ -66,7 +66,7 @@ async fn store_range_after_wal_miss(
     if range.is_some() {
         log::debug!(target: "normfs-lookup",
             "File {} for queue '{}' migrated into the Store during lookup",
-            file_id, queue);
+            file_id, queue.short());
     }
     Ok(range)
 }
@@ -125,7 +125,7 @@ pub async fn find_file_with_s3(
     cloud: Option<&Arc<Layer>>,
     cloud_last: Option<UintN>,
 ) -> Result<Option<UintN>, LookupError> {
-    log::debug!(target: "normfs-lookup", "Finding file for queue '{}', target ID: {}", queue, target_id);
+    log::debug!(target: "normfs-lookup", "Finding file for queue '{}', target ID: {}", queue.short(), target_id);
 
     // WAL before Store: migration writes the Store file before deleting the WAL
     // one, so this order never misses a file that migrates mid-lookup.
@@ -145,14 +145,14 @@ pub async fn find_file_with_s3(
 
     log::debug!(target: "normfs-lookup",
         "File IDs for queue '{}' - Store: {:?} to {:?}, WAL: {:?} to {:?}",
-        queue, store_first_id, store_last_id, wal_first_id, wal_last_id);
+        queue.short(), store_first_id, store_last_id, wal_first_id, wal_last_id);
 
     // Check S3 for first file ID if available
     let s3_first_id = if let Some(s3) = cloud {
         match s3.first_file_id(queue).await {
             Ok(id) => {
                 if id.is_some() {
-                    log::debug!(target: "normfs-lookup", "S3 first file ID for queue '{}': {:?}", queue, id);
+                    log::debug!(target: "normfs-lookup", "S3 first file ID for queue '{}': {:?}", queue.short(), id);
                 }
                 id
             }
@@ -160,7 +160,7 @@ pub async fn find_file_with_s3(
                 return Err(LookupError::Cloud(e.into()));
             }
             Err(e) => {
-                log::warn!(target: "normfs-lookup", "Failed to get S3 first file ID for queue '{}': {}", queue, e);
+                log::warn!(target: "normfs-lookup", "Failed to get S3 first file ID for queue '{}': {}", queue.short(), e);
                 None
             }
         }
@@ -178,7 +178,7 @@ pub async fn find_file_with_s3(
         (None, Some(w), None) => Some(w.clone()),
         (None, None, Some(s3)) => Some(s3.clone()),
         (None, None, None) => {
-            log::debug!(target: "normfs-lookup", "No files found for queue '{}'", queue);
+            log::debug!(target: "normfs-lookup", "No files found for queue '{}'", queue.short());
             return Ok(None);
         }
     }
@@ -194,7 +194,7 @@ pub async fn find_file_with_s3(
 
     log::debug!(target: "normfs-lookup",
         "Absolute file range for queue '{}': {} to {}",
-        queue, first_file_id, last_file_id);
+        queue.short(), first_file_id, last_file_id);
 
     // get range for first/last file from store
     let (store_start_range, store_end_range) = tokio::join!(
@@ -221,13 +221,13 @@ pub async fn find_file_with_s3(
                             Ok(Some((start, end))) => {
                                 log::debug!(target: "normfs-lookup",
                                     "Found first file range in S3 for queue '{}', file {}: {} to {}",
-                                    queue, first_file_id, start, end);
+                                    queue.short(), first_file_id, start, end);
                                 (start, Some(end))
                             }
                             Ok(None) => {
                                 log::warn!(target: "normfs-lookup",
                                     "First file {} not found in S3 for queue '{}'",
-                                    first_file_id, queue);
+                                    first_file_id, queue.short());
                                 return Ok(None);
                             }
                             Err(e) => return Err(LookupError::Cloud(e)),
@@ -248,7 +248,7 @@ pub async fn find_file_with_s3(
     if target_id < &first_file_start {
         log::debug!(target: "normfs-lookup",
             "Target ID {} is before first file start {} for queue '{}', returning first file",
-            target_id, first_file_start, queue);
+            target_id, first_file_start, queue.short());
         return Ok(Some(first_file_id));
     }
 
@@ -256,7 +256,7 @@ pub async fn find_file_with_s3(
         if target_id <= end {
             log::debug!(target: "normfs-lookup",
                 "Target ID {} is in first file (start: {}, end: {}) for queue '{}'",
-                target_id, first_file_start, end, queue);
+                target_id, first_file_start, end, queue.short());
             return Ok(Some(first_file_id));
         }
     }
@@ -274,7 +274,7 @@ pub async fn find_file_with_s3(
     if target_id > &last_file_start {
         log::debug!(target: "normfs-lookup",
             "Target ID {} is after last file start {} for queue '{}', returning last file",
-            target_id, last_file_start, queue);
+            target_id, last_file_start, queue.short());
         return Ok(Some(last_file_id));
     }
 
@@ -282,14 +282,14 @@ pub async fn find_file_with_s3(
         if target_id > end {
             log::debug!(target: "normfs-lookup",
                 "Target ID {} is after last file end {} for queue '{}', no file found",
-                target_id, end, queue);
+                target_id, end, queue.short());
             return Ok(None);
         }
     }
 
     log::debug!(target: "normfs-lookup",
         "Starting binary search for target ID {} in queue '{}'",
-        target_id, queue);
+        target_id, queue.short());
 
     return binary_search(
         queue,
@@ -325,13 +325,13 @@ async fn binary_search(
         iteration += 1;
         log::debug!(target: "normfs-lookup",
             "Binary search iteration {} for queue '{}' - Left: {}, Right: {}, left end: {:?}, right start: {}",
-            iteration, queue, left_file_id, right_file_id, left_end, right_start);
+            iteration, queue.short(), left_file_id, right_file_id, left_end, right_start);
 
         // Base case: if left and right are the same
         if left_file_id == right_file_id {
             log::debug!(target: "normfs-lookup",
                 "Binary search converged to file {} for target ID {} in queue '{}'",
-                left_file_id, target_id, queue);
+                left_file_id, target_id, queue.short());
             return Ok(Some(left_file_id));
         }
 
@@ -343,19 +343,19 @@ async fn binary_search(
                 if target_id <= left_end_val {
                     log::debug!(target: "normfs-lookup",
                         "Target ID {} is in left file {} (adjacent case) for queue '{}'",
-                        target_id, left_file_id, queue);
+                        target_id, left_file_id, queue.short());
                     return Ok(Some(left_file_id));
                 }
             } else if target_id < &right_start {
                 log::debug!(target: "normfs-lookup",
                     "Target ID {} is in left file {} (adjacent case, no left_end) for queue '{}'",
-                    target_id, left_file_id, queue);
+                    target_id, left_file_id, queue.short());
                 return Ok(Some(left_file_id));
             }
 
             log::debug!(target: "normfs-lookup",
                 "Target ID {} is in right file {} (adjacent case) for queue '{}'",
-                target_id, right_file_id, queue);
+                target_id, right_file_id, queue.short());
             return Ok(Some(right_file_id));
         }
 
@@ -381,19 +381,19 @@ async fn binary_search(
                                 Ok(Some((start, end))) => {
                                     log::debug!(target: "normfs-lookup",
                                         "Found file range in S3 for queue '{}', file {}: {} to {}",
-                                        queue, mid_file_id, start, end);
+                                        queue.short(), mid_file_id, start, end);
                                     (start, Some(end))
                                 }
                                 Ok(None) => {
                                     log::warn!(target: "normfs-lookup",
                                         "File {} not found in S3 for queue '{}'",
-                                        mid_file_id, queue);
+                                        mid_file_id, queue.short());
                                     return Err(LookupError::Store(StoreError::FileNotFound));
                                 }
                                 Err(e) => {
                                     log::warn!(target: "normfs-lookup",
                                         "S3 lookup failed for file {} in queue '{}': {}. Continuing without this file.",
-                                        mid_file_id, queue, e);
+                                        mid_file_id, queue.short(), e);
                                     continue;
                                 }
                             }
@@ -460,7 +460,7 @@ async fn binary_search(
             // Target is in the left half
             log::debug!(target: "normfs-lookup",
                 "Target ID {} < mid start {}, searching left half for queue '{}'",
-                target_id, mid_start, queue);
+                target_id, mid_start, queue.short());
             right_file_id = mid_file_id;
             right_start = mid_start;
         } else if let Some(mid_end_val) = &mid_end {
@@ -468,13 +468,13 @@ async fn binary_search(
                 // Target is in the middle file
                 log::debug!(target: "normfs-lookup",
                     "Target ID {} found in mid file {} (start: {}, end: {}) for queue '{}'",
-                    target_id, mid_file_id, mid_start, mid_end_val, queue);
+                    target_id, mid_file_id, mid_start, mid_end_val, queue.short());
                 return Ok(Some(mid_file_id));
             } else {
                 // Target is in the right half
                 log::debug!(target: "normfs-lookup",
                     "Target ID {} > mid end {}, searching right half for queue '{}'",
-                    target_id, mid_end_val, queue);
+                    target_id, mid_end_val, queue.short());
                 left_file_id = mid_file_id;
                 left_end = mid_end;
             }
@@ -501,7 +501,7 @@ async fn binary_search(
                                         Ok(None) => {
                                             log::warn!(target: "normfs-lookup",
                                                 "Next file {} not found in S3 for queue '{}'",
-                                                next_mid, queue);
+                                                next_mid, queue.short());
                                             return Err(LookupError::Store(
                                                 StoreError::FileNotFound,
                                             ));
@@ -509,7 +509,7 @@ async fn binary_search(
                                         Err(e) => {
                                             log::warn!(target: "normfs-lookup",
                                                 "S3 lookup failed for next file {} in queue '{}': {}. Assuming target is in current file.",
-                                                next_mid, queue, e);
+                                                next_mid, queue.short(), e);
                                             return Ok(Some(mid_file_id));
                                         }
                                     }
@@ -530,13 +530,13 @@ async fn binary_search(
                     // Target is in the middle file
                     log::debug!(target: "normfs-lookup",
                         "Target ID {} is in mid file {} (no end, next start: {}) for queue '{}'",
-                        target_id, mid_file_id, next_start, queue);
+                        target_id, mid_file_id, next_start, queue.short());
                     return Ok(Some(mid_file_id));
                 } else {
                     // Target is in the right half
                     log::debug!(target: "normfs-lookup",
                         "Target ID {} >= next start {}, searching right half for queue '{}'",
-                        target_id, next_start, queue);
+                        target_id, next_start, queue.short());
                     left_file_id = mid_file_id;
                     left_end = mid_end;
                 }
@@ -544,7 +544,7 @@ async fn binary_search(
                 // Middle file is the last file, so target must be in it
                 log::debug!(target: "normfs-lookup",
                     "Mid file {} is the last file, target ID {} must be in it for queue '{}'",
-                    mid_file_id, target_id, queue);
+                    mid_file_id, target_id, queue.short());
                 return Ok(Some(mid_file_id));
             }
         }

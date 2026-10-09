@@ -358,7 +358,7 @@ impl CommandProcessor {
         if let Err(e) = normfs.ensure_queue_exists_for_write(&queue_id).await {
             error!(
                 "Failed to ensure queue exists (client_id: {}, write_id: {}, queue_id: {}, error: {:?})",
-                sender.client_id(), write_id, queue_id, e
+                sender.client_id(), write_id, queue_id.short(), e
             );
             let response = ServerResponse {
                 write: Some(WriteResponse {
@@ -430,7 +430,7 @@ impl CommandProcessor {
         if let Err(e) = self.normfs.ensure_queue_exists_for_read(&queue_id).await {
             error!(
                 "Failed to ensure queue exists (client_id: {}, read_id: {}, queue_id: {}, error: {:?})",
-                sender.client_id(), read_id, queue_id, e
+                sender.client_id(), read_id, queue_id.short(), e
             );
             let response = ServerResponse {
                 read: Some(ReadResponse {
@@ -492,7 +492,7 @@ impl CommandProcessor {
 
         debug!(
             "Handling ReadRequest (client_id: {}, read_id: {}, queue_id: {}, offset_id: {}, position: {:?}, limit: {}, step: {})",
-            sender.client_id(), read_id, queue_id, offset_id, position, limit, step
+            sender.client_id(), read_id, queue_id.short(), offset_id, position, limit, step
         );
 
         let start_response = ServerResponse {
@@ -579,7 +579,7 @@ impl CommandProcessor {
                             "Queue not found (client_id: {}, read_id: {}, queue_id: {})",
                             sender.client_id(),
                             read_id,
-                            queue_id
+                            queue_id.short()
                         );
                         let error_response = ServerResponse {
                             read: Some(ReadResponse {
@@ -596,7 +596,7 @@ impl CommandProcessor {
                             "Entry not found (client_id: {}, read_id: {}, queue_id: {})",
                             sender.client_id(),
                             read_id,
-                            queue_id
+                            queue_id.short()
                         );
                         let error_response = ServerResponse {
                             read: Some(ReadResponse {
@@ -637,7 +637,7 @@ impl CommandProcessor {
                     | Error::PageBelowMinimum { .. } => {
                         error!(
                             "Read stream failed (client_id: {}, read_id: {}, queue_id: {}, error: {:?})",
-                            sender.client_id(), read_id, queue_id, err
+                            sender.client_id(), read_id, queue_id.short(), err
                         );
                         let error_response = ServerResponse {
                             read: Some(ReadResponse {

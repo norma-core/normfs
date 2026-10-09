@@ -6,9 +6,38 @@ pub type SubscriberCallback = Box<dyn Fn(&[(UintN, Bytes)]) -> bool + Send + Syn
 
 /// Queue identifier with support for absolute and relative paths
 /// The path field always contains the absolute path (with instance_id embedded for relative paths)
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone)]
 pub struct QueueId {
     path: String,
+    // Where the name starts once this instance's id is dropped; 0 for a path
+    // given absolute. Not part of the identity.
+    name_at: usize,
+}
+
+impl PartialEq for QueueId {
+    fn eq(&self, other: &Self) -> bool {
+        self.path == other.path
+    }
+}
+
+impl Eq for QueueId {}
+
+impl std::hash::Hash for QueueId {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.path.hash(state);
+    }
+}
+
+impl PartialOrd for QueueId {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for QueueId {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.path.cmp(&other.path)
+    }
 }
 
 impl std::fmt::Debug for QueueId {
@@ -36,6 +65,13 @@ impl QueueId {
     /// Get the absolute queue path as a string slice
     pub fn as_str(&self) -> &str {
         &self.path
+    }
+
+    /// The path without this instance's id, for log lines: `inference-states`
+    /// rather than `/8e70...3c7c/inference-states`. A path given absolute,
+    /// another instance's queue included, comes back whole.
+    pub fn short(&self) -> &str {
+        &self.path[self.name_at..]
     }
 
     /// Get the queue path as a base for cryptographic key derivation
@@ -114,14 +150,16 @@ impl QueueIdResolver {
     /// Resolve a queue path to a QueueId with absolute path
     /// Relative paths are prefixed with /instance_id/, absolute paths (starting with /) are used as-is
     pub fn resolve(&self, path: &str) -> QueueId {
-        let absolute_path = if path.starts_with('/') {
-            path.to_string()
+        if path.starts_with('/') {
+            QueueId {
+                path: path.to_string(),
+                name_at: 0,
+            }
         } else {
-            format!("/{}/{}", self.instance_id, path)
-        };
-
-        QueueId {
-            path: absolute_path,
+            QueueId {
+                path: format!("/{}/{}", self.instance_id, path),
+                name_at: self.instance_id.len() + 2,
+            }
         }
     }
 }

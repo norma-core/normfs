@@ -358,8 +358,8 @@ impl PersistStore {
             .clone();
         if packer.input_cap() < file_cap {
             log::error!(target: "normfs-store",
-                "queue {queue}: pages of {} bytes do not fit the {}-byte pack slots",
-                pool.page_size(), packer.input_cap());
+                "queue {}: pages of {} bytes do not fit the {}-byte pack slots",
+                queue.short(), pool.page_size(), packer.input_cap());
         }
         let writer = PageStoreWriter::start(
             queue,
@@ -500,7 +500,7 @@ impl PersistStore {
     ) -> Result<Option<normfs_wal::WalHeader>, StoreError> {
         log::info!(target: "normfs-store",
             "Getting header for queue '{}', file {}",
-            queue, file_id
+            queue.short(), file_id
         );
 
         let queue_fs_path = queue.to_store_dir(&self.root);
@@ -517,7 +517,7 @@ impl PersistStore {
                     // File is too small to have a valid header
                     log::info!(target: "normfs-store",
                         "Store file too small for queue '{}', file {}",
-                        queue, file_id
+                        queue.short(), file_id
                     );
                     return Ok(None);
                 }
@@ -526,7 +526,7 @@ impl PersistStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 log::info!(target: "normfs-store",
                     "Store file not found for queue '{}', file {}",
-                    queue, file_id
+                    queue.short(), file_id
                 );
                 return Ok(None);
             }
@@ -543,7 +543,7 @@ impl PersistStore {
             Ok(wal_header) => {
                 log::info!(target: "normfs-store",
                     "Store file {} for queue '{}' - data_size={}, id_size={}, entries_before={}",
-                    file_id, queue,
+                    file_id, queue.short(),
                     wal_header.data_size_bytes,
                     wal_header.id_size_bytes,
                     wal_header.num_entries_before
@@ -553,7 +553,7 @@ impl PersistStore {
             Err(e) => {
                 log::warn!(target: "normfs-store",
                     "Failed to extract WAL header from Store file {} for queue '{}': {}",
-                    file_id, queue, e
+                    file_id, queue.short(), e
                 );
                 // Return None instead of error - file might be corrupted
                 Ok(None)
@@ -595,7 +595,7 @@ impl PersistStore {
     ) -> Result<bytes::Bytes, StoreError> {
         log::debug!(target: "normfs-store",
             "Extracting WAL bytes for queue '{}' from {} bytes of store content",
-            queue, content.len());
+            queue.short(), content.len());
 
         let (file_auth, auth_size) = header::FileAuthentication::from_bytes(&content)?;
 
@@ -621,7 +621,7 @@ impl PersistStore {
             if encrypted_content.len() < 12 {
                 log::error!(target: "normfs-store",
                     "Encrypted content too short for queue '{}': {} bytes",
-                    queue, content.len());
+                    queue.short(), content.len());
                 return Err(StoreError::Decrypt);
             }
 
@@ -633,7 +633,7 @@ impl PersistStore {
                 .decrypt(queue, file_id, &nonce, &ciphertext)
                 .map_err(|e| {
                     log::error!(target: "normfs-store",
-                        "Decryption failed for queue '{}': {:?}", queue, e);
+                        "Decryption failed for queue '{}': {:?}", queue.short(), e);
                     StoreError::Decrypt
                 })?
         } else {
@@ -660,7 +660,7 @@ impl PersistStore {
 
         log::debug!(target: "normfs-store",
             "Extracted {} bytes of WAL content for queue '{}'",
-            wal_bytes.len(), queue);
+            wal_bytes.len(), queue.short());
 
         Ok(wal_bytes)
     }

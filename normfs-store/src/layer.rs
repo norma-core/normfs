@@ -154,7 +154,7 @@ impl Layer {
             .await?
         else {
             log::debug!(target: "normfs-store",
-                "No store file {} for queue {} in {:?}", file_id, queue, self.source());
+                "No store file {} for queue {} in {:?}", file_id, queue.short(), self.source());
             return Ok(None);
         };
 

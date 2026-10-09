@@ -80,7 +80,7 @@ impl WalWriter {
     ) -> Result<Self, WalError> {
         log::info!(
             "WAL writer: creating new writer for queue '{}', file: {}, last_entry_id: {:?}",
-            queue,
+            queue.short(),
             file_id,
             last_entry_id
         );
@@ -139,7 +139,7 @@ impl WalWriter {
             drainer: None,
         };
 
-        let queue_log_str = queue.to_string();
+        let queue_log_str = queue.short().to_string();
         tokio::spawn(async move {
             log::debug!(
                 "WAL writer: starting writer task for queue '{}'",
@@ -152,7 +152,7 @@ impl WalWriter {
                         if let Err(e) = state.write(entry_id, data, placement).await {
                             log::error!(
                                 "WAL writer: error writing entry for queue '{}': {}",
-                                state.queue_id,
+                                state.queue_id.short(),
                                 e
                             );
                         }
@@ -161,13 +161,16 @@ impl WalWriter {
                         if let Err(e) = state.write_batch(entries).await {
                             log::error!(
                                 "WAL writer: error writing batch for queue '{}': {}",
-                                state.queue_id,
+                                state.queue_id.short(),
                                 e
                             );
                         }
                     }
                     WriteRequest::Close(responder) => {
-                        log::info!("WAL writer: closing writer for queue '{}'", state.queue_id);
+                        log::info!(
+                            "WAL writer: closing writer for queue '{}'",
+                            state.queue_id.short()
+                        );
                         // Entries parked out of order never reached the file
                         // writer, and the closing flush is bounded by what did.
                         // They are lost; the least a close can do is say so.
@@ -181,7 +184,7 @@ impl WalWriter {
                             log::error!(
                                 "WAL writer: closing queue '{}' with {} entrie(s) still \
                                  waiting for order ({}); they reach no file",
-                                state.queue_id,
+                                state.queue_id.short(),
                                 ids.len(),
                                 ids.join(", ")
                             );
@@ -191,7 +194,7 @@ impl WalWriter {
                             Err(e) => {
                                 log::error!(
                                     "WAL writer: error closing file writer for queue '{}': {}",
-                                    state.queue_id,
+                                    state.queue_id.short(),
                                     e
                                 );
                                 false
@@ -228,7 +231,7 @@ impl WalWriter {
 
             log::debug!(
                 "WAL writer: writer task ended for queue '{}'",
-                state.queue_id
+                state.queue_id.short()
             );
         });
 
@@ -303,7 +306,7 @@ impl WriterState {
         log::debug!(
             "WAL writer: writing entry {} to queue '{}', data size: {} bytes",
             entry_id,
-            self.queue_id,
+            self.queue_id.short(),
             data.len()
         );
 
@@ -311,7 +314,7 @@ impl WriterState {
             log::error!(
                 "WAL writer: queue '{}' entry {}: dropped -- a close abandoned a rotation, \
                  so this writer has no file to give it",
-                self.queue_id,
+                self.queue_id.short(),
                 entry_id
             );
             return Err(WalError::IoError(std::io::Error::new(
@@ -325,7 +328,7 @@ impl WriterState {
             log::debug!(
                 "WAL writer: entry {} is in order for queue '{}', proceeding to write",
                 entry_id,
-                self.queue_id
+                self.queue_id.short()
             );
             vec![(entry_id.clone(), data, placement)]
         } else {
@@ -333,7 +336,7 @@ impl WriterState {
             log::debug!(
                 "WAL writer: entry {} is out of order for queue '{}', buffering",
                 entry_id,
-                self.queue_id
+                self.queue_id.short()
             );
             self.buffer
                 .wait_for_order((entry_id.clone(), data, placement))
@@ -350,7 +353,7 @@ impl WriterState {
         if entries.is_empty() {
             log::debug!(
                 "WAL writer: no entries ready to write for queue '{}'",
-                self.queue_id
+                self.queue_id.short()
             );
             return Ok(());
         }
@@ -399,7 +402,7 @@ impl WriterState {
             if must_rotate {
                 log::debug!(
                     "WAL writer: need to rotate file for queue '{}', entry {}, data size: {}",
-                    self.queue_id,
+                    self.queue_id.short(),
                     entry_id,
                     data_len
                 );
@@ -423,7 +426,7 @@ impl WriterState {
                 log::debug!(
                     "WAL writer: current file {} for queue '{}' can hold entry {}, data size: {}",
                     self.file_id,
-                    self.queue_id,
+                    self.queue_id.short(),
                     entry_id,
                     data_len
                 );
@@ -451,7 +454,7 @@ impl WriterState {
                 "WAL writer: writing entry {} to file {} for queue '{}', total size: {} bytes",
                 entry_id,
                 self.file_id,
-                self.queue_id,
+                self.queue_id.short(),
                 entry_buf.len()
             );
 
@@ -488,7 +491,7 @@ impl WriterState {
             log::debug!(
                 "WAL writer: successfully wrote entry {} to queue '{}'",
                 entry_id,
-                self.queue_id
+                self.queue_id.short()
             );
         }
 
@@ -523,7 +526,7 @@ impl WriterState {
             "WAL writer: queue '{}': file {} is leaving entries {}..={} unwritten; they are \
              held for retry rather than reported complete, and this queue cannot certify \
              them durable until the retry lands",
-            self.queue_id,
+            self.queue_id.short(),
             self.file_id,
             stranded.first_entry_id,
             stranded.last_entry_id
@@ -559,7 +562,7 @@ impl WriterState {
             log::error!(
                 "WAL writer: queue '{}': the retrier for file {} is gone; its records reach \
                  no file",
-                self.queue_id,
+                self.queue_id.short(),
                 self.file_id
             );
         }
@@ -589,7 +592,7 @@ impl WriterState {
                 "WAL writer: queue '{}' entry {}: the enqueue side charged this record to file \
                  {} but the writer is on file {} (expected {}). The two sides have diverged, so \
                  this file's entry ids may not line up with its header.",
-                self.queue_id,
+                self.queue_id.short(),
                 entry_id,
                 placement.epoch,
                 self.file_epoch,
@@ -609,7 +612,7 @@ impl WriterState {
         log::debug!(
             "WAL writer: writing batch of {} entries to queue '{}'",
             entries.len(),
-            self.queue_id
+            self.queue_id.short()
         );
 
         // Every entry is attempted, and the first failure is what the batch
@@ -621,7 +624,7 @@ impl WriterState {
             if let Err(e) = self.write(entry_id, data, placement).await {
                 log::error!(
                     "WAL writer: error writing an entry of a batch for queue '{}': {}",
-                    self.queue_id,
+                    self.queue_id.short(),
                     e
                 );
                 if outcome.is_ok() {
@@ -632,7 +635,7 @@ impl WriterState {
 
         log::debug!(
             "WAL writer: completed batch write to queue '{}'",
-            self.queue_id
+            self.queue_id.short()
         );
 
         outcome
@@ -664,7 +667,7 @@ impl WriterState {
     async fn rotate(&mut self, next_entry_id: UintN, next_data_size: usize) -> bool {
         log::info!(
             "WAL writer: rotating file for queue '{}', current file: {}, next entry: {}",
-            self.queue_id,
+            self.queue_id.short(),
             self.file_id,
             next_entry_id
         );
@@ -681,7 +684,7 @@ impl WriterState {
                     "WAL writer: queue '{}': closing file {} failed ({}); its unflushed records \
                      reach no file. Rotating anyway -- staying on a file the enqueue side has \
                      already moved past would stall the queue for good.",
-                    self.queue_id,
+                    self.queue_id.short(),
                     self.file_id,
                     e
                 );
@@ -703,7 +706,7 @@ impl WriterState {
             log::error!(
                 "WAL writer: queue '{}': file {} is not reported complete; it stays in the \
                  WAL for recovery and reads",
-                self.queue_id,
+                self.queue_id.short(),
                 self.file_id
             );
         }
@@ -716,7 +719,7 @@ impl WriterState {
         log::debug!(
             "WAL writer: creating new file {} for queue '{}', entries before: {}, id size bytes: {}, data size bytes: {}",
             self.file_id,
-            self.queue_id,
+            self.queue_id.short(),
             self.header.num_entries_before,
             self.header.id_size_bytes,
             self.header.data_size_bytes
@@ -760,7 +763,7 @@ impl WriterState {
                             "WAL writer: queue '{}': abandoning the rotation to file {} ({}); \
                              a close is waiting on this task. Records not yet written stay \
                              unwritten.",
-                            self.queue_id,
+                            self.queue_id.short(),
                             self.file_id,
                             e
                         );
@@ -771,7 +774,7 @@ impl WriterState {
                             "WAL writer: queue '{}': opening file {} failed ({}); retrying. \
                              Nothing is written or lost while this queue waits, but it is \
                              not making progress either.",
-                            self.queue_id,
+                            self.queue_id.short(),
                             self.file_id,
                             e
                         );
@@ -786,7 +789,7 @@ impl WriterState {
             "WAL writer: successfully rotated from file {} to {} for queue '{}'",
             old_file_id,
             self.file_id,
-            self.queue_id
+            self.queue_id.short()
         );
         true
     }

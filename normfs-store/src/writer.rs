@@ -61,7 +61,7 @@ impl StoreWriteWorker {
                         log::debug!(
                             target: "normfs-store",
                             "StoreWriteWorker received entry for queue: {}, file_id: {:?}",
-                            entry.queue_id,
+                            entry.queue_id.short(),
                             entry.file_id
                         );
                         self.process_entry(&entry, &store_done_tx).await;
@@ -85,7 +85,7 @@ impl StoreWriteWorker {
         let queue_id = &wal_file.queue_id;
         let file_id = &wal_file.file_id;
         log::debug!(target: "normfs-store",
-            "Processing entry for queue: {}, file_id: {:?}", queue_id, file_id);
+            "Processing entry for queue: {}, file_id: {:?}", queue_id.short(), file_id);
 
         let sealed = match &self.packer {
             Some(packer) => self.seal_in_slot(wal_file, packer).await,
@@ -97,7 +97,7 @@ impl StoreWriteWorker {
                 if !self.shutting_down.load(Ordering::Relaxed) {
                     log::error!(target: "normfs-store",
                         "Error sealing store file for queue: {}, file_id: {:?}: {}",
-                        queue_id, file_id, e);
+                        queue_id.short(), file_id, e);
                 }
                 return;
             }
@@ -108,7 +108,7 @@ impl StoreWriteWorker {
             if !self.shutting_down.load(Ordering::Relaxed) {
                 log::error!(target: "normfs-store",
                     "Error writing store file for queue: {}, file_id: {:?}: {:?}",
-                    queue_id, file_id, e
+                    queue_id.short(), file_id, e
                 );
             }
             return;
@@ -120,7 +120,7 @@ impl StoreWriteWorker {
         {
             log::error!(target: "normfs-store",
                 "Failed to send store completion notification for queue: {}, file_id: {:?}: {:?}",
-                queue_id, file_id, e);
+                queue_id.short(), file_id, e);
         }
 
         let entries_before = sealed.entries_before.clone();
@@ -130,7 +130,7 @@ impl StoreWriteWorker {
             if !self.shutting_down.load(Ordering::Relaxed) {
                 log::error!(target: "normfs-store",
                     "Error calculating last entry id for queue: {}, file_id: {:?}: {:?}",
-                    queue_id, file_id, last_id.err());
+                    queue_id.short(), file_id, last_id.err());
             }
             return;
         }
@@ -138,7 +138,7 @@ impl StoreWriteWorker {
 
         log::debug!(target: "normfs-store",
             "Entry range for queue: {}, file_id: {:?}: {:?} to {:?}",
-            queue_id, file_id, entries_before, last_id);
+            queue_id.short(), file_id, entries_before, last_id);
 
         self.layer
             .record_range(queue_id, file_id, &entries_before, &last_id);
@@ -147,12 +147,12 @@ impl StoreWriteWorker {
             if !self.shutting_down.load(Ordering::Relaxed) {
                 log::error!(target: "normfs-store",
                     "Error deleting WAL file for queue: {}, file_id: {:?}: {:?}",
-                    queue_id, file_id, e);
+                    queue_id.short(), file_id, e);
             }
         } else {
             log::info!(target: "normfs-store",
                 "Successfully processed and deleted WAL file for queue: {}, file_id: {:?}, entries: {:?} to {:?}",
-                queue_id, file_id, entries_before, last_id);
+                queue_id.short(), file_id, entries_before, last_id);
         }
     }
 
@@ -175,8 +175,8 @@ impl StoreWriteWorker {
             (slot, Fill::Read(len)) => (slot, len),
             (_, Fill::TooLarge(len)) => {
                 log::warn!(target: "normfs-store",
-                    "WAL file {file_id} of queue {queue_id} is {len} bytes, more than the \
-                     {cap} a pack slot holds; reading it whole");
+                    "WAL file {file_id} of queue {} is {len} bytes, more than the \
+                     {cap} a pack slot holds; reading it whole", queue_id.short());
                 return self.seal_read_whole(wal_file).await;
             }
         };

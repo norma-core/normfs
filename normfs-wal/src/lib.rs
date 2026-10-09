@@ -247,7 +247,7 @@ impl WalStore {
     ) -> Result<WalContent, WalError> {
         log::debug!(
             "WalStore: getting content for queue '{}', file {}",
-            queue_id,
+            queue_id.short(),
             file_id
         );
 
@@ -256,7 +256,7 @@ impl WalStore {
 
         log::debug!(
             "WalStore: retrieved content for queue '{}', file {}, entries: {}, entries_before: {}",
-            queue_id,
+            queue_id.short(),
             file_id,
             content.num_entries,
             content.entries_before
@@ -280,7 +280,7 @@ impl WalStore {
             from_id,
             until_id,
             file_id,
-            queue_id,
+            queue_id.short(),
             step
         );
 
@@ -298,7 +298,7 @@ impl WalStore {
 
         log::debug!(
             "WalStore: range read result for queue '{}': {:?}",
-            queue_id,
+            queue_id.short(),
             result
         );
 
@@ -318,7 +318,7 @@ impl WalStore {
     }
 
     pub async fn truncate(&self, queue_id: &QueueId) -> Result<(), WalError> {
-        log::info!("WalStore: truncating WAL for queue '{}'", queue_id);
+        log::info!("WalStore: truncating WAL for queue '{}'", queue_id.short());
 
         self.backend.clear(queue_id).await?;
 
@@ -369,7 +369,7 @@ impl WalStore {
     ) -> Result<(), WalError> {
         log::info!(
             "WalStore: starting writer for queue '{}', file: {}, last_entry_id: {:?}, data size = {} bytes, id size = {} bytes",
-            queue,
+            queue.short(),
             file_id,
             last_entry_id,
             header.data_size_bytes,
@@ -402,7 +402,7 @@ impl WalStore {
 
         log::debug!(
             "WalStore: writer started successfully for queue '{}'",
-            queue
+            queue.short()
         );
 
         Ok(())
@@ -421,7 +421,7 @@ impl WalStore {
     ) -> Result<(), WalError> {
         log::debug!(
             "WalStore: processing old files for queue '{}', current file: {} (not included)",
-            queue,
+            queue.short(),
             current_file_id
         );
 
@@ -440,7 +440,7 @@ impl WalStore {
                         log::debug!(
                             "WalStore: sending completed file {} for queue '{}'",
                             id_str,
-                            queue
+                            queue.short()
                         );
                         let wal_file = WalFile {
                             queue_id: queue.clone(),
@@ -452,7 +452,7 @@ impl WalStore {
                             log::error!(
                                 "WalStore: failed to send completed wal file {} for queue '{}'",
                                 id_str,
-                                queue
+                                queue.short()
                             );
                         } else {
                             sent_count += 1;
@@ -462,7 +462,7 @@ impl WalStore {
                 log::info!(
                     "WalStore: processed {} old files for queue '{}'",
                     sent_count,
-                    queue
+                    queue.short()
                 );
             }
             Err(e) => return Err(WalError::PathError(e)),
@@ -493,7 +493,7 @@ impl WalStore {
         log::trace!(
             "WalStore: enqueuing entry {} for queue '{}', data size: {} bytes",
             entry_id,
-            queue,
+            queue.short(),
             data.len()
         );
 
@@ -505,12 +505,12 @@ impl WalStore {
                 log::trace!(
                     "WalStore: entry {} enqueued for queue '{}'",
                     entry_id_clone,
-                    queue
+                    queue.short()
                 );
                 Ok(())
             }
             None => {
-                log::error!("WalStore: no writer found for queue '{}'", queue);
+                log::error!("WalStore: no writer found for queue '{}'", queue.short());
                 Err(WalError::WriterNotFound)
             }
         }
@@ -524,18 +524,18 @@ impl WalStore {
         log::trace!(
             "WalStore: enqueuing batch of {} entries for queue '{}'",
             entries.len(),
-            queue
+            queue.short()
         );
 
         let writers = self.writers.read().unwrap();
         match writers.get(queue) {
             Some(writer) => {
                 writer.enqueue_batch(entries)?;
-                log::trace!("WalStore: batch enqueued for queue '{}'", queue);
+                log::trace!("WalStore: batch enqueued for queue '{}'", queue.short());
                 Ok(())
             }
             None => {
-                log::error!("WalStore: no writer found for queue '{}'", queue);
+                log::error!("WalStore: no writer found for queue '{}'", queue.short());
                 Err(WalError::WriterNotFound)
             }
         }
@@ -551,7 +551,10 @@ impl WalStore {
         for (queue_id, writer) in writers {
             let queue_id_clone = queue_id.clone();
             let handle = tokio::spawn(async move {
-                log::debug!("WalStore: closing writer for queue '{}'", queue_id_clone);
+                log::debug!(
+                    "WalStore: closing writer for queue '{}'",
+                    queue_id_clone.short()
+                );
                 writer.close().await
             });
             close_handles.push((queue_id, handle));
@@ -563,13 +566,13 @@ impl WalStore {
                 Ok(Ok(_)) => {
                     log::debug!(
                         "WalStore: successfully closed writer for queue '{}'",
-                        queue_id
+                        queue_id.short()
                     );
                 }
                 Ok(Err(e)) => {
                     log::error!(
                         "WalStore: error closing writer for queue '{}': {}",
-                        queue_id,
+                        queue_id.short(),
                         e
                     );
                     errors.push(e);
@@ -577,7 +580,7 @@ impl WalStore {
                 Err(_) => {
                     log::error!(
                         "WalStore: task panic while closing writer for queue '{}'",
-                        queue_id
+                        queue_id.short()
                     );
                     errors.push(WalError::SendError);
                 }
@@ -600,7 +603,7 @@ impl WalStore {
         log::info!(
             "WalStore: deleting file {} for queue '{}'",
             file_id,
-            queue_id
+            queue_id.short()
         );
 
         self.backend.delete(queue_id, file_id).await?;
@@ -608,7 +611,7 @@ impl WalStore {
         log::debug!(
             "WalStore: successfully deleted file {} for queue '{}'",
             file_id,
-            queue_id
+            queue_id.short()
         );
         Ok(())
     }
@@ -620,7 +623,7 @@ impl WalStore {
     ) -> Result<UintN, WalError> {
         log::debug!(
             "WalStore: getting entries_before for queue '{}', file {}",
-            queue_id,
+            queue_id.short(),
             file_id
         );
 
@@ -630,7 +633,7 @@ impl WalStore {
         log::debug!(
             "WalStore: file {} for queue '{}' has {} entries before",
             file_id,
-            queue_id,
+            queue_id.short(),
             header.num_entries_before
         );
 
@@ -646,7 +649,7 @@ impl WalStore {
     ) -> Result<Option<WalHeader>, WalError> {
         log::info!(
             "WalStore: getting header for queue '{}', file {}",
-            queue_id,
+            queue_id.short(),
             file_id
         );
 
@@ -656,7 +659,7 @@ impl WalStore {
                 log::info!(
                     "WalStore: file {} for queue '{}' - data_size={}, id_size={}, entries_before={}",
                     file_id,
-                    queue_id,
+                    queue_id.short(),
                     header.data_size_bytes,
                     header.id_size_bytes,
                     header.num_entries_before
@@ -667,7 +670,7 @@ impl WalStore {
                 log::info!(
                     "WalStore: file {} not found for queue '{}'",
                     file_id,
-                    queue_id
+                    queue_id.short()
                 );
                 Ok(None)
             }
@@ -676,34 +679,44 @@ impl WalStore {
     }
 
     pub async fn get_first_file_id(&self, queue_id: &QueueId) -> Result<Option<UintN>, WalError> {
-        log::debug!("WalStore: getting first file ID for queue '{}'", queue_id);
+        log::debug!(
+            "WalStore: getting first file ID for queue '{}'",
+            queue_id.short()
+        );
 
         match self.backend.find(queue_id, End::Min).await? {
             Some(id) => {
-                log::debug!("WalStore: first file ID for queue '{}' is {}", queue_id, id);
+                log::debug!(
+                    "WalStore: first file ID for queue '{}' is {}",
+                    queue_id.short(),
+                    id
+                );
                 Ok(Some(id))
             }
             _ => {
-                log::debug!("WalStore: no files found for queue '{}'", queue_id);
+                log::debug!("WalStore: no files found for queue '{}'", queue_id.short());
                 Ok(None)
             }
         }
     }
 
     pub async fn get_last_file_id(&self, queue_id: &QueueId) -> Result<Option<UintN>, WalError> {
-        log::debug!("WalStore: getting last file ID for queue '{}'", queue_id);
+        log::debug!(
+            "WalStore: getting last file ID for queue '{}'",
+            queue_id.short()
+        );
 
         let last_file = match self.backend.find(queue_id, End::Max).await? {
             Some(file) => {
                 log::debug!(
                     "WalStore: last file ID for queue '{}' is {}",
-                    queue_id,
+                    queue_id.short(),
                     file
                 );
                 file
             }
             _ => {
-                log::debug!("WalStore: no files found for queue '{}'", queue_id);
+                log::debug!("WalStore: no files found for queue '{}'", queue_id.short());
                 return Ok(None);
             }
         };
@@ -720,7 +733,7 @@ impl WalStore {
     ) -> Result<Option<Bytes>, WalError> {
         log::debug!(
             "WalStore: getting WAL bytes for queue '{}', file {}",
-            queue_id,
+            queue_id.short(),
             file_id
         );
 
@@ -728,7 +741,7 @@ impl WalStore {
         log::debug!(
             "WalStore: read {:?} bytes for queue '{}', file {}",
             bytes.as_ref().map(Bytes::len),
-            queue_id,
+            queue_id.short(),
             file_id
         );
         Ok(bytes)

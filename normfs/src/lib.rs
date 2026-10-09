@@ -386,7 +386,7 @@ impl Placer {
         match self.after_place(queue, &id, data, placement) {
             Ok(()) => Some(id),
             Err(e) => {
-                log::warn!(target: "normfs", "queue '{queue}': record {id} placed but not handed on: {e}");
+                log::warn!(target: "normfs", "queue '{}': record {id} placed but not handed on: {e}", queue.short());
                 None
             }
         }
@@ -508,7 +508,7 @@ impl NormFS {
         let mem_clone = mem.clone();
         tokio::spawn(async move {
             while let Some((queue_id, id)) = wal_entry_recv.recv().await {
-                log::trace!(target: "normfs", "Processing WAL ack - Queue: '{}', Entry ID: {}", queue_id, id);
+                log::trace!(target: "normfs", "Processing WAL ack - Queue: '{}', Entry ID: {}", queue_id.short(), id);
                 mem_clone.ack(&queue_id, &id);
             }
         });
@@ -740,7 +740,7 @@ impl NormFS {
             return Ok(());
         }
 
-        log::info!(target: "normfs", "Auto-starting queue '{}' in readonly mode for read request", queue);
+        log::info!(target: "normfs", "Auto-starting queue '{}' in readonly mode for read request", queue.short());
         self.start_queue(queue, QueueMode { readonly: true }).await
     }
 
@@ -769,9 +769,9 @@ impl NormFS {
         }
 
         if queue_exists && !has_writer {
-            log::info!(target: "normfs", "Restarting queue '{}' from readonly to write mode", queue);
+            log::info!(target: "normfs", "Restarting queue '{}' from readonly to write mode", queue.short());
         } else {
-            log::info!(target: "normfs", "Auto-starting queue '{}' in write mode for write request", queue);
+            log::info!(target: "normfs", "Auto-starting queue '{}' in write mode for write request", queue.short());
         }
 
         self.start_queue(queue, QueueMode { readonly: false }).await
@@ -782,7 +782,7 @@ impl NormFS {
     /// than half-open; the start that follows recovers the last id from the
     /// files the close completed.
     async fn reopen_queue(&self, queue: &QueueId) -> Result<(), Error> {
-        log::info!(target: "normfs", "Reopening closed queue '{}' for write", queue);
+        log::info!(target: "normfs", "Reopening closed queue '{}' for write", queue.short());
         let dir = queue.to_fs_path(&self.path);
         if let Err(e) = self.fs.remove_durable(&dir.join("closed"), true).await {
             let e = std::io::Error::from(e);
@@ -828,25 +828,25 @@ impl NormFS {
         // Log results from each source individually
         match &wal_file_id {
             Ok(id) => {
-                log::info!(target: "normfs", "Queue '{}' - WAL latest file ID: {}", queue, id)
+                log::info!(target: "normfs", "Queue '{}' - WAL latest file ID: {}", queue.short(), id)
             }
             Err(e) => {
-                log::info!(target: "normfs", "Queue '{}' - WAL has no files or error: {:?}", queue, e)
+                log::info!(target: "normfs", "Queue '{}' - WAL has no files or error: {:?}", queue.short(), e)
             }
         }
 
         match &store_file_id {
             Ok(id) => {
-                log::info!(target: "normfs", "Queue '{}' - Store latest file ID: {}", queue, id)
+                log::info!(target: "normfs", "Queue '{}' - Store latest file ID: {}", queue.short(), id)
             }
             Err(e) => {
-                log::info!(target: "normfs", "Queue '{}' - Store has no files or error: {:?}", queue, e)
+                log::info!(target: "normfs", "Queue '{}' - Store has no files or error: {:?}", queue.short(), e)
             }
         }
 
         log::info!(target: "normfs",
             "Queue '{}' - Latest file IDs summary: WAL={:?}, Store={:?}",
-            queue,
+            queue.short(),
             wal_file_id.as_ref().ok(),
             store_file_id.as_ref().ok()
         );
@@ -872,7 +872,7 @@ impl NormFS {
 
         log::info!(target: "normfs",
             "Queue '{}' - Maximum file ID across WAL and Store: {:?}",
-            queue,
+            queue.short(),
             max_file_id
         );
 
@@ -895,25 +895,25 @@ impl NormFS {
         // Log detailed results from each source
         match &wal_end {
             Ok(Some(id)) => log::info!(target: "normfs",
-                "Queue '{}', File ID {} - WAL has entries, last entry ID: {}", queue, file_id, id),
+                "Queue '{}', File ID {} - WAL has entries, last entry ID: {}", queue.short(), file_id, id),
             Ok(None) => log::info!(target: "normfs",
-                "Queue '{}', File ID {} - WAL file exists but has no entries", queue, file_id),
+                "Queue '{}', File ID {} - WAL file exists but has no entries", queue.short(), file_id),
             Err(e) => log::debug!(target: "normfs",
-                "Queue '{}', File ID {} - WAL query error: {:?}", queue, file_id, e),
+                "Queue '{}', File ID {} - WAL query error: {:?}", queue.short(), file_id, e),
         }
 
         match &store_end {
             Ok(Some(id)) => log::info!(target: "normfs",
-                "Queue '{}', File ID {} - Store has entries, last entry ID: {}", queue, file_id, id),
+                "Queue '{}', File ID {} - Store has entries, last entry ID: {}", queue.short(), file_id, id),
             Ok(None) => log::info!(target: "normfs",
-                "Queue '{}', File ID {} - Store file exists but has no entries", queue, file_id),
+                "Queue '{}', File ID {} - Store file exists but has no entries", queue.short(), file_id),
             Err(e) => log::debug!(target: "normfs",
-                "Queue '{}', File ID {} - Store query error: {:?}", queue, file_id, e),
+                "Queue '{}', File ID {} - Store query error: {:?}", queue.short(), file_id, e),
         }
 
         log::info!(target: "normfs",
             "Queue '{}', File ID {:?} - Last entry IDs summary: WAL={:?}, Store={:?}",
-            queue,
+            queue.short(),
             file_id,
             wal_end.as_ref().ok().and_then(|o| o.as_ref()),
             store_end.as_ref().ok().and_then(|o| o.as_ref())
@@ -928,19 +928,19 @@ impl NormFS {
                 Some(current_max) if id > *current_max => {
                     log::info!(target: "normfs",
                         "Queue '{}', File ID {} - WAL entry ID {} is now maximum (was {:?})",
-                        queue, file_id, id, current_max);
+                        queue.short(), file_id, id, current_max);
                     max_last_entry_id = Some(id);
                     max_source = "WAL";
                 }
                 Some(_current_max) => {
                     log::debug!(target: "normfs",
                         "Queue '{}', File ID {} - WAL entry ID {} is not maximum",
-                        queue, file_id, id);
+                        queue.short(), file_id, id);
                 }
                 None => {
                     log::info!(target: "normfs",
                         "Queue '{}', File ID {} - WAL entry ID {} is first candidate",
-                        queue, file_id, id);
+                        queue.short(), file_id, id);
                     max_last_entry_id = Some(id);
                     max_source = "WAL";
                 }
@@ -952,19 +952,19 @@ impl NormFS {
                 Some(current_max) if id > *current_max => {
                     log::info!(target: "normfs",
                         "Queue '{}', File ID {} - Store entry ID {} is now maximum (was {:?})",
-                        queue, file_id, id, current_max);
+                        queue.short(), file_id, id, current_max);
                     max_last_entry_id = Some(id);
                     max_source = "Store";
                 }
                 Some(_current_max) => {
                     log::debug!(target: "normfs",
                         "Queue '{}', File ID {} - Store entry ID {} is not maximum",
-                        queue, file_id, id);
+                        queue.short(), file_id, id);
                 }
                 None => {
                     log::info!(target: "normfs",
                         "Queue '{}', File ID {} - Store entry ID {} is first candidate",
-                        queue, file_id, id);
+                        queue.short(), file_id, id);
                     max_last_entry_id = Some(id);
                     max_source = "Store";
                 }
@@ -973,7 +973,7 @@ impl NormFS {
 
         log::info!(target: "normfs",
             "Queue '{}', File ID {} - Selected maximum last entry ID: {:?} from source: {}",
-            queue,
+            queue.short(),
             file_id,
             max_last_entry_id,
             max_source
@@ -1003,28 +1003,28 @@ impl NormFS {
         match &wal_header {
             Ok(Some(header)) => log::info!(target: "normfs",
                 "Queue '{}', File ID {} - WAL header: data_size={}, id_size={}, entries_before={}",
-                queue, file_id, header.data_size_bytes, header.id_size_bytes, header.num_entries_before),
+                queue.short(), file_id, header.data_size_bytes, header.id_size_bytes, header.num_entries_before),
             Ok(None) => log::info!(target: "normfs",
-                "Queue '{}', File ID {} - WAL header not found", queue, file_id),
+                "Queue '{}', File ID {} - WAL header not found", queue.short(), file_id),
             Err(e) => log::debug!(target: "normfs",
-                "Queue '{}', File ID {} - WAL header error: {:?}", queue, file_id, e),
+                "Queue '{}', File ID {} - WAL header error: {:?}", queue.short(), file_id, e),
         }
 
         match &store_header {
             Ok(Some(header)) => log::info!(target: "normfs",
                 "Queue '{}', File ID {} - Store header: data_size={}, id_size={}, entries_before={}",
-                queue, file_id, header.data_size_bytes, header.id_size_bytes, header.num_entries_before),
+                queue.short(), file_id, header.data_size_bytes, header.id_size_bytes, header.num_entries_before),
             Ok(None) => log::info!(target: "normfs",
-                "Queue '{}', File ID {} - Store header not found", queue, file_id),
+                "Queue '{}', File ID {} - Store header not found", queue.short(), file_id),
             Err(e) => log::debug!(target: "normfs",
-                "Queue '{}', File ID {} - Store header error: {:?}", queue, file_id, e),
+                "Queue '{}', File ID {} - Store header error: {:?}", queue.short(), file_id, e),
         }
 
         // Return the first valid header found (prefer WAL, then Store)
         if let Ok(Some(header)) = wal_header {
             log::info!(target: "normfs",
                 "Queue '{}', File ID {} - Selected WAL header for recovery",
-                queue, file_id
+                queue.short(), file_id
             );
             return Some(header);
         }
@@ -1032,14 +1032,14 @@ impl NormFS {
         if let Ok(Some(header)) = store_header {
             log::info!(target: "normfs",
                 "Queue '{}', File ID {} - Selected Store header for recovery",
-                queue, file_id
+                queue.short(), file_id
             );
             return Some(header);
         }
 
         log::info!(target: "normfs",
             "Queue '{}', File ID {} - No header found in WAL or Store",
-            queue, file_id
+            queue.short(), file_id
         );
         None
     }
@@ -1089,14 +1089,14 @@ impl NormFS {
                  at {}. A closing flush lost them and the retry did not land before the \
                  process ended. Nothing is discarded to close the gap -- the records above it \
                  were reported durable -- so reads for those ids find nothing.",
-                queue, expected, header.num_entries_before, lower, lower_last, upper,
+                queue.short(), expected, header.num_entries_before, lower, lower_last, upper,
                 header.num_entries_before);
 
             if link + 1 == MAX_LINKS {
                 log::error!(target: "normfs",
                     "Queue '{}' - stopped checking the id chain after {} links; there may be \
                      further gaps below file {}",
-                    queue, MAX_LINKS, lower);
+                    queue.short(), MAX_LINKS, lower);
                 return;
             }
             upper = lower;
@@ -1109,21 +1109,21 @@ impl NormFS {
         &self,
         queue: &QueueId,
     ) -> Result<(UintN, normfs_wal::WalHeader, Option<UintN>), Error> {
-        log::info!(target: "normfs", "Continuing queue: '{}'", queue);
+        log::info!(target: "normfs", "Continuing queue: '{}'", queue.short());
 
         // Get the latest file ID across all sources
         let latest_file_id = match self.get_latest_file(queue).await {
             Some(id) => {
                 log::info!(target: "normfs",
                     "Queue '{}' - Found latest file ID: {:?}",
-                    queue, id
+                    queue.short(), id
                 );
                 id
             }
             None => {
                 log::info!(target: "normfs",
                     "Queue '{}' - No files found, starting fresh",
-                    queue
+                    queue.short()
                 );
                 return Ok((UintN::one(), Default::default(), None));
             }
@@ -1147,7 +1147,7 @@ impl NormFS {
             log::error!(target: "normfs",
                 "Queue '{}' - Latest file {} could not be read ({}); writing to the next \
                  file id rather than reusing it",
-                queue, latest_file_id, e);
+                queue.short(), latest_file_id, e);
         }
         let latest_unreadable = unreadable.is_some();
 
@@ -1157,7 +1157,7 @@ impl NormFS {
         loop {
             log::info!(target: "normfs",
                 "Queue '{}' - Checking file ID {:?} for entries",
-                queue, current_file_id
+                queue.short(), current_file_id
             );
 
             // Try to get the last entry ID in this file
@@ -1165,7 +1165,7 @@ impl NormFS {
                 Some(last_entry_id) => {
                     log::info!(target: "normfs",
                         "Queue '{}' - Found file with entries: file_id={:?}, last_entry_id={:?}",
-                        queue, current_file_id, last_entry_id
+                        queue.short(), current_file_id, last_entry_id
                     );
 
                     // Get the header from this file
@@ -1176,7 +1176,7 @@ impl NormFS {
 
                     log::info!(target: "normfs",
                         "Queue '{}' - File {:?} header: data_size={}, id_size={}, entries_before={}",
-                        queue, current_file_id,
+                        queue.short(), current_file_id,
                         header.data_size_bytes, header.id_size_bytes, header.num_entries_before
                     );
 
@@ -1197,13 +1197,13 @@ impl NormFS {
 
                     log::info!(target: "normfs",
                         "Queue '{}' - Recovery decision: Found entries in file {}, will write to file {} {}",
-                        queue, current_file_id, next_file_id,
+                        queue.short(), current_file_id, next_file_id,
                         if is_latest_file { "(new file)" } else { "(reusing empty latest file)" }
                     );
 
                     log::info!(target: "normfs",
                         "Queue '{}' - Starting WAL writer: file_id={}, num_entries_before={}, last_entry_id={:?}",
-                        queue, next_file_id, new_header.num_entries_before, last_entry_id
+                        queue.short(), next_file_id, new_header.num_entries_before, last_entry_id
                     );
 
                     self.report_id_chain_breaks(queue, &current_file_id).await;
@@ -1213,7 +1213,7 @@ impl NormFS {
                 None => {
                     log::info!(target: "normfs",
                         "Queue '{}' - File {:?} has no entries, trying previous file",
-                        queue, current_file_id
+                        queue.short(), current_file_id
                     );
 
                     // File is empty or corrupted, move to previous file
@@ -1226,7 +1226,7 @@ impl NormFS {
                         };
                         log::info!(target: "normfs",
                             "Queue '{}' - Reached first file with no entries, starting fresh at file {}",
-                            queue, start_at
+                            queue.short(), start_at
                         );
                         return Ok((start_at, Default::default(), None));
                     }
@@ -1235,7 +1235,7 @@ impl NormFS {
                     current_file_id = current_file_id.decrement().map_err(|e| {
                         log::error!(target: "normfs",
                             "Queue '{}' - Failed to decrement file ID: {:?}",
-                            queue, e
+                            queue.short(), e
                         );
                         Error::Store(normfs_store::StoreError::UintN(e))
                     })?;
@@ -1339,7 +1339,7 @@ impl NormFS {
 
     async fn start_queue(&self, queue: &QueueId, mode: QueueMode) -> Result<(), Error> {
         log::info!(target: "normfs", "========================================");
-        log::info!(target: "normfs", "Starting queue: '{}' (readonly={})", queue, mode.readonly);
+        log::info!(target: "normfs", "Starting queue: '{}' (readonly={})", queue.short(), mode.readonly);
         log::info!(target: "normfs", "========================================");
 
         let queue_config = self.get_config_for_queue(queue);
@@ -1353,7 +1353,7 @@ impl NormFS {
                 queue_config.pool,
                 true,
             );
-            log::info!(target: "normfs", "Memory-only queue '{}' started, last_entry_id: {:?}", queue, last_entry_id);
+            log::info!(target: "normfs", "Memory-only queue '{}' started, last_entry_id: {:?}", queue.short(), last_entry_id);
             self.report_started(queue, mode.readonly, persist, last_entry_id);
             return Ok(());
         }
@@ -1375,7 +1375,7 @@ impl NormFS {
         let (file_id, header, last_entry_id) = self.resume_point(queue, persist).await?;
 
         log::info!(target: "normfs", "----------------------------------------");
-        log::info!(target: "normfs", "Queue '{}' - Recovery complete:", queue);
+        log::info!(target: "normfs", "Queue '{}' - Recovery complete:", queue.short());
         log::info!(target: "normfs", "  - Will write to file ID: {}", file_id);
         log::info!(target: "normfs", "  - Last entry ID in queue: {:?}", last_entry_id);
         log::info!(target: "normfs", "  - Header entries_before: {}", header.num_entries_before);
@@ -1437,11 +1437,11 @@ impl NormFS {
                         // store file of the same id forever.
                         match self.wal.delete_wal_file(queue, &file_id).await {
                             Ok(()) => log::info!(target: "normfs",
-                                "Queue '{}': removed empty WAL file {} in favour of a store file", queue, file_id),
+                                "Queue '{}': removed empty WAL file {} in favour of a store file", queue.short(), file_id),
                             Err(WalError::IoError(e))
                                 if e.kind() == std::io::ErrorKind::NotFound => {}
                             Err(e) => log::warn!(target: "normfs",
-                                "Queue '{}': could not remove WAL file {}: {}", queue, file_id, e),
+                                "Queue '{}': could not remove WAL file {}: {}", queue.short(), file_id, e),
                         }
                         self.store.local_sink(wal_settings.enable_fsync)
                     } else {
@@ -1496,7 +1496,7 @@ impl NormFS {
                         log::error!(target: "normfs",
                             "Failed to process old files for queue {} ({} tries): {}, \
                              retrying in 1 second",
-                            queue_clone, failures, e
+                            queue_clone.short(), failures, e
                         );
                     }
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -1531,10 +1531,10 @@ impl NormFS {
             };
 
             disk_monitor.add_queue(queue, config, offloader).await?;
-            log::info!(target: "normfs", "Added queue '{}' to disk monitor with max_size: {}", queue, max_size);
+            log::info!(target: "normfs", "Added queue '{}' to disk monitor with max_size: {}", queue.short(), max_size);
         }
 
-        log::info!(target: "normfs", "Queue '{}' started successfully, last_entry_id: {:?}", queue, last_entry_id);
+        log::info!(target: "normfs", "Queue '{}' started successfully, last_entry_id: {:?}", queue.short(), last_entry_id);
         self.report_started(queue, mode.readonly, persist, last_entry_id);
 
         Ok(())
@@ -1565,11 +1565,11 @@ impl NormFS {
         };
 
         log::debug!(target: "normfs", "Enqueuing entry - Queue: '{}', Entry ID: {}, Data size: {} bytes",
-            queue, entry_id, data.len());
+            queue.short(), entry_id, data.len());
 
         self.after_place(queue, &entry_id, data, placement)?;
 
-        log::trace!(target: "normfs", "Entry enqueued successfully - Queue: '{}', Entry ID: {}", queue, entry_id);
+        log::trace!(target: "normfs", "Entry enqueued successfully - Queue: '{}', Entry ID: {}", queue.short(), entry_id);
 
         Ok(entry_id)
     }
@@ -1635,7 +1635,7 @@ impl NormFS {
             check_framable(record, page_size, self.settings.max_memory_usage)?;
         }
 
-        log::debug!(target: "normfs", "Enqueuing batch - Queue: '{}', Batch size: {} entries", queue, data.len());
+        log::debug!(target: "normfs", "Enqueuing batch - Queue: '{}', Batch size: {} entries", queue.short(), data.len());
 
         let Some(entry_ids) = self
             .mem
@@ -1651,7 +1651,7 @@ impl NormFS {
             });
         };
 
-        log::trace!(target: "normfs", "Batch enqueued successfully - Queue: '{}', Count: {}", queue, entry_ids.len());
+        log::trace!(target: "normfs", "Batch enqueued successfully - Queue: '{}', Count: {}", queue.short(), entry_ids.len());
 
         Ok(entry_ids)
     }
@@ -1719,7 +1719,7 @@ impl NormFS {
     ) -> Result<bool, Error> {
         log::debug!(target: "normfs",
             "Reading entries - Queue: '{}', Position: {:?}, Limit: {}, Step: {}",
-            queue, position, limit, step);
+            queue.short(), position, limit, step);
 
         self.reader_fsm
             .read(queue.clone(), position, limit, step, sender)
@@ -1736,7 +1736,7 @@ impl NormFS {
         let queue_lock = self.queue_init_lock(queue);
         let _guard = queue_lock.lock().await;
 
-        log::info!(target: "normfs", "Closing queue '{}'", queue);
+        log::info!(target: "normfs", "Closing queue '{}'", queue.short());
         let dir = queue.to_fs_path(&self.path);
 
         // Checks that change nothing come first, so a refused close leaves

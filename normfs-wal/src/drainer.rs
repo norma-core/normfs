@@ -61,7 +61,7 @@ pub(crate) fn spawn(
             log::info!(
                 target: "normfs-wal",
                 "WAL drainer: queue '{}': file {} landed its tail, entries {}..={}",
-                file.queue_id,
+                file.queue_id.short(),
                 file.file_id,
                 file.stranded.first_entry_id,
                 file.stranded.last_entry_id
@@ -85,7 +85,7 @@ async fn land(backend: &dyn Backend, file: &StrandedFile) -> bool {
                     "WAL drainer: queue '{}': file {} cannot take its tail back; entries \
                      {}..={} reach no file. The file is gone or shorter than the prefix \
                      they follow, which no retry can undo.",
-                    file.queue_id,
+                    file.queue_id.short(),
                     file.file_id,
                     file.stranded.first_entry_id,
                     file.stranded.last_entry_id
@@ -99,7 +99,7 @@ async fn land(backend: &dyn Backend, file: &StrandedFile) -> bool {
                         "WAL drainer: queue '{}': landing the tail of file {} failed ({}); \
                          retrying. Entries {}..={} are held here and nowhere else, so this \
                          queue cannot report them durable until it succeeds.",
-                        file.queue_id,
+                        file.queue_id.short(),
                         file.file_id,
                         e,
                         file.stranded.first_entry_id,

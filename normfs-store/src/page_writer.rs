@@ -287,7 +287,7 @@ impl Task {
                     log::error!(target: "normfs-store",
                         "cannot build store file {} for queue {} (entries {}..={}): {e}; \
                          these records reach no file",
-                        self.file_id, self.queue, runs.first_entry_id, runs.last_entry_id);
+                        self.file_id, self.queue.short(), runs.first_entry_id, runs.last_entry_id);
                     return None;
                 }
             };
@@ -314,7 +314,7 @@ impl Task {
             if attempt == 1 || attempt.is_multiple_of(LAND_WARN_EVERY) {
                 log::warn!(target: "normfs-store",
                     "store file {} for queue {} did not land (attempt {attempt}): {e}",
-                    self.file_id, self.queue);
+                    self.file_id, self.queue.short());
             }
             if *closing.borrow() || closing.has_changed().is_err() {
                 tokio::time::sleep(delay).await;
@@ -346,7 +346,7 @@ impl Task {
         self.header.num_entries_before = UintN::from(built.last_entry_id).increment();
         log::debug!(target: "normfs-store",
             "queue {}: entries {}..={} landed as store file {}",
-            self.queue, built.first_entry_id, built.last_entry_id, self.file_id);
+            self.queue.short(), built.first_entry_id, built.last_entry_id, self.file_id);
     }
 }
 
