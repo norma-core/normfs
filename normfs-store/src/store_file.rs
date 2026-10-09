@@ -101,7 +101,7 @@ pub fn report_stored(
     match file.facts(queue, file_id) {
         Ok(facts) => events.emit(SystemEvent::FileStored(facts)),
         Err(e) => log::warn!(target: "normfs-store",
-            "queue {queue}: store file {file_id} landed but its blocks do not parse: {e}"),
+            "queue {}: store file {file_id} landed but its blocks do not parse: {e}", queue.short()),
     }
 }
 
@@ -209,7 +209,7 @@ fn compress_and_encrypt(
             let compressed = crate::compression::zstd_compress(data.as_ref())?;
             log::debug!(target: "normfs-store",
                 "Compressed {} -> {} bytes for queue {}, file {}",
-                data.len(), compressed.len(), queue, file_id);
+                data.len(), compressed.len(), queue.short(), file_id);
             out = Bytes::from(compressed);
         }
         other => {

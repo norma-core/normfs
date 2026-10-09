@@ -134,3 +134,20 @@ fn test_queue_id_cloud_path_normalizes_prefix() {
         "robot/abc123def456/my_queue/019.store"
     );
 }
+
+#[test]
+fn test_queue_id_short_drops_only_this_instance_id() {
+    let instance_id = "8e7002f41736b2248f3a8afe82445b4b69f3e7db64cd55223a7b7aaf854f3c7c";
+    let peer = "a128f3c41736b2248f3a8afe82445b4b69f3e7db64cd55223a7b7aaf854f3c7c";
+    let resolver = QueueIdResolver::new(instance_id);
+
+    assert_eq!(resolver.resolve("usbvideo/tx").short(), "usbvideo/tx");
+    assert_eq!(resolver.resolve("/shared/queue").short(), "/shared/queue");
+    let foreign = format!("/{peer}/usbvideo/tx");
+    assert_eq!(resolver.resolve(&foreign).short(), foreign);
+
+    let own = resolver.resolve("usbvideo/tx");
+    let same = resolver.resolve(&format!("/{instance_id}/usbvideo/tx"));
+    assert_eq!(own, same);
+    assert_eq!(same.short(), same.as_str());
+}

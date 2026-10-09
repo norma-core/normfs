@@ -561,7 +561,7 @@ impl Backend for Local {
                 }
             }
             log::debug!(target: "normfs-wal",
-                "Put file for queue {}, file {}: {} bytes at {:?}", queue, file_id, len, dst);
+                "Put file for queue {}, file {}: {} bytes at {:?}", queue.short(), file_id, len, dst);
             Ok(())
         })
     }

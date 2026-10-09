@@ -199,13 +199,13 @@ impl ReaderFSM {
                     log::info!(target: "normfs-reader-fsm",
                         "Queue '{}' - file {} was unreadable for {} attempt(s) and then \
                          appeared; it was migrating between backends, not missing",
-                        queue, file_id, attempt);
+                        queue.short(), file_id, attempt);
                     return Some(found);
                 }
                 Ok(None) => {}
                 Err(e) => {
                     log::warn!(target: "normfs-reader-fsm",
-                        "Queue '{}' - error re-reading file {}: {:?}", queue, file_id, e);
+                        "Queue '{}' - error re-reading file {}: {:?}", queue.short(), file_id, e);
                     return None;
                 }
             }
@@ -220,7 +220,7 @@ impl ReaderFSM {
     ) -> Result<Option<(bytes::Bytes, DataSource)>, Error> {
         log::trace!(target: "normfs-reader-fsm",
             "Prefetching file: queue={}, file_id={}",
-            queue, file_id);
+            queue.short(), file_id);
 
         let store = &self.store;
         let wal = &self.wal;
@@ -236,13 +236,13 @@ impl ReaderFSM {
                     Ok(wal_bytes) => {
                         log::debug!(target: "normfs-reader-fsm",
                             "Prefetch successful from Store: queue={}, file_id={}, wal_bytes={}",
-                            queue, file_id, wal_bytes.len());
+                            queue.short(), file_id, wal_bytes.len());
                         return Ok(Some((wal_bytes, DataSource::DiskStore)));
                     }
                     Err(e) => {
                         log::warn!(target: "normfs-reader-fsm",
                             "Prefetch: corrupted store file, treating as not found: queue={}, file_id={}, error={:?}",
-                            queue, file_id, e);
+                            queue.short(), file_id, e);
                         // Corruption - treat as missing file
                         return Ok(None);
                     }
@@ -251,12 +251,12 @@ impl ReaderFSM {
             Ok(None) => {
                 log::trace!(target: "normfs-reader-fsm",
                     "Prefetch: file not in Store, trying WAL: queue={}, file_id={}",
-                    queue, file_id);
+                    queue.short(), file_id);
             }
             Err(e) => {
                 log::error!(target: "normfs-reader-fsm",
                     "Prefetch: Store error: queue={}, file_id={}, error={:?}",
-                    queue, file_id, e);
+                    queue.short(), file_id, e);
                 return Err(Error::Store(e));
             }
         }
@@ -266,18 +266,18 @@ impl ReaderFSM {
             Ok(Some(wal_bytes)) => {
                 log::debug!(target: "normfs-reader-fsm",
                     "Prefetch successful from WAL: queue={}, file_id={}, wal_bytes={}",
-                    queue, file_id, wal_bytes.len());
+                    queue.short(), file_id, wal_bytes.len());
                 return Ok(Some((wal_bytes, DataSource::DiskWal)));
             }
             Ok(None) => {
                 log::trace!(target: "normfs-reader-fsm",
                     "Prefetch: file not in WAL: queue={}, file_id={}",
-                    queue, file_id);
+                    queue.short(), file_id);
             }
             Err(e) => {
                 log::error!(target: "normfs-reader-fsm",
                     "Prefetch: WAL error: queue={}, file_id={}, error={:?}",
-                    queue, file_id, e);
+                    queue.short(), file_id, e);
                 return Err(Error::Wal(e));
             }
         }
@@ -298,13 +298,13 @@ impl ReaderFSM {
                         Ok(wal_bytes) => {
                             log::debug!(target: "normfs-reader-fsm",
                                 "Prefetch successful from S3: queue={}, file_id={}, wal_bytes={}",
-                                queue, file_id, wal_bytes.len());
+                                queue.short(), file_id, wal_bytes.len());
                             return Ok(Some((wal_bytes, DataSource::Cloud)));
                         }
                         Err(e) => {
                             log::warn!(target: "normfs-reader-fsm",
                                 "Prefetch: corrupted S3 file, treating as not found: queue={}, file_id={}, error={:?}",
-                                queue, file_id, e);
+                                queue.short(), file_id, e);
                             // Corruption - treat as missing file
                             return Ok(None);
                         }
@@ -313,12 +313,12 @@ impl ReaderFSM {
                 Ok(None) => {
                     log::trace!(target: "normfs-reader-fsm",
                         "Prefetch: file not in S3 (404): queue={}, file_id={}",
-                        queue, file_id);
+                        queue.short(), file_id);
                 }
                 Err(e) => {
                     log::error!(target: "normfs-reader-fsm",
                         "Prefetch: S3 error: queue={}, file_id={}, error={:?}",
-                        queue, file_id, e);
+                        queue.short(), file_id, e);
                     return Err(Error::Cloud(e.into()));
                 }
             }
@@ -327,7 +327,7 @@ impl ReaderFSM {
         // File not found in any backend
         log::debug!(target: "normfs-reader-fsm",
             "Prefetch: file not found in any backend: queue={}, file_id={}",
-            queue, file_id);
+            queue.short(), file_id);
         Ok(None)
     }
 
@@ -535,7 +535,7 @@ impl ReaderFSM {
             Err(e) => {
                 log::error!(target: "normfs-reader-fsm",
                     "Lookup failed for queue '{}', id {}: {:?}",
-                    queue, start_id, e);
+                    queue.short(), start_id, e);
                 let error = match e {
                     crate::lookup::LookupError::Cloud(e) => Error::Cloud(e),
                     _ => Error::NotFound,
@@ -568,7 +568,7 @@ impl ReaderFSM {
 
         log::trace!(target: "normfs-reader-fsm",
             "Attempting to read from Store: queue={}, file_id={}, next_id={}, last_id={:?}",
-            ctx.queue, ctx.file_id, ctx.next_id, ctx.last_id);
+            ctx.queue.short(), ctx.file_id, ctx.next_id, ctx.last_id);
 
         let store = &self.store;
 
@@ -577,7 +577,7 @@ impl ReaderFSM {
             Ok(Some(store_bytes)) => {
                 log::trace!(target: "normfs-reader-fsm",
                     "Read {} bytes from Store file: queue={}, file_id={}",
-                    store_bytes.len(), ctx.queue, ctx.file_id);
+                    store_bytes.len(), ctx.queue.short(), ctx.file_id);
                 // Transition to ExtractWalBytes to decrypt/decompress
                 Ok(ReaderState::ExtractWalBytes {
                     ctx,
@@ -588,14 +588,14 @@ impl ReaderFSM {
             Ok(None) => {
                 log::trace!(target: "normfs-reader-fsm",
                     "File not found in Store, trying WAL: queue={}, file_id={}",
-                    ctx.queue, ctx.file_id);
+                    ctx.queue.short(), ctx.file_id);
                 // Not in store, try WAL
                 Ok(ReaderState::ReadWal { ctx })
             }
             Err(e) => {
                 log::error!(target: "normfs-reader-fsm",
                     "Store get_store_bytes error: queue={}, file_id={}, error={:?}",
-                    ctx.queue, ctx.file_id, e);
+                    ctx.queue.short(), ctx.file_id, e);
                 Ok(ReaderState::Failed(Error::Store(e)))
             }
         }
@@ -609,7 +609,7 @@ impl ReaderFSM {
 
         log::trace!(target: "normfs-reader-fsm",
             "Attempting to read from WAL: queue={}, file_id={}, next_id={}, last_id={:?}",
-            ctx.queue, ctx.file_id, ctx.next_id, ctx.last_id);
+            ctx.queue.short(), ctx.file_id, ctx.next_id, ctx.last_id);
 
         let wal = &self.wal;
 
@@ -618,7 +618,7 @@ impl ReaderFSM {
             Ok(Some(wal_bytes)) => {
                 log::trace!(target: "normfs-reader-fsm",
                     "Read {} bytes from WAL file: queue={}, file_id={}",
-                    wal_bytes.len(), ctx.queue, ctx.file_id);
+                    wal_bytes.len(), ctx.queue.short(), ctx.file_id);
                 // Transition to ParseWalBytes
                 Ok(ReaderState::ParseWalBytes {
                     ctx,
@@ -630,12 +630,12 @@ impl ReaderFSM {
             Ok(None) => {
                 log::trace!(target: "normfs-reader-fsm",
                     "File not found in WAL: queue={}, file_id={}",
-                    ctx.queue, ctx.file_id);
+                    ctx.queue.short(), ctx.file_id);
                 // Not in WAL, try S3 if available, otherwise move to next file
                 if self.cloud.is_some() {
                     log::trace!(target: "normfs-reader-fsm",
                         "Trying S3: queue={}, file_id={}",
-                        ctx.queue, ctx.file_id);
+                        ctx.queue.short(), ctx.file_id);
                     Ok(ReaderState::ReadS3 { ctx })
                 } else {
                     if let Some((wal_bytes, data_source)) =
@@ -651,7 +651,7 @@ impl ReaderFSM {
 
                     log::debug!(target: "normfs-reader-fsm",
                         "File not found and S3 not configured, moving to next file: queue={}, file_id={}",
-                        ctx.queue, ctx.file_id);
+                        ctx.queue.short(), ctx.file_id);
                     // No S3 available, move to next file
                     Ok(ReaderState::ReadNextFile {
                         current_file: ctx.file_id.clone(),
@@ -663,7 +663,7 @@ impl ReaderFSM {
             Err(e) => {
                 log::error!(target: "normfs-reader-fsm",
                     "WAL get_wal_bytes error: queue={}, file_id={}, error={:?}",
-                    ctx.queue, ctx.file_id, e);
+                    ctx.queue.short(), ctx.file_id, e);
                 Ok(ReaderState::Failed(Error::Wal(e)))
             }
         }
@@ -680,21 +680,21 @@ impl ReaderFSM {
             None => {
                 log::error!(target: "normfs-reader-fsm",
                     "S3 state reached but S3 downloader not configured: queue={}, file_id={}",
-                    ctx.queue, ctx.file_id);
+                    ctx.queue.short(), ctx.file_id);
                 return Ok(ReaderState::Failed(Error::NotFound));
             }
         };
 
         log::info!(target: "normfs-reader-fsm",
             "Attempting to read from S3: queue={}, file_id={}, next_id={}, last_id={:?}",
-            ctx.queue, ctx.file_id, ctx.next_id, ctx.last_id);
+            ctx.queue.short(), ctx.file_id, ctx.next_id, ctx.last_id);
 
         // Get store bytes from S3
         match cloud.get_store_bytes(&ctx.queue, &ctx.file_id).await {
             Ok(Some(store_bytes)) => {
                 log::info!(target: "normfs-reader-fsm",
                     "Downloaded {} bytes from S3: queue={}, file_id={}",
-                    store_bytes.len(), ctx.queue, ctx.file_id);
+                    store_bytes.len(), ctx.queue.short(), ctx.file_id);
                 // Transition to ExtractWalBytes to decrypt/decompress
                 Ok(ReaderState::ExtractWalBytes {
                     ctx,
@@ -705,7 +705,7 @@ impl ReaderFSM {
             Ok(None) => {
                 log::info!(target: "normfs-reader-fsm",
                     "File not found in S3 (404), moving to next file: queue={}, file_id={}",
-                    ctx.queue, ctx.file_id);
+                    ctx.queue.short(), ctx.file_id);
                 // S3 file not found (404), move to next file
                 Ok(ReaderState::ReadNextFile {
                     current_file: ctx.file_id.clone(),
@@ -716,7 +716,7 @@ impl ReaderFSM {
             Err(e) => {
                 log::error!(target: "normfs-reader-fsm",
                     "S3 download error (network/auth/etc): queue={}, file_id={}, error={:?}",
-                    ctx.queue, ctx.file_id, e);
+                    ctx.queue.short(), ctx.file_id, e);
                 // Network error, auth error, or other transient S3 error - fail the read
                 Ok(ReaderState::Failed(Error::Cloud(e.into())))
             }
@@ -736,7 +736,7 @@ impl ReaderFSM {
 
         log::trace!(target: "normfs-reader-fsm",
             "Extracting WAL bytes from store bytes: queue={}, file_id={}, bytes={}, source={:?}",
-            ctx.queue, ctx.file_id, store_bytes.len(), data_source);
+            ctx.queue.short(), ctx.file_id, store_bytes.len(), data_source);
 
         // Extract WAL bytes from store bytes (decrypt/decompress)
         // Verify signatures for S3 files, skip verification for local files
@@ -746,7 +746,7 @@ impl ReaderFSM {
             Ok(wal_bytes) => {
                 log::trace!(target: "normfs-reader-fsm",
                     "Extracted {} WAL bytes: queue={}, file_id={}",
-                    wal_bytes.len(), ctx.queue, ctx.file_id);
+                    wal_bytes.len(), ctx.queue.short(), ctx.file_id);
                 // Transition to ParseWalBytes
                 Ok(ReaderState::ParseWalBytes {
                     ctx,
@@ -758,7 +758,7 @@ impl ReaderFSM {
             Err(e) => {
                 log::warn!(target: "normfs-reader-fsm",
                     "Failed to extract WAL bytes from corrupted store file, moving to next file: queue={}, file_id={}, error={:?}, source={:?}",
-                    ctx.queue, ctx.file_id, e, data_source);
+                    ctx.queue.short(), ctx.file_id, e, data_source);
                 // Extraction errors (decryption/decompression failures) indicate data corruption
                 // Cannot restore corrupted data, so skip to next file
                 Ok(ReaderState::ReadNextFile {
@@ -786,7 +786,7 @@ impl ReaderFSM {
 
         log::trace!(target: "normfs-reader-fsm",
             "Parsing WAL bytes: queue={}, file_id={}, bytes={}, source={:?}",
-            ctx.queue, ctx.file_id, wal_bytes.len(), data_source);
+            ctx.queue.short(), ctx.file_id, wal_bytes.len(), data_source);
 
         // Spawn prefetch for next file immediately
         // Only prefetch if:
@@ -821,7 +821,7 @@ impl ReaderFSM {
                     "Queue '{}' - file {} begins at {} while entry {} was still owed: ids \
                      {}..{} reach no file this read can see, and the entries above them are \
                      returned without them",
-                    ctx.queue, ctx.file_id, header.num_entries_before, ctx.next_id,
+                    ctx.queue.short(), ctx.file_id, header.num_entries_before, ctx.next_id,
                     ctx.next_id, header.num_entries_before);
             }
         }
@@ -842,7 +842,7 @@ impl ReaderFSM {
             Ok(ReadRangeResult::Complete) => {
                 log::debug!(target: "normfs-reader-fsm",
                     "Read completed from {:?}: queue={}, file_id={}",
-                    data_source, ctx.queue, ctx.file_id);
+                    data_source, ctx.queue.short(), ctx.file_id);
                 Ok(ReaderState::Completed)
             }
             Ok(ReadRangeResult::PartialRead {
@@ -851,7 +851,7 @@ impl ReaderFSM {
             }) => {
                 log::trace!(target: "normfs-reader-fsm",
                     "Partial read from {:?}: queue={}, file_id={}, last_id_in_file={}",
-                    data_source, ctx.queue, ctx.file_id, last_id_in_file);
+                    data_source, ctx.queue.short(), ctx.file_id, last_id_in_file);
 
                 // Calculate next_id for next file
                 let new_next_id = if let Some(last_read) = last_read_id {
@@ -872,13 +872,13 @@ impl ReaderFSM {
             Ok(ReadRangeResult::ChannelClosed) => {
                 log::debug!(target: "normfs-reader-fsm",
                     "Channel closed during parse from {:?}: queue={}, file_id={}",
-                    data_source, ctx.queue, ctx.file_id);
+                    data_source, ctx.queue.short(), ctx.file_id);
                 Ok(ReaderState::Failed(Error::ClientDisconnected))
             }
             Err(e) => {
                 log::warn!(target: "normfs-reader-fsm",
                     "Corrupted WAL bytes cannot be restored, moving to next file: queue={}, file_id={}, error={:?}, source={:?}",
-                    ctx.queue, ctx.file_id, e, data_source);
+                    ctx.queue.short(), ctx.file_id, e, data_source);
                 // Parse errors indicate corrupted WAL data
                 // Cannot restore corrupted data, so skip to next file and continue reading
                 Ok(ReaderState::ReadNextFile {
@@ -902,7 +902,7 @@ impl ReaderFSM {
 
         log::trace!(target: "normfs-reader-fsm",
             "Checking if more files exist: queue={}, current_file={}, next_id={}, has_prefetch={}",
-            ctx.queue, current_file, ctx.next_id, prefetch_handle.is_some());
+            ctx.queue.short(), current_file, ctx.next_id, prefetch_handle.is_some());
 
         // Check if next_id is beyond the queue's last entry
         // If so, we've read all available data - complete the read.
@@ -943,7 +943,7 @@ impl ReaderFSM {
             if result.success {
                 log::debug!(target: "normfs-reader-fsm",
                     "Completed read from memory: queue={}",
-                    ctx.queue);
+                    ctx.queue.short());
                 return Ok(ReaderState::Completed);
             }
         } else {
@@ -962,7 +962,7 @@ impl ReaderFSM {
                 if let Some(_sub_id) = result.subscription_id {
                     log::debug!(target: "normfs-reader-fsm",
                         "Subscribed to memory: queue={}, subscription_id={}",
-                        ctx.queue, _sub_id);
+                        ctx.queue.short(), _sub_id);
                     return Ok(ReaderState::Subscribed);
                 }
             }
@@ -989,20 +989,20 @@ impl ReaderFSM {
         if last_file_id.is_none_or(|last| next_file_id > last) {
             log::debug!(target: "normfs-reader-fsm",
                 "No file after {} for queue {}, completing read",
-                current_file, ctx.queue);
+                current_file, ctx.queue.short());
             return Ok(ReaderState::Completed);
         }
 
         if let Some(handle) = prefetch_handle {
             log::trace!(target: "normfs-reader-fsm",
                 "Checking prefetch result for file: queue={}, file_id={}",
-                ctx.queue, next_file_id);
+                ctx.queue.short(), next_file_id);
 
             match handle.await {
                 Ok(Ok(Some((wal_bytes, source)))) => {
                     log::debug!(target: "normfs-reader-fsm",
                         "Prefetch succeeded! Using cached data: queue={}, file_id={}, source={:?}, bytes={}",
-                        ctx.queue, next_file_id, source, wal_bytes.len());
+                        ctx.queue.short(), next_file_id, source, wal_bytes.len());
                     // Prefetch succeeded! Go directly to ParseWalBytes with prefetched data
                     return Ok(ReaderState::ParseWalBytes {
                         ctx: ctx.with_file_id(next_file_id),
@@ -1025,7 +1025,7 @@ impl ReaderFSM {
 
                     log::debug!(target: "normfs-reader-fsm",
                         "Prefetch: file not found in any backend (skipped file): queue={}, file_id={}",
-                        ctx.queue, next_file_id);
+                        ctx.queue.short(), next_file_id);
                     // File not found - this is a skipped file, try next file
                     // Recurse to ReadNextFile for the next file (no prefetch handle)
                     return Ok(ReaderState::ReadNextFile {
@@ -1037,14 +1037,14 @@ impl ReaderFSM {
                 Ok(Err(e)) => {
                     log::error!(target: "normfs-reader-fsm",
                         "Prefetch failed with error: queue={}, file_id={}, error={:?}",
-                        ctx.queue, next_file_id, e);
+                        ctx.queue.short(), next_file_id, e);
                     // Real error from prefetch (IO, network, etc.)
                     return Ok(ReaderState::Failed(e));
                 }
                 Err(e) => {
                     log::error!(target: "normfs-reader-fsm",
                         "Prefetch task panicked: queue={}, file_id={}, error={:?}",
-                        ctx.queue, next_file_id, e);
+                        ctx.queue.short(), next_file_id, e);
                     // Task panic
                     return Ok(ReaderState::Failed(Error::Io(std::io::Error::other(
                         format!("Prefetch task panicked: {}", e),
@@ -1056,7 +1056,7 @@ impl ReaderFSM {
         // No prefetch or prefetch not available - use normal backend cascade
         log::trace!(target: "normfs-reader-fsm",
             "No prefetch available, using normal cascade: queue={}, file_id={}",
-            ctx.queue, next_file_id);
+            ctx.queue.short(), next_file_id);
 
         Ok(ReaderState::ReadFile {
             ctx: ctx.with_file_id(next_file_id),

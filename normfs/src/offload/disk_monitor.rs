@@ -580,7 +580,7 @@ impl QueueMonitor {
         log::info!(
             target: "normfs::disk_monitor",
             "Queue '{}' size {} exceeds limit {}, need to free {} bytes",
-            self.queue_id,
+            self.queue_id.short(),
             current_size,
             max_size,
             to_free
@@ -594,7 +594,7 @@ impl QueueMonitor {
                     log::warn!(
                         target: "normfs::disk_monitor",
                         "Queue '{}' over its limit but nothing is offloaded to S3 yet; deleting nothing",
-                        self.queue_id
+                        self.queue_id.short()
                     );
                     self.report_blocked(EvictionBlock::NotOffloaded, None, current_size);
                     return Ok(());
@@ -614,7 +614,7 @@ impl QueueMonitor {
                 log::warn!(
                     target: "normfs::disk_monitor",
                     "No files found to delete for queue '{}'",
-                    self.queue_id
+                    self.queue_id.short()
                 );
                 self.report_blocked(EvictionBlock::NothingFound, None, current_size);
                 return Ok(());
@@ -666,7 +666,7 @@ impl QueueMonitor {
                         event.kind,
                         event.id,
                         event.size,
-                        self.queue_id,
+                        self.queue_id.short(),
                         current_size.saturating_sub(event.freed)
                     );
                 }
@@ -675,7 +675,7 @@ impl QueueMonitor {
                     "Failed to delete {} file {} of queue '{}': {}",
                     event.kind,
                     event.id,
-                    self.queue_id,
+                    self.queue_id.short(),
                     e
                 ),
             }
@@ -687,7 +687,7 @@ impl QueueMonitor {
                 log::info!(
                     target: "normfs::disk_monitor",
                     "No more files to delete for queue '{}', stopping cleanup at id {}",
-                    self.queue_id,
+                    self.queue_id.short(),
                     eviction.next
                 );
                 self.report_blocked(EvictionBlock::NothingFound, Some(eviction.next), left);
@@ -697,7 +697,7 @@ impl QueueMonitor {
                     target: "normfs::disk_monitor",
                     "Skipping deletion of file {} of queue '{}' - not yet offloaded to S3",
                     eviction.next,
-                    self.queue_id
+                    self.queue_id.short()
                 );
                 self.report_blocked(EvictionBlock::NotOffloaded, Some(eviction.next), left);
             }
@@ -705,7 +705,7 @@ impl QueueMonitor {
                 log::warn!(
                     target: "normfs::disk_monitor",
                     "Cleanup of queue '{}' holds at id {} until it can be deleted",
-                    self.queue_id,
+                    self.queue_id.short(),
                     eviction.next
                 );
                 self.report_blocked(EvictionBlock::DeleteFailed, Some(eviction.next), left);
@@ -729,7 +729,7 @@ impl QueueMonitor {
             log::debug!(
                 target: "normfs::disk_monitor",
                 "Queue '{}' size {} is within limit {}",
-                self.queue_id,
+                self.queue_id.short(),
                 current_size,
                 self.config.max_size
             );
@@ -778,7 +778,7 @@ impl DiskMonitor {
                                 log::error!(
                                     target: "normfs::disk_monitor",
                                     "Error checking queue '{}': {}",
-                                    queue_id,
+                                    queue_id.short(),
                                     e
                                 );
                             }
@@ -828,7 +828,7 @@ impl DiskMonitor {
         log::info!(
             target: "normfs::disk_monitor",
             "Added disk monitoring for queue '{}' with max_size: {} (S3 offloading: {})",
-            queue_id,
+            queue_id.short(),
             monitors.get(queue_id).unwrap().config.max_size,
             if has_offloader { "enabled" } else { "disabled" }
         );

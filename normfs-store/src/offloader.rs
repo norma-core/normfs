@@ -120,7 +120,10 @@ impl QueueOffloader {
     }
 
     async fn offload_worker(worker: QueueOffloaderWorker, shared: Arc<Shared>) {
-        info!("Starting offload worker for queue_id: {}", worker.queue_id);
+        info!(
+            "Starting offload worker for queue_id: {}",
+            worker.queue_id.short()
+        );
         // Files landed meanwhile move while the scan is retried; the bound
         // waits for it, since a file it has not found may lie below.
         let mut scanned = false;
@@ -174,7 +177,8 @@ impl QueueOffloader {
                                 warn!(
                                     "queue {}: {} landed records dropped while the offloaded \
                                      bound is unknown",
-                                    worker.queue_id, dropped
+                                    worker.queue_id.short(),
+                                    dropped
                                 );
                             }
                         }
@@ -235,7 +239,9 @@ impl Moved {
                         warn!(
                             "queue {}: cannot find where its files start ({}, {} tries); \
                              the offloaded bound waits",
-                            worker.queue_id, e, self.start_failures
+                            worker.queue_id.short(),
+                            e,
+                            self.start_failures
                         );
                     }
                 }
@@ -267,7 +273,9 @@ impl Moved {
                                 warn!(
                                     "queue {}: cannot list its files ({}, {} tries); the \
                                      offloaded bound waits",
-                                    worker.queue_id, e, self.list_failures
+                                    worker.queue_id.short(),
+                                    e,
+                                    self.list_failures
                                 );
                             }
                             break;
@@ -321,7 +329,9 @@ impl Moved {
             warn!(
                 "queue {}: the offloaded bound has stayed below file {:?} for over {:?} with \
                  later files moved; eviction stops there until the bound passes it",
-                worker.queue_id, held.id, HELD_WARN
+                worker.queue_id.short(),
+                held.id,
+                HELD_WARN
             );
         }
     }
@@ -377,7 +387,9 @@ impl QueueOffloaderWorker {
                     error!(
                         "Failed to scan store files of queue {} ({} tries): {}, retrying \
                          in 1 second",
-                        self.queue_id, failures, e
+                        self.queue_id.short(),
+                        failures,
+                        e
                     );
                 }
                 return false;
@@ -480,7 +492,9 @@ impl QueueOffloaderWorker {
                     warn!(
                         "queue {}: cannot tell whether file {:?} may still land ({}); \
                          the offloaded bound waits for it",
-                        self.queue_id, file_id, e
+                        self.queue_id.short(),
+                        file_id,
+                        e
                     );
                     return true;
                 }
@@ -518,7 +532,11 @@ impl QueueOffloaderWorker {
                     first_put.get_or_insert_with(Instant::now);
                     match self.upload_file(file_id, attempt).await {
                         Ok(uploaded) => {
-                            info!("Successfully uploaded file {:?}", file_id);
+                            info!(
+                                "Successfully uploaded file {:?} of {}",
+                                file_id,
+                                self.queue_id.short()
+                            );
                             let landed = uploaded.facts.map(|file| SystemEvent::FileLanded {
                                 file,
                                 key: uploaded.key,
@@ -555,7 +573,10 @@ impl QueueOffloaderWorker {
                     if remote_failures.is_power_of_two() {
                         error!(
                             "Failed to move file {:?} of {} ({} tries): {}, retrying in 1 second",
-                            file_id, self.queue_id, remote_failures, e
+                            file_id,
+                            self.queue_id.short(),
+                            remote_failures,
+                            e
                         );
                     }
                     tokio::time::sleep(RETRY_DELAY).await;
@@ -620,7 +641,9 @@ impl QueueOffloaderWorker {
             .inspect_err(|e| {
                 warn!(
                     "Uploaded file {:?} of {} but its blocks do not parse: {}",
-                    file_id, self.queue_id, e
+                    file_id,
+                    self.queue_id.short(),
+                    e
                 )
             })
             .ok();
@@ -668,7 +691,8 @@ impl QueueOffloaderWorker {
         let (Ok(Some(head)), Ok(Some(len))) = (head, len) else {
             warn!(
                 "File {:?} of {} landed but cannot be read back for its facts",
-                file_id, self.queue_id
+                file_id,
+                self.queue_id.short()
             );
             return None;
         };
@@ -676,7 +700,9 @@ impl QueueOffloaderWorker {
             .inspect_err(|e| {
                 warn!(
                     "Uploaded file {:?} of {} but its blocks do not parse: {}",
-                    file_id, self.queue_id, e
+                    file_id,
+                    self.queue_id.short(),
+                    e
                 )
             })
             .ok()

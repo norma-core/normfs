@@ -117,7 +117,7 @@ impl SealedFileSink for LayerSink {
                         landed_through: file_id.clone(),
                     }),
                     Err(e) => log::warn!(target: "normfs-store",
-                        "queue {queue}: file {file_id} landed but its blocks do not parse: {e}"),
+                        "queue {}: file {file_id} landed but its blocks do not parse: {e}", queue.short()),
                 },
                 _ => store_file::report_stored(self.events.as_ref(), queue, file_id, file),
             }

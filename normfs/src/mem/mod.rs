@@ -1173,7 +1173,7 @@ impl MemStore {
             log::debug!(target: "normfs-mem",
                 "Starting queue '{}' with last_id: {:?}, {} pages ({} KiB) from the {:?} arena \
                  ({} of {} still free)",
-                queue, last_id, new_queue.pages, new_queue.pages * arena.page_size() / 1024,
+                queue.short(), last_id, new_queue.pages, new_queue.pages * arena.page_size() / 1024,
                 pool, arena.free_pages(), arena.page_count());
             queues.insert(queue.clone(), new_queue);
         }
@@ -1307,7 +1307,7 @@ impl MemStore {
     }
 
     pub fn ack(&self, queue: &QueueId, id: &UintN) {
-        log::debug!(target: "normfs-mem", "Acknowledging entry in queue '{}' - Entry ID: {}", queue, id);
+        log::debug!(target: "normfs-mem", "Acknowledging entry in queue '{}' - Entry ID: {}", queue.short(), id);
         let queues = self.queues.read().unwrap();
         if let Some(mem_queue) = queues.get(queue) {
             mem_queue.ack(id);
@@ -1323,7 +1323,7 @@ impl MemStore {
         target_chan: &Sender<ReadEntry>,
     ) -> MemReadResult {
         log::debug!(target: "normfs-mem", "Reading from queue '{}' - Start ID: {}, End ID: {}",
-            queue, start_id, end_id);
+            queue.short(), start_id, end_id);
 
         let mem_queue = self.queues.read().unwrap().get(queue).cloned();
 
@@ -1331,10 +1331,10 @@ impl MemStore {
             let result = mem_queue
                 .read_full(start_id, end_id, step, target_chan)
                 .await;
-            log::debug!(target: "normfs-mem", "Read from queue '{}' completed - Success: {}", queue, result.success);
+            log::debug!(target: "normfs-mem", "Read from queue '{}' completed - Success: {}", queue.short(), result.success);
             result
         } else {
-            log::warn!(target: "normfs-mem", "Queue '{}' not found for read", queue);
+            log::warn!(target: "normfs-mem", "Queue '{}' not found for read", queue.short());
             MemReadResult::fail()
         }
     }
@@ -1348,7 +1348,7 @@ impl MemStore {
         target_chan: &Sender<ReadEntry>,
     ) -> MemReadResult {
         log::debug!(target: "normfs-mem", "Starting follow_full from queue '{}' - Start ID: {}",
-            queue, start_id);
+            queue.short(), start_id);
 
         let mem_queue = self.queues.read().unwrap().get(queue).cloned();
 
@@ -1357,10 +1357,10 @@ impl MemStore {
                 .follow_full(from_id, start_id, step, target_chan)
                 .await;
             log::debug!(target: "normfs-mem", "Follow_full from queue '{}' - Success: {}, Subscription ID: {:?}",
-                queue, result.success, result.subscription_id);
+                queue.short(), result.success, result.subscription_id);
             result
         } else {
-            log::warn!(target: "normfs-mem", "Queue '{}' not found for follow_full", queue);
+            log::warn!(target: "normfs-mem", "Queue '{}' not found for follow_full", queue.short());
             MemReadResult::fail()
         }
     }
@@ -1374,7 +1374,7 @@ impl MemStore {
         target_chan: &Sender<ReadEntry>,
     ) -> MemReadResult {
         log::debug!(target: "normfs-mem", "Reading negative from queue '{}' - Offset: {}, Limit: {}",
-            queue, offset, limit);
+            queue.short(), offset, limit);
 
         let mem_queue = self.queues.read().unwrap().get(queue).cloned();
 
@@ -1383,10 +1383,10 @@ impl MemStore {
                 .read_full_negative(offset, step, limit, target_chan)
                 .await;
             log::debug!(target: "normfs-mem", "Read negative from queue '{}' completed - Success: {}, Start ID: {:?}",
-                queue, result.success, result.start_id);
+                queue.short(), result.success, result.start_id);
             result
         } else {
-            log::warn!(target: "normfs-mem", "Queue '{}' not found for read_full_negative", queue);
+            log::warn!(target: "normfs-mem", "Queue '{}' not found for read_full_negative", queue.short());
             MemReadResult::fail()
         }
     }
@@ -1399,7 +1399,7 @@ impl MemStore {
         target_chan: &Sender<ReadEntry>,
     ) -> MemReadResult {
         log::debug!(target: "normfs-mem", "Starting follow_full_negative from queue '{}' - Offset: {}",
-            queue, offset);
+            queue.short(), offset);
 
         let mem_queue = self.queues.read().unwrap().get(queue).cloned();
 
@@ -1408,16 +1408,16 @@ impl MemStore {
                 .follow_full_negative(offset, step, target_chan)
                 .await;
             log::debug!(target: "normfs-mem", "Follow_full_negative from queue '{}' - Success: {}, Subscription ID: {:?}, Start ID: {:?}",
-                queue, result.success, result.subscription_id, result.start_id);
+                queue.short(), result.success, result.subscription_id, result.start_id);
             result
         } else {
-            log::warn!(target: "normfs-mem", "Queue '{}' not found for follow_full_negative", queue);
+            log::warn!(target: "normfs-mem", "Queue '{}' not found for follow_full_negative", queue.short());
             MemReadResult::fail()
         }
     }
 
     pub fn subscribe(&self, queue: &QueueId, callback: SubscriberCallback) -> Option<usize> {
-        log::debug!(target: "normfs-mem", "Subscribing to queue '{}'", queue);
+        log::debug!(target: "normfs-mem", "Subscribing to queue '{}'", queue.short());
 
         let mem_queue = self.queues.read().unwrap().get(queue).cloned();
 
@@ -1425,20 +1425,20 @@ impl MemStore {
             let subscriber_id = mem_queue.subscribe(callback);
             Some(subscriber_id)
         } else {
-            log::warn!(target: "normfs-mem", "Queue '{}' not found for subscription", queue);
+            log::warn!(target: "normfs-mem", "Queue '{}' not found for subscription", queue.short());
             None
         }
     }
 
     pub fn unsubscribe(&self, queue: &QueueId, subscriber_id: usize) {
-        log::debug!(target: "normfs-mem", "Unsubscribing from queue '{}'", queue);
+        log::debug!(target: "normfs-mem", "Unsubscribing from queue '{}'", queue.short());
 
         let mem_queue = self.queues.read().unwrap().get(queue).cloned();
 
         if let Some(mem_queue) = mem_queue {
             mem_queue.unsubscribe(subscriber_id);
         } else {
-            log::warn!(target: "normfs-mem", "Queue '{}' not found for unsubscription", queue);
+            log::warn!(target: "normfs-mem", "Queue '{}' not found for unsubscription", queue.short());
         }
     }
 }

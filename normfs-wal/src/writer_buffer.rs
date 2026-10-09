@@ -55,7 +55,7 @@ impl OrderedBuffer {
             log::info!(
                 target: "normfs",
                 "WAL writer buffer [{}]: waiting for order, buffer size: {}, waiting for: {}, received: {}",
-                self.queue_id,
+                self.queue_id.short(),
                 buffer_size,
                 expected_id,
                 id
@@ -64,7 +64,7 @@ impl OrderedBuffer {
             log::debug!(
                 target: "normfs",
                 "WAL writer buffer [{}]: waiting for order, buffer size: {}, waiting for: {}, received: {}",
-                self.queue_id,
+                self.queue_id.short(),
                 buffer_size,
                 expected_id,
                 id
@@ -105,7 +105,7 @@ impl OrderedBuffer {
                 log::info!(
                     target: "normfs",
                     "WAL writer buffer [{}]: wait resolved, released {} entries from buffer, remaining buffer size: {}",
-                    self.queue_id,
+                    self.queue_id.short(),
                     ready.len(),
                     self.pending.len()
                 );
@@ -113,7 +113,7 @@ impl OrderedBuffer {
                 log::debug!(
                     target: "normfs",
                     "WAL writer buffer [{}]: wait resolved, released {} entries from buffer, remaining buffer size: {}",
-                    self.queue_id,
+                    self.queue_id.short(),
                     ready.len(),
                     self.pending.len()
                 );
