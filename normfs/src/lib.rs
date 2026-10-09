@@ -1044,12 +1044,13 @@ impl NormFS {
         None
     }
 
-    /// Reports ids that no file holds, walking down from the file recovery is
-    /// resuming after.
+    /// Reports ids that no file holds, or that two files hold, walking down from
+    /// the file recovery is resuming after.
     ///
     /// No entry body is read: file F's `num_entries_before` should be one past
-    /// the last id of the file below it, and the difference when it is not is
-    /// exactly what a failed closing flush lost.
+    /// the last id of the file below it. Above it, the difference is exactly what
+    /// a failed closing flush lost; below it, a second process recovered the
+    /// queue while the first was still writing it.
     ///
     /// Nothing is deleted or set aside. Those records were fsynced and acked
     /// normally while the torn file waited for a retry a crash cut short, so
@@ -1084,13 +1085,35 @@ impl NormFS {
                 upper = lower;
                 continue;
             }
-            log::error!(target: "normfs",
-                "Queue '{}' - ids {}..{} reach no file: file {} ends at {} and file {} starts \
-                 at {}. A closing flush lost them and the retry did not land before the \
-                 process ended. Nothing is discarded to close the gap -- the records above it \
-                 were reported durable -- so reads for those ids find nothing.",
-                queue.short(), expected, header.num_entries_before, lower, lower_last, upper,
-                header.num_entries_before);
+            if header.num_entries_before < expected {
+                // Only ids both files hold: the later start to the earlier end.
+                let lower_first = self
+                    .get_file_header_all_sources(queue, &lower)
+                    .await
+                    .map(|h| h.num_entries_before);
+                let upper_last = self.get_file_end_all_sources(queue, &upper).await;
+                if let (Some(lower_first), Some(upper_last)) = (lower_first, upper_last) {
+                    let first = header.num_entries_before.clone().max(lower_first);
+                    let last = upper_last.min(lower_last.clone());
+                    if first <= last {
+                        log::error!(target: "normfs",
+                            "Queue '{}' - ids {}..={} are in two files: file {} ends at {} and \
+                             file {} starts at {}. Another process was still writing the queue \
+                             when this one recovered it, so both wrote those ids; a read gets \
+                             one of the two.",
+                            queue.short(), first, last, lower, lower_last, upper,
+                            header.num_entries_before);
+                    }
+                }
+            } else {
+                log::error!(target: "normfs",
+                    "Queue '{}' - ids {}..{} reach no file: file {} ends at {} and file {} \
+                     starts at {}. A closing flush lost them and the retry did not land before \
+                     the process ended. Nothing is discarded to close the gap -- the records \
+                     above it were reported durable -- so reads for those ids find nothing.",
+                    queue.short(), expected, header.num_entries_before, lower, lower_last, upper,
+                    header.num_entries_before);
+            }
 
             if link + 1 == MAX_LINKS {
                 log::error!(target: "normfs",
