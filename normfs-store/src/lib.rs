@@ -41,6 +41,8 @@ mod offloader_test;
 #[cfg(test)]
 mod page_writer_test;
 #[cfg(test)]
+mod sink_test;
+#[cfg(test)]
 mod writer_test;
 
 #[cfg(test)]

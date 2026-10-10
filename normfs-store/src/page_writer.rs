@@ -152,6 +152,7 @@ struct Task {
 /// records stay on their pinned pages, so a failed attempt drops it and the
 /// next one builds it again.
 struct Built {
+    file_id: UintN,
     sealed: SealedFile,
     header: WalHeader,
     first_entry_id: u64,
@@ -216,7 +217,7 @@ impl Task {
 
     /// Off the runtime: three queues sealing at once on a four-core box
     /// starved everything else, including the appenders whose pages this frees.
-    async fn build(&self, runs: &FileRuns) -> Result<Built, String> {
+    async fn build(&self, runs: &FileRuns, file_id: &UintN) -> Result<Built, String> {
         let first = UintN::from(runs.first_entry_id);
         let last = UintN::from(runs.last_entry_id);
         let num_entries = UintN::from(runs.last_entry_id - runs.first_entry_id + 1);
@@ -244,16 +245,17 @@ impl Task {
         let (packer, queue, file_id, crypto) = (
             self.packer.clone(),
             self.queue.clone(),
-            self.file_id.clone(),
+            file_id.clone(),
             self.crypto.clone(),
         );
         let (compression, encryption) = (self.settings.compression, self.settings.encryption);
+        let sealed_id = file_id.clone();
         let sealed = tokio::task::spawn_blocking(move || {
             packer.seal(
                 slot,
                 len,
                 &queue,
-                &file_id,
+                &sealed_id,
                 compression,
                 encryption,
                 first,
@@ -265,6 +267,7 @@ impl Task {
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;
         Ok(Built {
+            file_id,
             sealed,
             header,
             first_entry_id: runs.first_entry_id,
@@ -280,27 +283,29 @@ impl Task {
         let mut close_attempts = 0u32;
         let mut delay = self.settings.retry_delay;
         let mut attempt: u32 = 0;
+        let mut tried = self.file_id.clone();
         loop {
-            let built = match self.build(runs).await {
-                Ok(built) => built,
-                Err(e) => {
-                    log::error!(target: "normfs-store",
-                        "cannot build store file {} for queue {} (entries {}..={}): {e}; \
-                         these records reach no file",
-                        self.file_id, self.queue.short(), runs.first_entry_id, runs.last_entry_id);
-                    return None;
+            let e = match self.sink.file_id(&self.queue, &self.file_id).await {
+                Ok(file_id) => {
+                    tried = file_id.clone();
+                    let built = match self.build(runs, &file_id).await {
+                        Ok(built) => built,
+                        Err(e) => {
+                            log::error!(target: "normfs-store",
+                                "cannot build store file {} for queue {} (entries {}..={}): {e}; \
+                                 these records reach no file",
+                                file_id, self.queue.short(), runs.first_entry_id, runs.last_entry_id);
+                            return None;
+                        }
+                    };
+                    // On failure the slot goes back while this waits.
+                    match self.sink.land(&self.queue, &file_id, &built.sealed).await {
+                        Ok(()) => return Some(built),
+                        Err(e) => e,
+                    }
                 }
-            };
-            let landed = self
-                .sink
-                .land(&self.queue, &self.file_id, &built.sealed)
-                .await;
-            let e = match landed {
-                Ok(()) => return Some(built),
                 Err(e) => e,
             };
-            // The slot goes back while this waits.
-            drop(built);
             attempt = attempt.saturating_add(1);
             if *closing.borrow_and_update() {
                 if close_attempts == 0 {
@@ -314,7 +319,7 @@ impl Task {
             if attempt == 1 || attempt.is_multiple_of(LAND_WARN_EVERY) {
                 log::warn!(target: "normfs-store",
                     "store file {} for queue {} did not land (attempt {attempt}): {e}",
-                    self.file_id, self.queue.short());
+                    tried, self.queue.short());
             }
             if *closing.borrow() || closing.has_changed().is_err() {
                 tokio::time::sleep(delay).await;
@@ -341,12 +346,12 @@ impl Task {
                     .send((self.queue.clone(), UintN::from(built.last_entry_id)));
             }
         }
-        self.file_id = self.file_id.increment();
+        self.file_id = built.file_id.increment();
         self.header = built.header;
         self.header.num_entries_before = UintN::from(built.last_entry_id).increment();
         log::debug!(target: "normfs-store",
             "queue {}: entries {}..={} landed as store file {}",
-            self.queue.short(), built.first_entry_id, built.last_entry_id, self.file_id);
+            self.queue.short(), built.first_entry_id, built.last_entry_id, built.file_id);
     }
 }
 

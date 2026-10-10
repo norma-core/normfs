@@ -403,3 +403,73 @@ async fn a_file_that_will_not_land_does_not_keep_the_slot_from_other_queues() {
     assert_eq!(f.pool.durable_before(), 0);
     assert_eq!(next_id(&mut f.written_rx).await, UintN::from(1u64));
 }
+
+/// Lands through the local store, but answers "not yet" to the first two
+/// requests for a file id and then moves the first file to 10.
+struct MovingSink {
+    inner: Arc<dyn SealedFileSink>,
+    refusals: std::sync::atomic::AtomicU32,
+    moved: std::sync::atomic::AtomicBool,
+}
+
+impl SealedFileSink for MovingSink {
+    fn land<'a>(
+        &'a self,
+        queue: &'a QueueId,
+        file_id: &'a UintN,
+        file: &'a SealedFile,
+    ) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + 'a>> {
+        self.inner.land(queue, file_id, file)
+    }
+
+    fn file_id<'a>(
+        &'a self,
+        _queue: &'a QueueId,
+        planned: &'a UintN,
+    ) -> Pin<Box<dyn Future<Output = std::io::Result<UintN>> + Send + 'a>> {
+        use std::sync::atomic::Ordering;
+        Box::pin(async move {
+            if self.refusals.load(Ordering::SeqCst) < 2 {
+                self.refusals.fetch_add(1, Ordering::SeqCst);
+                return Err(std::io::Error::other("bucket unreachable"));
+            }
+            if self.moved.swap(true, Ordering::SeqCst) {
+                Ok(planned.clone())
+            } else {
+                Ok(UintN::from(10u64))
+            }
+        })
+    }
+}
+
+#[tokio::test]
+async fn the_sink_can_move_the_first_file_and_the_writer_counts_on_from_it() {
+    let mut f = fixture(4);
+    let (_, wal_done_rx) = mpsc::unbounded_channel();
+    let _store_done_rx = f.store.start_writers(wal_done_rx).await;
+    let sink = Arc::new(MovingSink {
+        inner: f.store.local_sink(true),
+        refusals: Default::default(),
+        moved: Default::default(),
+    });
+    let writer = start(&f, sink, 1);
+
+    for i in 0..3u64 {
+        f.pool.place(i, &RECORD).await.unwrap();
+    }
+    assert_eq!(next_id(&mut f.written_rx).await, UintN::from(1u64));
+    assert!(writer.close().await);
+
+    // Sealed under the id it landed as: the read verifies the signature.
+    assert_eq!(read_back(&f, 10).await, (0, vec![RECORD.to_vec(); 2]));
+    assert_eq!(read_back(&f, 11).await, (2, vec![RECORD.to_vec()]));
+    for unused in [1u64, 2] {
+        assert!(
+            f.store
+                .get_store_bytes(&f.queue, &UintN::from(unused))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+}

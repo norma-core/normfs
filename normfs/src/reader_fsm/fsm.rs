@@ -812,17 +812,26 @@ impl ReaderFSM {
 
         // Every entry at or above the id asked for is delivered, so a file
         // that begins above it reads as a valid answer and the walk moves on.
-        // The records in between are never requested again and the caller
-        // sees a complete read; the gap is real either way, but it is not
-        // something to pass over in silence.
+        // A queue that was ever cloud-direct skips the rest of its id reserve
+        // on a restart without the bucket, so there a gap is expected, in
+        // whatever mode it is now; elsewhere it is a lost flush. Either way it
+        // is not passed over in silence.
         if let Ok(header) = normfs_wal::get_wal_header(&wal_bytes) {
             if header.num_entries_before > ctx.next_id {
-                log::error!(target: "normfs-reader-fsm",
+                let (level, why) = if self.pointers.last_id(&ctx.queue).is_some() {
+                    (
+                        log::Level::Warn,
+                        "as after a restart that skipped an id reserve",
+                    )
+                } else {
+                    (log::Level::Error, "lost to a failed flush")
+                };
+                log::log!(target: "normfs-reader-fsm", level,
                     "Queue '{}' - file {} begins at {} while entry {} was still owed: ids \
-                     {}..{} reach no file this read can see, and the entries above them are \
-                     returned without them",
+                     {}..{} reach no file, {}, and the entries above them are returned \
+                     without them",
                     ctx.queue.short(), ctx.file_id, header.num_entries_before, ctx.next_id,
-                    ctx.next_id, header.num_entries_before);
+                    ctx.next_id, header.num_entries_before, why);
             }
         }
 
