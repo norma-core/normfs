@@ -168,64 +168,132 @@ async fn a_record_whose_write_failed_is_written_on_retry() {
 }
 
 #[tokio::test]
-async fn lines_older_versions_kept_for_memory_queues_become_memory_ids() {
+async fn lines_0_4_2_kept_for_memory_queues_stay_marks() {
     let dir = tempfile::tempdir().unwrap();
     let fs = Fs::new(FsConfig::default()).unwrap();
     let resolver = QueueIdResolver::new("instance");
     let (memory, cloud) = (resolver.resolve("memory"), resolver.resolve("cloud"));
-    let lines = format!("{}\t5\n{}\t7\t2\n", memory.as_str(), cloud.as_str());
-    let path = dir.path().join(".memory_pointers");
+    let old = format!(
+        "# normfs memory-only pointers v1\n{}\t5\n{}\t7\t2\n",
+        memory.as_str(),
+        cloud.as_str()
+    );
+    std::fs::write(dir.path().join(".memory_pointers"), old).unwrap();
 
-    std::fs::write(&path, format!("# normfs memory-only pointers v1\n{lines}")).unwrap();
-    let old = MemoryPointers::open(fs.clone(), dir.path()).await.unwrap();
-    assert_eq!(old.last_id(&memory), None);
-    assert_eq!(old.used_id(&memory), Some(UintN::from(5u64)));
-    assert_eq!(old.last_id(&cloud), Some(UintN::from(7u64)));
-    old.flush_if_dirty().await.unwrap();
-    let moved = MemoryPointers::open(fs.clone(), dir.path()).await.unwrap();
-    assert_eq!(moved.last_id(&memory), None);
-    assert_eq!(moved.used_id(&memory), Some(UintN::from(5u64)));
-
-    // A reserve written since then has no file either, and stays.
-    std::fs::write(&path, format!("# normfs pointers v1\n{lines}")).unwrap();
-    let new = MemoryPointers::open(fs, dir.path()).await.unwrap();
-    assert_eq!(new.last_id(&memory), Some(UintN::from(5u64)));
-}
-
-#[tokio::test]
-async fn a_failing_memory_ids_write_holds_up_no_cloud_reserve() {
-    let dir = tempfile::tempdir().unwrap();
-    let fs = Fs::new(FsConfig::default()).unwrap();
-    let pointers = MemoryPointers::open(fs, dir.path()).await.unwrap();
-    let resolver = QueueIdResolver::new("instance");
-    let (memory, cloud) = (resolver.resolve("memory"), resolver.resolve("cloud"));
-    std::fs::create_dir(dir.path().join(".memory_ids.tmp")).unwrap();
-
-    pointers.mark(&memory, &UintN::from(3u64)).unwrap();
-    pointers.reserve(&cloud, &UintN::from(1u64)).await.unwrap();
-    assert!(pointers.flush_memory_ids().await.is_err());
-
-    std::fs::remove_dir(dir.path().join(".memory_ids.tmp")).unwrap();
-    pointers.flush_memory_ids().await.unwrap();
-    let fs = Fs::new(FsConfig::default()).unwrap();
-    let recovered = MemoryPointers::open(fs, dir.path()).await.unwrap();
-    assert_eq!(recovered.used_id(&memory), Some(UintN::from(3u64)));
-}
-
-#[tokio::test]
-async fn old_memory_lines_stay_put_until_their_new_file_is_written() {
-    let dir = tempfile::tempdir().unwrap();
-    let fs = Fs::new(FsConfig::default()).unwrap();
-    let memory = QueueIdResolver::new("instance").resolve("memory");
-    let path = dir.path().join(".memory_pointers");
-    let old = format!("# normfs memory-only pointers v1\n{}\t5\n", memory.as_str());
-    std::fs::write(&path, &old).unwrap();
-    std::fs::create_dir(dir.path().join(".memory_ids.tmp")).unwrap();
-
-    assert!(MemoryPointers::open(fs.clone(), dir.path()).await.is_err());
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), old);
-
-    std::fs::remove_dir(dir.path().join(".memory_ids.tmp")).unwrap();
     let pointers = MemoryPointers::open(fs, dir.path()).await.unwrap();
     assert_eq!(pointers.used_id(&memory), Some(UintN::from(5u64)));
+    assert_eq!(pointers.last_landed(&memory), None);
+    assert!(pointers.is_settled(&memory), "a memory line names no file");
+    assert_eq!(
+        pointers.last_landed(&cloud),
+        Some((UintN::from(7u64), UintN::from(2u64)))
+    );
+    assert!(!pointers.is_settled(&cloud));
+}
+
+#[tokio::test]
+async fn a_marked_entry_zero_is_used_after_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let fs = Fs::new(FsConfig::default()).unwrap();
+    let resolver = QueueIdResolver::new("instance");
+    let (fresh, recorded) = (resolver.resolve("fresh"), resolver.resolve("recorded"));
+    let pointers = MemoryPointers::open(fs.clone(), dir.path()).await.unwrap();
+    pointers.record(&recorded).await.unwrap();
+    pointers.mark(&fresh, &UintN::zero()).unwrap();
+    pointers.mark(&recorded, &UintN::zero()).unwrap();
+    pointers.flush_all().await.unwrap();
+    drop(pointers);
+
+    let pointers = MemoryPointers::open(fs, dir.path()).await.unwrap();
+    assert_eq!(pointers.used_id(&fresh), Some(UintN::zero()));
+    assert_eq!(pointers.used_id(&recorded), Some(UintN::zero()));
+    assert!(pointers.is_settled(&recorded));
+}
+
+#[tokio::test]
+async fn ids_go_on_across_memory_and_cloud_lives_in_one_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let fs = Fs::new(FsConfig::default()).unwrap();
+    let queue = QueueIdResolver::new("instance").resolve("switched");
+    let reopen = || MemoryPointers::open(fs.clone(), dir.path());
+
+    let memory = reopen().await.unwrap();
+    memory.mark(&queue, &UintN::from(4u64)).unwrap();
+    memory.flush_all().await.unwrap();
+    drop(memory);
+
+    let cloud = reopen().await.unwrap();
+    assert_eq!(cloud.used_id(&queue), Some(UintN::from(4u64)));
+    cloud.reserve(&queue, &UintN::from(9u64)).await.unwrap();
+    cloud
+        .mark_landed(&queue, &UintN::from(9u64), &UintN::from(1u64))
+        .await
+        .unwrap();
+    cloud.settle_landed();
+    cloud.flush_all().await.unwrap();
+    drop(cloud);
+
+    let memory = reopen().await.unwrap();
+    assert_eq!(memory.used_id(&queue), Some(UintN::from(9u64)));
+    memory.mark(&queue, &UintN::from(12u64)).unwrap();
+    memory.flush_all().await.unwrap();
+    drop(memory);
+
+    let local = reopen().await.unwrap();
+    assert_eq!(local.used_id(&queue), Some(UintN::from(12u64)));
+    assert_eq!(
+        local.last_landed(&queue).map(|(_, file)| file),
+        Some(UintN::from(1u64))
+    );
+    assert!(
+        local.is_settled(&queue),
+        "a clean cloud life then a memory one"
+    );
+    assert!(!dir.path().join(".memory_ids").exists());
+}
+
+#[tokio::test]
+async fn a_reserve_inside_a_memory_mark_writes_a_cloud_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let fs = Fs::new(FsConfig::default()).unwrap();
+    let queue = QueueIdResolver::new("instance").resolve("switched");
+    let pointers = MemoryPointers::open(fs.clone(), dir.path()).await.unwrap();
+    pointers.mark(&queue, &UintN::from(9u64)).unwrap();
+    pointers.flush_all().await.unwrap();
+    pointers.reserve(&queue, &UintN::from(5u64)).await.unwrap();
+    drop(pointers);
+
+    let crashed = MemoryPointers::open(fs, dir.path()).await.unwrap();
+    assert!(
+        !crashed.is_settled(&queue),
+        "an upload may have landed, so the bucket has to be asked"
+    );
+}
+
+#[tokio::test]
+async fn a_clean_close_does_not_lower_a_line_below_a_memory_mark() {
+    let dir = tempfile::tempdir().unwrap();
+    let fs = Fs::new(FsConfig::default()).unwrap();
+    let queue = QueueIdResolver::new("instance").resolve("switched");
+    std::fs::write(
+        dir.path().join(".memory_pointers"),
+        format!("# normfs pointers v1\n{}\t400\n", queue.as_str()),
+    )
+    .unwrap();
+
+    let pointers = MemoryPointers::open(fs.clone(), dir.path()).await.unwrap();
+    pointers
+        .reserve(&queue, &UintN::from(100u64))
+        .await
+        .unwrap();
+    pointers
+        .mark_landed(&queue, &UintN::from(100u64), &UintN::from(1u64))
+        .await
+        .unwrap();
+    pointers.settle_landed();
+    pointers.flush_all().await.unwrap();
+    drop(pointers);
+
+    let reopened = MemoryPointers::open(fs, dir.path()).await.unwrap();
+    assert_eq!(reopened.used_id(&queue), Some(UintN::from(400u64)));
 }

@@ -1169,3 +1169,46 @@ async fn a_durable_queue_ignores_a_record_an_older_version_kept_for_memory() {
         .unwrap();
     fs.ensure_queue_exists_for_write(&queue).await.unwrap();
 }
+
+/// The cloud can be switched on and off between lives; ids go on across
+/// every switch, all through the one pointers file.
+#[tokio::test]
+async fn ids_go_on_when_the_cloud_is_switched_on_and_off() {
+    let Some((_direct, cloud, _proxy)) = s3_behind_proxy(Link::Up).await else {
+        return;
+    };
+    let temp = tempfile::TempDir::new().unwrap();
+    let life = |persist: Persist, bucket: bool| {
+        let mut settings = persist_settings(&cloud, persist);
+        if !bucket {
+            settings.cloud_settings = None;
+        }
+        let root = temp.path().to_path_buf();
+        async move { NormFS::new(root, settings).await.unwrap() }
+    };
+    let store = Persist {
+        wal: false,
+        store: true,
+        cloud: false,
+    };
+    let mut next = 0;
+    for (n, (persist, bucket)) in [
+        (Persist::MEMORY, true),
+        (Persist::CLOUD, true),
+        (Persist::MEMORY, true),
+        (Persist::CLOUD, true),
+        (store, false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let fs = life(persist, bucket).await;
+        let queue = fs.resolve("switched");
+        fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+        let ids = write(&fs, &queue, 2 * PER_PAGE, n as u8).await;
+        assert_eq!(ids[0], next, "life {n} ({persist:?}) did not go on");
+        next = ids[ids.len() - 1] + 1;
+        fs.close().await.unwrap();
+    }
+    assert!(!temp.path().join(".memory_ids").exists());
+}

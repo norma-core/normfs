@@ -39,7 +39,7 @@ async fn memory_only_persists_latest_pointer_without_wal_or_store() {
         fs.close().await.unwrap();
 
         assert!(root.join(".crypto_seed").exists());
-        assert!(root.join(".memory_ids").exists());
+        assert!(root.join(".memory_pointers").exists());
         assert!(!queue.to_wal_dir(&root).exists());
         assert!(!queue.to_store_dir(&root).exists());
     }

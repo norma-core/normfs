@@ -11,11 +11,6 @@ use uintn::UintN;
 
 const POINTERS_FILE: &str = ".memory_pointers";
 const POINTERS_TMP_FILE: &str = ".memory_pointers.tmp";
-const MEMORY_IDS_FILE: &str = ".memory_ids";
-const MEMORY_IDS_TMP_FILE: &str = ".memory_ids.tmp";
-
-const LEGACY_HEADER: &str = "# normfs memory-only pointers v1\n";
-const MEMORY_IDS_HEADER: &str = "# normfs memory-only queues v1: queue, last id\n";
 
 const HEADER: &str = "# normfs pointers v1: queue, id reserve, last landed file, exact\n";
 /// Fourth column of a queue whose last file no upload can have gone past.
@@ -27,9 +22,11 @@ const EXACT: &str = "exact";
 /// the bucket skips what was left of it.
 pub(crate) const RESERVE_AHEAD: u64 = 1 << 16;
 
-/// What survives a restart of a cloud-direct queue: an id no upload has gone
-/// past, and the last file known to have landed. The file is written lazily,
-/// so it is exact only while the queue is settled; otherwise the bucket is the
+/// What survives a restart: an id no earlier life has gone past, and for a
+/// queue that was ever cloud-direct the last file known to have landed, 0
+/// before the first. A line without a file is a memory life's last id, as in
+/// 0.4.2, so it names no file anywhere. The file is written lazily, so it is
+/// exact only while the queue is settled; otherwise the bucket is the
 /// authority for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Pointer {
@@ -38,10 +35,14 @@ pub(crate) struct Pointer {
 }
 
 impl Pointer {
-    /// What [`MemoryPointers::record`] writes: a queue that used no id yet,
-    /// so its id 0 covers nothing.
+    /// What [`MemoryPointers::record`] writes: a cloud queue that used no id
+    /// yet, so its id 0 covers nothing.
     fn is_bare(&self) -> bool {
-        self.id == 0 && self.file.is_none()
+        self.id == 0 && self.file == Some(0)
+    }
+
+    fn landed_file(&self) -> Option<u64> {
+        self.file.filter(|&f| f > 0)
     }
 }
 
@@ -59,10 +60,9 @@ struct PointerState {
     /// is written there.
     written: HashMap<String, Pointer>,
     written_exact: HashSet<String>,
-    /// Memory-only queues' last ids, kept in their own file so a line there
-    /// is never read as a cloud record.
-    memory: HashMap<String, u64>,
-    memory_dirty: bool,
+    /// The last id a memory life used, which a close never lowers a line
+    /// below: it is the only record of those ids.
+    memory_floor: HashMap<String, u64>,
     #[cfg(test)]
     publishes: u64,
 }
@@ -71,8 +71,6 @@ pub(crate) struct MemoryPointers {
     fs: Fs,
     path: PathBuf,
     tmp_path: PathBuf,
-    memory_path: PathBuf,
-    memory_tmp_path: PathBuf,
     state: Arc<Mutex<PointerState>>,
     flush_lock: Arc<tokio::sync::Mutex<()>>,
 }
@@ -81,69 +79,37 @@ impl MemoryPointers {
     pub(crate) async fn open(fs: Fs, root: &Path) -> Result<Self, Error> {
         let path = root.join(POINTERS_FILE);
         let tmp_path = root.join(POINTERS_TMP_FILE);
-        let memory_path = root.join(MEMORY_IDS_FILE);
-        let memory_tmp_path = root.join(MEMORY_IDS_TMP_FILE);
-        let contents = read_optional(&fs, &path).await?;
-        let legacy = contents
-            .as_deref()
-            .is_some_and(|c| c.starts_with(LEGACY_HEADER));
-        let (mut queues, exact) = match contents {
+        let (queues, exact) = match read_optional(&fs, &path).await? {
             Some(contents) => parse_pointers(&contents)?,
             None => (HashMap::new(), HashSet::new()),
         };
-        let mut memory: HashMap<String, u64> = match read_optional(&fs, &memory_path).await? {
-            Some(contents) => parse_pointers(&contents)?
-                .0
-                .into_iter()
-                .map(|(queue, p)| (queue, p.id))
-                .collect(),
-            None => HashMap::new(),
-        };
-        // Before 0.4.2 memory-only queues shared the file, each a line with no
-        // file; nothing else wrote one without a file then.
-        let mut memory_dirty = false;
-        if legacy {
-            queues.retain(|queue, p| {
-                if p.file.is_some() {
-                    return true;
-                }
-                let id = memory.entry(queue.clone()).or_default();
-                *id = (*id).max(p.id);
-                memory_dirty = true;
-                false
-            });
-        }
-        // Written before the old lines can leave .memory_pointers, so a crash
-        // between the two writes still finds them in one file or the other.
-        if memory_dirty {
-            write_memory_ids(&fs, memory_tmp_path.clone(), memory_path.clone(), &memory).await?;
-        }
-        let dirty = memory_dirty;
         // A bare record never had an upload start: the bucket holds nothing
-        // of it.
+        // of it. A memory life's line names no file.
         let unsettled = queues
             .iter()
-            .filter(|(queue, p)| !exact.contains(*queue) && !p.is_bare())
+            .filter(|(queue, p)| !exact.contains(*queue) && !p.is_bare() && p.file.is_some())
             .map(|(queue, _)| queue.clone())
             .collect();
 
+        let memory_floor = queues
+            .iter()
+            .filter(|(_, p)| p.file.is_none())
+            .map(|(queue, p)| (queue.clone(), p.id))
+            .collect();
         let written = queues.clone();
         Ok(Self {
             fs,
             path,
             tmp_path,
-            memory_path,
-            memory_tmp_path,
             state: Arc::new(Mutex::new(PointerState {
                 queues,
-                dirty,
+                dirty: false,
                 hints: false,
                 unsettled,
                 landed_now: HashMap::new(),
                 written,
                 written_exact: exact,
-                memory,
-                memory_dirty: false,
+                memory_floor,
                 #[cfg(test)]
                 publishes: 0,
             })),
@@ -158,19 +124,14 @@ impl MemoryPointers {
     /// The highest id an earlier life may have used, a memory-only one
     /// included; a bare record says none.
     pub(crate) fn used_id(&self, queue: &QueueId) -> Option<UintN> {
-        let state = self.state.lock().unwrap();
-        let cloud = state
-            .queues
-            .get(queue.as_str())
+        self.pointer(queue)
             .filter(|p| !p.is_bare())
-            .map(|p| p.id);
-        let memory = state.memory.get(queue.as_str()).copied();
-        cloud.max(memory).map(UintN::from)
+            .map(|p| UintN::from(p.id))
     }
 
     pub(crate) fn last_landed(&self, queue: &QueueId) -> Option<(UintN, UintN)> {
         let p = self.pointer(queue)?;
-        Some((UintN::from(p.id), UintN::from(p.file?)))
+        Some((UintN::from(p.id), UintN::from(p.landed_file()?)))
     }
 
     /// Whether the queue's last file is known to be the bucket's last.
@@ -235,6 +196,11 @@ impl MemoryPointers {
         let short = {
             let mut state = self.state.lock().unwrap();
             state.unsettled.insert(queue.as_str().to_string());
+            // A memory life's line covers ids but names no file; an upload
+            // needs a cloud line, or a crash would leave it looking settled.
+            if let Some(p) = state.queues.get_mut(queue.as_str()) {
+                p.file.get_or_insert(0);
+            }
             let in_memory = state
                 .queues
                 .get(queue.as_str())
@@ -251,7 +217,7 @@ impl MemoryPointers {
         };
         if short {
             let ahead = id.saturating_add(RESERVE_AHEAD);
-            self.advance(queue, &UintN::from(ahead), None)?;
+            self.advance(queue, &UintN::from(ahead), Some(&UintN::zero()))?;
         }
         self.flush_if_dirty().await?;
         if self
@@ -276,8 +242,9 @@ impl MemoryPointers {
         let mut state = self.state.lock().unwrap();
         let state = &mut *state;
         for (queue, last) in state.landed_now.drain() {
+            let floor = state.memory_floor.get(&queue).copied().unwrap_or(0);
             if let Some(entry) = state.queues.get_mut(&queue) {
-                entry.id = last;
+                entry.id = last.max(floor);
             }
             state.unsettled.remove(&queue);
             state.dirty = true;
@@ -290,8 +257,9 @@ impl MemoryPointers {
         let mut state = self.state.lock().unwrap();
         let state = &mut *state;
         if let Some(last) = state.landed_now.remove(queue.as_str()) {
+            let floor = state.memory_floor.get(queue.as_str()).copied().unwrap_or(0);
             if let Some(entry) = state.queues.get_mut(queue.as_str()) {
-                entry.id = last;
+                entry.id = last.max(floor);
             }
             state.unsettled.remove(queue.as_str());
             state.hints = true;
@@ -310,22 +278,37 @@ impl MemoryPointers {
         {
             return Ok(());
         }
-        self.advance(queue, &UintN::zero(), None)?;
+        self.advance(queue, &UintN::zero(), Some(&UintN::zero()))?;
         // An earlier write of the record may have failed.
         self.state.lock().unwrap().dirty = true;
         self.flush_if_dirty().await
     }
 
     /// Records a memory-only queue's last accepted id; the flusher writes it
-    /// out within its interval, which is the loss a memory queue accepts.
+    /// out within its interval, which is the loss a memory queue accepts. An
+    /// earlier cloud life's file stays on the line.
     pub(crate) fn mark(&self, queue: &QueueId, id: &UintN) -> Result<(), Error> {
         let id = to_u64(id, "id")?;
         let mut state = self.state.lock().unwrap();
-        let last = state.memory.entry(queue.as_str().to_string()).or_insert(id);
-        if id > *last {
-            *last = id;
+        let state = &mut *state;
+        let floor = state
+            .memory_floor
+            .entry(queue.as_str().to_string())
+            .or_insert(id);
+        *floor = (*floor).max(id);
+        match state.queues.get_mut(queue.as_str()) {
+            // A bare record has an empty bucket behind it; marked, it becomes a
+            // memory line, or entry 0 would read as unused.
+            Some(entry) if entry.is_bare() => *entry = Pointer { id, file: None },
+            Some(entry) if id > entry.id => entry.id = id,
+            Some(_) => return Ok(()),
+            None => {
+                state
+                    .queues
+                    .insert(queue.as_str().to_string(), Pointer { id, file: None });
+            }
         }
-        state.memory_dirty = true;
+        state.dirty = true;
         Ok(())
     }
 
@@ -363,7 +346,7 @@ impl MemoryPointers {
         Ok(())
     }
 
-    /// Writes out the landed files and the memory-only ids too; for a close.
+    /// Writes out the landed files too; for a close.
     pub(crate) async fn flush_all(&self) -> Result<(), Error> {
         {
             let mut state = self.state.lock().unwrap();
@@ -371,8 +354,7 @@ impl MemoryPointers {
                 state.dirty = true;
             }
         }
-        let memory = self.flush_memory_ids().await;
-        self.flush_if_dirty().await.and(memory)
+        self.flush_if_dirty().await
     }
 
     pub(crate) async fn flush_if_dirty(&self) -> Result<(), Error> {
@@ -405,7 +387,7 @@ impl MemoryPointers {
             let lines = snapshot
                 .iter()
                 .map(|(queue, p)| (queue, p.id, p.file, !unsettled.contains(queue.as_str())));
-            let result = Self::publish(&fs, tmp, path, HEADER, lines).await;
+            let result = Self::publish(&fs, tmp, path, lines).await;
             let mut state = state.lock().unwrap();
             match result {
                 Ok(()) => {
@@ -424,47 +406,14 @@ impl MemoryPointers {
         .map_err(Error::other)?
     }
 
-    /// Writes the memory-only marks out; only the flusher and a close ask, so
-    /// a failure here never holds up a cloud landing.
-    pub(crate) async fn flush_memory_ids(&self) -> Result<(), Error> {
-        let flush_guard = self.flush_lock.clone().lock_owned().await;
-        let memory = {
-            let mut state = self.state.lock().unwrap();
-            if !state.memory_dirty {
-                return Ok(());
-            }
-            state.memory_dirty = false;
-            state.memory.clone()
-        };
-        let (fs, tmp, path, state) = (
-            self.fs.clone(),
-            self.memory_tmp_path.clone(),
-            self.memory_path.clone(),
-            self.state.clone(),
-        );
-        tokio::spawn(async move {
-            let _guard = flush_guard;
-            let result = write_memory_ids(&fs, tmp, path, &memory).await;
-            if result.is_err() {
-                state.lock().unwrap().memory_dirty = true;
-            }
-            result
-        })
-        .await
-        .map_err(Error::other)?
-    }
-
     pub(crate) fn spawn_flusher(self: &Arc<Self>, interval: Duration) -> JoinHandle<()> {
         let pointers = self.clone();
         let interval = interval.max(Duration::from_millis(1));
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(interval).await;
-                if let Err(e) = pointers.flush_memory_ids().await {
-                    log::warn!(target: "normfs", "Failed to write the memory-only ids: {e}");
-                }
                 if let Err(e) = pointers.flush_if_dirty().await {
-                    log::warn!(target: "normfs", "Failed to write the cloud pointers: {e}");
+                    log::warn!(target: "normfs", "Failed to write memory pointers: {e}");
                 }
             }
         })
@@ -477,14 +426,13 @@ impl MemoryPointers {
         fs: &Fs,
         tmp: PathBuf,
         path: PathBuf,
-        header: &str,
         lines: impl Iterator<Item = (&'a String, u64, Option<u64>, bool)>,
     ) -> Result<(), Error> {
         let mut lines: Vec<_> = lines.collect();
         lines.sort_by_key(|(queue, ..)| *queue);
 
         let mut out = Vec::new();
-        out.extend_from_slice(header.as_bytes());
+        out.extend_from_slice(HEADER.as_bytes());
         for (queue, id, file, exact) in lines {
             out.extend_from_slice(queue.as_bytes());
             out.push(b'\t');
@@ -522,7 +470,7 @@ impl PointerState {
     fn reserved_on_disk(&self, queue: &str, id: u64) -> bool {
         self.written
             .get(queue)
-            .is_some_and(|p| !p.is_bare() && p.id >= id)
+            .is_some_and(|p| p.file.is_some() && !p.is_bare() && p.id >= id)
             && !self.written_exact.contains(queue)
     }
 }
@@ -551,16 +499,6 @@ impl normfs_store::LandedIndex for MemoryPointers {
     }
 }
 
-async fn write_memory_ids(
-    fs: &Fs,
-    tmp: PathBuf,
-    path: PathBuf,
-    memory: &HashMap<String, u64>,
-) -> Result<(), Error> {
-    let lines = memory.iter().map(|(queue, id)| (queue, *id, None, false));
-    MemoryPointers::publish(fs, tmp, path, MEMORY_IDS_HEADER, lines).await
-}
-
 async fn read_optional(fs: &Fs, path: &Path) -> Result<Option<String>, Error> {
     let path = path.to_path_buf();
     fs.run_blocking(move || match std::fs::read_to_string(&path) {
@@ -582,8 +520,8 @@ fn to_u64(n: &UintN, what: &str) -> Result<u64, Error> {
 }
 
 /// `queue\tid`, `queue\tid\tfile` or `queue\tid\tfile\texact`; the third
-/// column is the cloud-direct queue's last file, the fourth says it is exact,
-/// and a v1 file without them still parses.
+/// column is the cloud-direct queue's last file (0 before the first), the
+/// fourth says it is exact, and a v1 file without them still parses.
 fn parse_pointers(contents: &str) -> Result<(HashMap<String, Pointer>, HashSet<String>), Error> {
     let mut queues = HashMap::new();
     let mut exact = HashSet::new();
