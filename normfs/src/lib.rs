@@ -1518,8 +1518,10 @@ impl NormFS {
         let queue_config = self.get_config_for_queue(queue);
         let persist = queue_config.persist;
         if persist.is_memory() {
-            // Past what an earlier cloud life recorded, which may be a reserve.
-            let last_entry_id = self.memory_pointers.used_id(queue);
+            // Past what an earlier cloud life recorded, which may be a reserve,
+            // and past a local life's files.
+            let (_, _, local) = self.continue_queue(queue).await?;
+            let last_entry_id = self.memory_pointers.used_id(queue).max(local);
             self.mem.start_queue_with(
                 queue,
                 last_entry_id.clone(),

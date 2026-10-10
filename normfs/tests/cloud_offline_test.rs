@@ -1138,7 +1138,7 @@ async fn a_memory_life_between_cloud_and_store_lives_keeps_the_record() {
     .await
     .unwrap();
     fs.ensure_queue_exists_for_write(&queue).await.unwrap();
-    assert_eq!(write(&fs, &queue, PER_PAGE, 3).await[0], 2 * PER_PAGE);
+    assert_eq!(write(&fs, &queue, PER_PAGE, 3).await[0], 2 * PER_PAGE + 2);
     fs.flush_queue(&queue).await.unwrap();
     let deadline = Instant::now() + Duration::from_secs(20);
     while objects(&direct, &queue).await < 3 {

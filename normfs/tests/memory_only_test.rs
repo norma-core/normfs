@@ -170,3 +170,30 @@ async fn a_durable_life_after_a_memory_life_starts_and_continues_its_ids() {
 async fn a_durable_life_after_a_memory_life_of_entry_zero_does_not_reissue_it() {
     assert_eq!(memory_life_then_durable(1).await, 1);
 }
+
+#[tokio::test]
+async fn a_memory_life_after_a_durable_one_goes_on_past_its_ids() {
+    let temp_dir = TempDir::new().unwrap();
+    let root = temp_dir.path().to_path_buf();
+    let durable = NormFsSettings {
+        queue_settings: QueueSettings::default().with_default_persist(Persist::WAL_STORE),
+        ..NormFsSettings::default()
+    };
+    let mut next = 0;
+    for settings in [memory_only_settings(), durable, memory_only_settings()] {
+        let fs = NormFS::new(root.clone(), settings).await.unwrap();
+        let queue = fs.resolve("switched");
+        fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+        for _ in 0..5 {
+            let id = fs
+                .enqueue(&queue, Bytes::from_static(b"x"))
+                .await
+                .unwrap()
+                .to_u64()
+                .unwrap();
+            assert_eq!(id, next);
+            next += 1;
+        }
+        fs.close().await.unwrap();
+    }
+}

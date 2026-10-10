@@ -340,7 +340,7 @@ async fn a_store_queue_moved_to_cloud_writes_after_its_local_files() {
 }
 
 #[tokio::test]
-async fn a_memory_queue_moved_to_cloud_starts_empty_and_records_its_files() {
+async fn a_memory_queue_moved_to_cloud_goes_on_and_records_its_files() {
     let Some(cloud) = s3().await else { return };
     let temp = tempfile::TempDir::new().unwrap();
     let queue;
@@ -355,14 +355,14 @@ async fn a_memory_queue_moved_to_cloud_starts_empty_and_records_its_files() {
     {
         let fs = open(temp.path(), settings(cloud.clone())).await;
         fs.ensure_queue_exists_for_write(&queue).await.unwrap();
-        assert_eq!(next_id(&fs, &queue).await, 0);
+        assert_eq!(next_id(&fs, &queue).await, 3);
         fs.flush_queue(&queue).await.unwrap();
         fs.close().await.unwrap();
     }
 
     let fs = open(temp.path(), settings(cloud)).await;
     fs.ensure_queue_exists_for_read(&queue).await.unwrap();
-    assert_eq!(read_all(&fs, &queue, 0, 1).await, [DataSource::Cloud]);
+    assert_eq!(read_all(&fs, &queue, 3, 1).await, [DataSource::Cloud]);
     fs.close().await.unwrap();
 }
 

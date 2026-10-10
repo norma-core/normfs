@@ -297,3 +297,26 @@ async fn a_clean_close_does_not_lower_a_line_below_a_memory_mark() {
     let reopened = MemoryPointers::open(fs, dir.path()).await.unwrap();
     assert_eq!(reopened.used_id(&queue), Some(UintN::from(400u64)));
 }
+
+#[tokio::test]
+async fn a_reserve_after_a_memory_life_of_entry_zero_never_writes_a_bare_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let fs = Fs::new(FsConfig::default()).unwrap();
+    let queue = QueueIdResolver::new("instance").resolve("switched");
+    std::fs::write(
+        dir.path().join(".memory_pointers"),
+        format!("# normfs pointers v1\n{}\t0\n", queue.as_str()),
+    )
+    .unwrap();
+
+    let pointers = MemoryPointers::open(fs.clone(), dir.path()).await.unwrap();
+    pointers.reserve(&queue, &UintN::zero()).await.unwrap();
+    let line = std::fs::read_to_string(dir.path().join(".memory_pointers")).unwrap();
+    assert!(
+        !line.contains(&format!("{}\t0\t0", queue.as_str())),
+        "{line}"
+    );
+    drop(pointers);
+    let crashed = MemoryPointers::open(fs, dir.path()).await.unwrap();
+    assert!(crashed.used_id(&queue).is_some());
+}

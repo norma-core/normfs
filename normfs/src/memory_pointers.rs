@@ -198,8 +198,12 @@ impl MemoryPointers {
             state.unsettled.insert(queue.as_str().to_string());
             // A memory life's line covers ids but names no file; an upload
             // needs a cloud line, or a crash would leave it looking settled.
+            // Raised in the same step, so no flush sees it as a bare record.
             if let Some(p) = state.queues.get_mut(queue.as_str()) {
-                p.file.get_or_insert(0);
+                if p.file.is_none() {
+                    p.file = Some(0);
+                    p.id = p.id.max(id.saturating_add(RESERVE_AHEAD));
+                }
             }
             let in_memory = state
                 .queues
