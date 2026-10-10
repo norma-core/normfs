@@ -61,6 +61,36 @@ async fn memory_only_persists_latest_pointer_without_wal_or_store() {
 }
 
 #[tokio::test]
+async fn memory_only_does_not_reissue_entry_zero_after_a_crash() {
+    let temp_dir = TempDir::new().unwrap();
+    let root = temp_dir.path().to_path_buf();
+    let settings = memory_only_settings();
+
+    {
+        let fs = NormFS::new(root.clone(), settings.clone()).await.unwrap();
+        let queue = fs.resolve("rover/events");
+        fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+        let first = fs
+            .enqueue(&queue, Bytes::from_static(b"one"))
+            .await
+            .unwrap();
+        assert_eq!(first.to_u64().unwrap(), 0);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        drop(fs);
+    }
+
+    let fs = NormFS::new(root, settings).await.unwrap();
+    let queue = fs.resolve("rover/events");
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    let next = fs
+        .enqueue(&queue, Bytes::from_static(b"two"))
+        .await
+        .unwrap();
+    assert_eq!(next.to_u64().unwrap(), 1);
+    fs.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn memory_only_reader_does_not_fallback_to_disk_after_restart() {
     let temp_dir = TempDir::new().unwrap();
     let root = temp_dir.path().to_path_buf();
@@ -101,6 +131,69 @@ async fn memory_only_reader_does_not_fallback_to_disk_after_restart() {
         assert!(matches!(err, Error::NotFound));
         assert!(rx.try_recv().is_err());
 
+        fs.close().await.unwrap();
+    }
+}
+
+async fn memory_life_then_durable(records: usize) -> u64 {
+    let temp_dir = TempDir::new().unwrap();
+    let root = temp_dir.path().to_path_buf();
+    {
+        let fs = NormFS::new(root.clone(), memory_only_settings())
+            .await
+            .unwrap();
+        let queue = fs.resolve("rover/events");
+        fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+        for _ in 0..records {
+            fs.enqueue(&queue, Bytes::from_static(b"m")).await.unwrap();
+        }
+        fs.close().await.unwrap();
+    }
+    let settings = NormFsSettings {
+        queue_settings: QueueSettings::default().with_default_persist(Persist::WAL_STORE),
+        ..NormFsSettings::default()
+    };
+    let fs = NormFS::new(root, settings).await.unwrap();
+    let queue = fs.resolve("rover/events");
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    let next = fs.enqueue(&queue, Bytes::from_static(b"d")).await.unwrap();
+    fs.close().await.unwrap();
+    next.to_u64().unwrap()
+}
+
+#[tokio::test]
+async fn a_durable_life_after_a_memory_life_starts_and_continues_its_ids() {
+    assert_eq!(memory_life_then_durable(2).await, 2);
+}
+
+#[tokio::test]
+async fn a_durable_life_after_a_memory_life_of_entry_zero_does_not_reissue_it() {
+    assert_eq!(memory_life_then_durable(1).await, 1);
+}
+
+#[tokio::test]
+async fn a_memory_life_after_a_durable_one_goes_on_past_its_ids() {
+    let temp_dir = TempDir::new().unwrap();
+    let root = temp_dir.path().to_path_buf();
+    let durable = NormFsSettings {
+        queue_settings: QueueSettings::default().with_default_persist(Persist::WAL_STORE),
+        ..NormFsSettings::default()
+    };
+    let mut next = 0;
+    for settings in [memory_only_settings(), durable, memory_only_settings()] {
+        let fs = NormFS::new(root.clone(), settings).await.unwrap();
+        let queue = fs.resolve("switched");
+        fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+        for _ in 0..5 {
+            let id = fs
+                .enqueue(&queue, Bytes::from_static(b"x"))
+                .await
+                .unwrap()
+                .to_u64()
+                .unwrap();
+            assert_eq!(id, next);
+            next += 1;
+        }
         fs.close().await.unwrap();
     }
 }

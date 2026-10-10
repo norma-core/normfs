@@ -64,6 +64,12 @@ pub struct CryptoContext {
 }
 
 impl CryptoContext {
+    /// Whether `data_dir` already holds a seed, so [`CryptoContext::open`]
+    /// loads one rather than making a new instance.
+    pub fn exists<P: AsRef<Path>>(data_dir: P) -> bool {
+        Seed::exists(data_dir)
+    }
+
     pub fn open<P: AsRef<Path>>(data_dir: P) -> Result<Self, CryptoError> {
         let seed = Seed::open(data_dir)?;
 
@@ -195,6 +201,26 @@ impl CryptoContext {
             .map_err(|_| CryptoError::Decryption)?;
 
         Ok(Bytes::from(plaintext))
+    }
+
+    /// [`CryptoContext::decrypt`] without allocating: `buf` holds the
+    /// ciphertext and its tag, and is left holding the plaintext in front.
+    /// Returns the plaintext length.
+    pub fn decrypt_in_place(
+        &self,
+        queue_id: &QueueId,
+        file_id: &UintN,
+        nonce: &[u8],
+        buf: &mut [u8],
+    ) -> Result<usize, CryptoError> {
+        let nonce: [u8; 12] = nonce.try_into().map_err(|_| CryptoError::InvalidNonce)?;
+        let len = buf.len().checked_sub(16).ok_or(CryptoError::Decryption)?;
+        let (cipher, _) = self.file_cipher(queue_id, file_id)?;
+        let (plaintext, tag) = buf.split_at_mut(len);
+        cipher
+            .decrypt_in_place_detached(Nonce::from_slice(&nonce), b"", plaintext, (&*tag).into())
+            .map_err(|_| CryptoError::Decryption)?;
+        Ok(len)
     }
 }
 

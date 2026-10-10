@@ -142,7 +142,11 @@ async fn a_full_page_becomes_one_object_and_nothing_touches_the_disk() {
         .find(|l| l.starts_with(queue.as_str()))
         .expect("the queue has a pointer");
     let cols: Vec<_> = line.split('\t').collect();
-    assert_eq!(cols[1], (40 * PER_PAGE - 1).to_string(), "last id landed");
+    assert_eq!(
+        cols[1],
+        (40 * PER_PAGE - 1).to_string(),
+        "a clean close brings the reserve down to the last id"
+    );
     assert_eq!(cols[2], "40", "last file landed");
 }
 
@@ -336,7 +340,7 @@ async fn a_store_queue_moved_to_cloud_writes_after_its_local_files() {
 }
 
 #[tokio::test]
-async fn a_memory_queue_moved_to_cloud_keeps_its_ids_and_records_its_files() {
+async fn a_memory_queue_moved_to_cloud_goes_on_and_records_its_files() {
     let Some(cloud) = s3().await else { return };
     let temp = tempfile::TempDir::new().unwrap();
     let queue;

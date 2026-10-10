@@ -635,6 +635,7 @@ impl CommandProcessor {
                     | Error::WouldBlock
                     | Error::NotInFile
                     | Error::MemoryBelowFloor { .. }
+                    | Error::BucketUnreachable { .. }
                     | Error::PageBelowMinimum { .. } => {
                         error!(
                             "Read stream failed (client_id: {}, read_id: {}, queue_id: {}, error: {:?})",

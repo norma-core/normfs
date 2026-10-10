@@ -25,19 +25,35 @@ pub trait SealedFileSink: Send + Sync {
         file_id: &'a UintN,
         file: &'a SealedFile,
     ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>>;
+
+    /// The id the next file is sealed under, given the one the writer would
+    /// use. An error is retried like a failed landing.
+    fn file_id<'a>(
+        &'a self,
+        _queue: &'a QueueId,
+        planned: &'a UintN,
+    ) -> Pin<Box<dyn Future<Output = io::Result<UintN>> + Send + 'a>> {
+        Box::pin(std::future::ready(Ok(planned.clone())))
+    }
 }
 
-/// Where a queue whose files are kept nowhere local records what has landed,
-/// so a restart knows its last id and last file without listing the bucket.
-///
-/// `mark_landed` returns only once the record is durable: a restart that read
-/// a stale one would start the next file at an id the bucket already holds.
+/// Where a queue whose files are kept nowhere local records what it sent to
+/// the bucket. The reserve is what keeps a restart off ids already used; the
+/// landed file is a hint, since the bucket is asked for file ids either way.
 pub trait LandedIndex: Send + Sync {
     fn mark_landed<'a>(
         &'a self,
         queue: &'a QueueId,
         last_entry_id: &'a UintN,
         file_id: &'a UintN,
+    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>>;
+
+    /// Records, before the upload starts, that ids up to `last_entry_id` may
+    /// be in the bucket: a restart that cannot list it starts after them.
+    fn reserve<'a>(
+        &'a self,
+        queue: &'a QueueId,
+        last_entry_id: &'a UintN,
     ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>>;
 }
 
@@ -85,6 +101,9 @@ impl SealedFileSink for LayerSink {
         file: &'a SealedFile,
     ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>> {
         Box::pin(async move {
+            if let (AfterLanding::Record(index), Some(last)) = (&self.after, file.last_entry_id()) {
+                index.reserve(queue, &last).await?;
+            }
             let source = self.put.source();
             let started = Instant::now();
             if let Err(e) = self.put.put(queue, file_id, Body::Runs(file.runs())).await {
