@@ -33,6 +33,14 @@ pub(crate) struct Pointer {
     pub file: Option<u64>,
 }
 
+impl Pointer {
+    /// What [`MemoryPointers::record`] writes: a queue that used no id yet,
+    /// so its id 0 covers nothing.
+    fn is_bare(&self) -> bool {
+        self.id == 0 && self.file.is_none()
+    }
+}
+
 struct PointerState {
     queues: HashMap<String, Pointer>,
     dirty: bool,
@@ -43,6 +51,10 @@ struct PointerState {
     unsettled: HashSet<String>,
     /// The last id each queue landed in this life.
     landed_now: HashMap<String, u64>,
+    /// What the file on disk holds, so a reserve is reported only once it
+    /// is written there.
+    written: HashMap<String, Pointer>,
+    written_exact: HashSet<String>,
     #[cfg(test)]
     publishes: u64,
 }
@@ -84,10 +96,11 @@ impl MemoryPointers {
         // of it.
         let unsettled = queues
             .iter()
-            .filter(|(queue, p)| !exact.contains(*queue) && !(p.file.is_none() && p.id == 0))
+            .filter(|(queue, p)| !exact.contains(*queue) && !p.is_bare())
             .map(|(queue, _)| queue.clone())
             .collect();
 
+        let written = queues.clone();
         Ok(Self {
             fs,
             path,
@@ -98,6 +111,8 @@ impl MemoryPointers {
                 hints: false,
                 unsettled,
                 landed_now: HashMap::new(),
+                written,
+                written_exact: exact,
                 #[cfg(test)]
                 publishes: 0,
             })),
@@ -112,7 +127,7 @@ impl MemoryPointers {
     /// The highest id an earlier life may have used; a bare record says none.
     pub(crate) fn used_id(&self, queue: &QueueId) -> Option<UintN> {
         self.pointer(queue)
-            .filter(|p| p.id > 0 || p.file.is_some())
+            .filter(|p| !p.is_bare())
             .map(|p| UintN::from(p.id))
     }
 
@@ -179,25 +194,42 @@ impl MemoryPointers {
     /// The first upload of a settled queue also writes, since its last file
     /// stops being exact once that upload may have landed.
     pub(crate) async fn reserve(&self, queue: &QueueId, id: &UintN) -> Result<(), Error> {
-        let covered = self
-            .pointer(queue)
-            .is_some_and(|p| UintN::from(p.id) >= *id);
-        let newly_unsettled = {
+        let id = to_u64(id, "id")?;
+        let short = {
             let mut state = self.state.lock().unwrap();
-            let fresh = state.unsettled.insert(queue.as_str().to_string());
-            if fresh {
-                state.dirty = true;
+            state.unsettled.insert(queue.as_str().to_string());
+            let in_memory = state
+                .queues
+                .get(queue.as_str())
+                .is_some_and(|p| !p.is_bare() && p.id >= id);
+            // Memory too: a close may have lowered it, and the next write
+            // would put that lower reserve on disk.
+            if in_memory && state.reserved_on_disk(queue.as_str(), id) {
+                return Ok(());
             }
-            fresh
+            // Written again even when memory already covers it: an earlier
+            // write of this reserve may have failed.
+            state.dirty = true;
+            !in_memory
         };
-        if covered && !newly_unsettled {
-            return Ok(());
-        }
-        if !covered {
-            let ahead = to_u64(id, "id")?.saturating_add(RESERVE_AHEAD);
+        if short {
+            let ahead = id.saturating_add(RESERVE_AHEAD);
             self.advance(queue, &UintN::from(ahead), None)?;
         }
-        self.flush_if_dirty().await
+        self.flush_if_dirty().await?;
+        if self
+            .state
+            .lock()
+            .unwrap()
+            .reserved_on_disk(queue.as_str(), id)
+        {
+            Ok(())
+        } else {
+            Err(Error::other(format!(
+                "queue {}: the id reserve for {id} is not on disk",
+                queue.short()
+            )))
+        }
     }
 
     /// After a close that landed everything: each queue that uploaded in this
@@ -232,10 +264,18 @@ impl MemoryPointers {
     /// Notes a cloud-direct queue the bucket held nothing for, so a later
     /// start without the bucket knows it is not a stranger. Written once.
     pub(crate) async fn record(&self, queue: &QueueId) -> Result<(), Error> {
-        if self.pointer(queue).is_some() {
+        if self
+            .state
+            .lock()
+            .unwrap()
+            .written
+            .contains_key(queue.as_str())
+        {
             return Ok(());
         }
         self.advance(queue, &UintN::zero(), None)?;
+        // An earlier write of the record may have failed.
+        self.state.lock().unwrap().dirty = true;
         self.flush_if_dirty().await
     }
 
@@ -312,8 +352,17 @@ impl MemoryPointers {
             let _guard = flush_guard;
             let (snapshot, unsettled) = snapshot;
             let result = Self::write_snapshot(&fs, tmp, path, &snapshot, &unsettled).await;
-            if result.is_err() {
-                state.lock().unwrap().dirty = true;
+            let mut state = state.lock().unwrap();
+            match result {
+                Ok(()) => {
+                    state.written_exact = snapshot
+                        .iter()
+                        .filter(|(queue, p)| p.file.is_some() && !unsettled.contains(*queue))
+                        .map(|(queue, _)| queue.clone())
+                        .collect();
+                    state.written = snapshot;
+                }
+                Err(_) => state.dirty = true,
             }
             result
         })
@@ -376,6 +425,18 @@ impl MemoryPointers {
         )
         .await?;
         Ok(())
+    }
+}
+
+impl PointerState {
+    /// Whether the file on disk keeps a restart from handing out `id` again:
+    /// a reserve at or past it, with the last file not claimed exact, since
+    /// an upload is about to go past it.
+    fn reserved_on_disk(&self, queue: &str, id: u64) -> bool {
+        self.written
+            .get(queue)
+            .is_some_and(|p| !p.is_bare() && p.id >= id)
+            && !self.written_exact.contains(queue)
     }
 }
 

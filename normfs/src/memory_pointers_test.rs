@@ -95,3 +95,94 @@ async fn records_older_versions_kept_for_memory_queues_are_dropped() {
     let new = MemoryPointers::open(fs, dir.path()).await.unwrap();
     assert_eq!(new.last_id(&memory), Some(UintN::from(5u64)));
 }
+
+#[tokio::test]
+async fn a_reserve_whose_write_failed_fails_again_until_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let fs = Fs::new(FsConfig::default()).unwrap();
+    let pointers = MemoryPointers::open(fs.clone(), dir.path()).await.unwrap();
+    let queue = QueueIdResolver::new("instance").resolve("queue");
+    let obstruction = dir.path().join(".memory_pointers.tmp");
+    std::fs::create_dir(&obstruction).unwrap();
+
+    assert!(pointers.reserve(&queue, &UintN::from(10u64)).await.is_err());
+    assert!(
+        pointers.reserve(&queue, &UintN::from(10u64)).await.is_err(),
+        "a retry reported the reserve written while the file still cannot be"
+    );
+
+    std::fs::remove_dir(obstruction).unwrap();
+    pointers.reserve(&queue, &UintN::from(10u64)).await.unwrap();
+    drop(pointers);
+    let recovered = MemoryPointers::open(fs, dir.path()).await.unwrap();
+    assert!(recovered.used_id(&queue).unwrap() >= UintN::from(10u64));
+}
+
+#[tokio::test]
+async fn entry_zero_landed_on_a_recorded_queue_survives_a_crash() {
+    let dir = tempfile::tempdir().unwrap();
+    let fs = Fs::new(FsConfig::default()).unwrap();
+    let pointers = MemoryPointers::open(fs.clone(), dir.path()).await.unwrap();
+    let queue = QueueIdResolver::new("instance").resolve("queue");
+    pointers.record(&queue).await.unwrap();
+
+    pointers.reserve(&queue, &UintN::zero()).await.unwrap();
+    pointers
+        .mark_landed(&queue, &UintN::zero(), &UintN::one())
+        .await
+        .unwrap();
+
+    drop(pointers);
+    let recovered = MemoryPointers::open(fs, dir.path()).await.unwrap();
+    assert!(
+        recovered.used_id(&queue).is_some(),
+        "entry 0 landed, but the restart sees a queue that used no id"
+    );
+}
+
+#[tokio::test]
+async fn a_reserve_after_a_close_lowered_it_is_written_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let fs = Fs::new(FsConfig::default()).unwrap();
+    let pointers = MemoryPointers::open(fs.clone(), dir.path()).await.unwrap();
+    let resolver = QueueIdResolver::new("instance");
+    let (queue, other) = (resolver.resolve("queue"), resolver.resolve("other"));
+
+    pointers
+        .reserve(&queue, &UintN::from(100u64))
+        .await
+        .unwrap();
+    pointers
+        .mark_landed(&queue, &UintN::from(100u64), &UintN::one())
+        .await
+        .unwrap();
+    pointers.settle_landed_queue(&queue);
+
+    pointers
+        .reserve(&queue, &UintN::from(150u64))
+        .await
+        .unwrap();
+    pointers.reserve(&other, &UintN::from(5u64)).await.unwrap();
+
+    drop(pointers);
+    let recovered = MemoryPointers::open(fs, dir.path()).await.unwrap();
+    assert!(recovered.used_id(&queue).unwrap() >= UintN::from(150u64));
+}
+
+#[tokio::test]
+async fn a_record_whose_write_failed_is_written_on_retry() {
+    let dir = tempfile::tempdir().unwrap();
+    let fs = Fs::new(FsConfig::default()).unwrap();
+    let pointers = MemoryPointers::open(fs.clone(), dir.path()).await.unwrap();
+    let queue = QueueIdResolver::new("instance").resolve("queue");
+    let obstruction = dir.path().join(".memory_pointers.tmp");
+    std::fs::create_dir(&obstruction).unwrap();
+    assert!(pointers.record(&queue).await.is_err());
+    assert!(pointers.record(&queue).await.is_err());
+
+    std::fs::remove_dir(obstruction).unwrap();
+    pointers.record(&queue).await.unwrap();
+    drop(pointers);
+    let recovered = MemoryPointers::open(fs, dir.path()).await.unwrap();
+    assert_eq!(recovered.last_id(&queue), Some(UintN::zero()));
+}
