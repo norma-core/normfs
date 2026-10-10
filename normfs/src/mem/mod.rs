@@ -6,7 +6,7 @@ use tokio::sync::mpsc::Sender;
 use crate::config::PoolKind;
 use bytes::Bytes;
 use normfs_types::{DataSource, QueueId, ReadEntry, SubscriberCallback};
-use normfs_wal::{AppendOutcome, PagePool, Placement, WalArena};
+use normfs_wal::{AppendOutcome, FileMark, PagePool, Placement, WalArena};
 use uintn::UintN;
 
 // Geometry of the in-memory paged store. Every record fits a page -- one that
@@ -61,6 +61,8 @@ pub enum TryEnqueue {
     Placed(UintN, Placement),
     Full,
     Closed,
+    /// The record would not join the file the caller saw. It took no id.
+    NotInFile,
 }
 
 /// Result of a memory read operation
@@ -404,7 +406,10 @@ impl MemQueue {
     /// it. It is also what makes a write from inside a subscriber callback
     /// safe: the notify runs under the gate, so a callback writing back into
     /// its own queue is refused rather than deadlocked.
-    pub fn try_enqueue(&self, data: Bytes) -> TryEnqueue {
+    ///
+    /// `within` is a file as [`MemQueue::file_room`] numbered it: the record is
+    /// placed only if it joins that file.
+    pub fn try_enqueue(&self, data: Bytes, within: Option<FileMark>) -> TryEnqueue {
         let Ok(_gate) = self.append_gate.try_lock() else {
             return TryEnqueue::Full;
         };
@@ -426,9 +431,14 @@ impl MemQueue {
         let mut cache = false;
         if let Some(pool) = pool {
             if pool.has_drainer() {
-                match pool.try_place_now(id_to_u64(&id), &data) {
+                let placed = match within {
+                    Some(file) => pool.try_place_in(id_to_u64(&id), &data, file),
+                    None => pool.try_place_now(id_to_u64(&id), &data),
+                };
+                match placed {
                     Ok(Some(placed)) => placement = placed,
                     Ok(None) => return TryEnqueue::Full,
+                    Err(normfs_wal::PoolError::NotInFile) => return TryEnqueue::NotInFile,
                     Err(e) => {
                         log::error!(
                             target: "normfs-mem",
@@ -440,8 +450,18 @@ impl MemQueue {
                     }
                 }
             } else {
+                // No writer seals files here, and the gate keeps out every
+                // other append, so the look cannot go stale before the commit.
+                if let Some(file) = within {
+                    let (room, now) = pool.file_room();
+                    if now != file || room.is_none_or(|room| data.len() > room) {
+                        return TryEnqueue::NotInFile;
+                    }
+                }
                 cache = true;
             }
+        } else if within.is_some() {
+            return TryEnqueue::NotInFile;
         }
 
         self.commit(&id, &data, cache);
@@ -452,12 +472,12 @@ impl MemQueue {
         self.inner.read().unwrap().last_id.clone()
     }
 
-    fn file_room(&self) -> (Option<usize>, u64) {
+    fn file_room(&self) -> (Option<usize>, FileMark) {
         let inner = self.inner.read().unwrap();
         inner
             .pool
             .as_ref()
-            .map_or((None, 0), |pool| pool.file_room())
+            .map_or((None, (0, 0)), |pool| pool.file_room())
     }
 
     pub fn ack(&self, id: &UintN) {
@@ -1272,12 +1292,17 @@ impl MemStore {
         mem_queue?.enqueue_awaiting(data).await
     }
 
-    pub fn try_enqueue(&self, queue: &QueueId, data: Bytes) -> Option<TryEnqueue> {
+    pub fn try_enqueue(
+        &self,
+        queue: &QueueId,
+        data: Bytes,
+        within: Option<FileMark>,
+    ) -> Option<TryEnqueue> {
         let mem_queue = {
             let queues = self.queues.read().unwrap();
             queues.get(queue).cloned()
         };
-        Some(mem_queue?.try_enqueue(data))
+        Some(mem_queue?.try_enqueue(data, within))
     }
 
     pub async fn enqueue_batch_awaiting<E>(
@@ -1301,7 +1326,7 @@ impl MemStore {
         queues.get(queue).map(|q| q.get_last_id())
     }
 
-    pub fn file_room(&self, queue: &QueueId) -> Option<(Option<usize>, u64)> {
+    pub fn file_room(&self, queue: &QueueId) -> Option<(Option<usize>, FileMark)> {
         let queues = self.queues.read().unwrap();
         queues.get(queue).map(|q| q.file_room())
     }

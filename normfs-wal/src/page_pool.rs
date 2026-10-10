@@ -203,6 +203,10 @@ pub enum PoolError {
     /// flush can end the wait and a flush needs a drainer, so this wait would
     /// never end: the queue is closing, and the caller must give up.
     NoDrainer,
+    /// [`PagePool::try_place_in`] found the record would not join the file
+    /// the caller saw: that file was sealed or the record no longer fits it.
+    /// Nothing was placed.
+    NotInFile,
 }
 
 /// What the enqueue side decided about a record, for the writer to carry out.
@@ -352,6 +356,9 @@ impl std::fmt::Debug for FilePins {
 
 struct Inner {
     ring: WalRing,
+    /// Numbers this pool's files apart from every other numbering: taken anew
+    /// by each pool and each writer arming one, whose epochs restart at 0.
+    generation: u64,
     /// Per page: how many of its bytes the file writer has taken. A page is
     /// appended to while it is being written out, so this is a cursor rather
     /// than a flag — the writer takes the run that appeared since last time.
@@ -581,6 +588,35 @@ fn charge_paged(
     }
 }
 
+/// A file as [`PagePool::file_room`] names it: unique for the life of the
+/// process, so a look taken before a writer restarted never matches a file
+/// after it.
+pub type FileMark = (u64, u64);
+
+fn next_generation() -> u64 {
+    // Zero is left for a queue that has no pool yet.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+fn file_room_locked(inner: &Inner) -> (Option<usize>, FileMark) {
+    let ring = &inner.ring;
+    let g = inner.generation;
+    let active = ring.active_page();
+    let free = ring.page_size()
+        - ring.page_bytes(active).len()
+        - PAGE_ENTRY_SLOT * ring.page_len(active) as usize;
+    match &inner.fill {
+        Some(fill) if !fill.has_written => (None, (g, fill.epoch)),
+        Some(fill) if fill.used < fill.max => {
+            (Some(max_record_len(ring.page_size())), (g, fill.epoch))
+        }
+        Some(fill) => (widest_fitting(free), (g, fill.epoch)),
+        None if ring.page_len(active) == 0 => (None, (g, ring.next_page_id())),
+        None => (widest_fitting(free), (g, ring.next_page_id())),
+    }
+}
+
 /// Appends under the pool lock, keeping the file writer's cursor honest.
 ///
 /// A rotation resets a page's bytes, and with them the cursor into that page.
@@ -669,6 +705,7 @@ impl PagePool {
                 cache_floor: 0,
                 handed_through: None,
                 stranded: BTreeMap::new(),
+                generation: next_generation(),
             }),
             space: Notify::new(),
             drainer: std::sync::atomic::AtomicBool::new(false),
@@ -730,6 +767,7 @@ impl PagePool {
                 cache_floor: 0,
                 handed_through: None,
                 stranded: BTreeMap::new(),
+                generation: next_generation(),
             }),
             space: Notify::new(),
             drainer: std::sync::atomic::AtomicBool::new(false),
@@ -815,22 +853,8 @@ impl PagePool {
     /// `None` when the next record starts a file whatever its width, and a
     /// number that changes when a file starts. With no file writer the page
     /// stands in for the file, as eviction drops pages.
-    pub fn file_room(&self) -> (Option<usize>, u64) {
-        let inner = self.inner.lock().unwrap();
-        let ring = &inner.ring;
-        let active = ring.active_page();
-        let free = ring.page_size()
-            - ring.page_bytes(active).len()
-            - PAGE_ENTRY_SLOT * ring.page_len(active) as usize;
-        match &inner.fill {
-            Some(fill) if !fill.has_written => (None, fill.epoch),
-            Some(fill) if fill.used < fill.max => {
-                (Some(max_record_len(ring.page_size())), fill.epoch)
-            }
-            Some(fill) => (widest_fitting(free), fill.epoch),
-            None if ring.page_len(active) == 0 => (None, ring.next_page_id()),
-            None => (widest_fitting(free), ring.next_page_id()),
-        }
+    pub fn file_room(&self) -> (Option<usize>, FileMark) {
+        file_room_locked(&self.inner.lock().unwrap())
     }
 
     /// Bytes per page, which on the page-per-file path is also how wide a
@@ -922,6 +946,7 @@ impl PagePool {
     /// against a cap.
     pub fn arm_file_fill(&self, max_file_size: u64, header_len: u64) {
         let mut inner = self.inner.lock().unwrap();
+        inner.generation = next_generation();
         inner.fill = Some(FileFill {
             used: header_len,
             max: max_file_size,
@@ -1037,7 +1062,7 @@ impl PagePool {
         // Unwrap-free: a record too wide to frame never reaches `charge_paged`,
         // because `append_locked` reports `TooLarge` for it first.
         let entry_len = encoded_len_of(record.len()).unwrap_or(u64::MAX);
-        match self.try_place(expected_id, record, entry_len) {
+        match self.try_place(expected_id, record, entry_len, None) {
             Ok(Some(placed)) => return Ok(placed),
             Ok(None) => {}
             Err(e) => return Err(e),
@@ -1051,7 +1076,7 @@ impl PagePool {
             tokio::pin!(woken);
             woken.as_mut().enable();
 
-            match self.try_place(expected_id, record, entry_len) {
+            match self.try_place(expected_id, record, entry_len, None) {
                 Ok(Some(placed)) => {
                     self.note_resumed(expected_id);
                     return Ok(placed);
@@ -1105,12 +1130,33 @@ impl PagePool {
         expected_id: u64,
         record: &[u8],
     ) -> Result<Option<Placement>, PoolError> {
+        self.try_place_now_within(expected_id, record, None)
+    }
+
+    /// [`PagePool::try_place_now`] for a record that must join file `file`, as
+    /// [`PagePool::file_room`] numbered it: [`PoolError::NotInFile`] when that
+    /// file has ended or the record no longer fits it.
+    pub fn try_place_in(
+        &self,
+        expected_id: u64,
+        record: &[u8],
+        file: FileMark,
+    ) -> Result<Option<Placement>, PoolError> {
+        self.try_place_now_within(expected_id, record, Some(file))
+    }
+
+    fn try_place_now_within(
+        &self,
+        expected_id: u64,
+        record: &[u8],
+        within: Option<FileMark>,
+    ) -> Result<Option<Placement>, PoolError> {
         let entry_len = encoded_len_of(record.len()).unwrap_or(u64::MAX);
-        if let Some(placed) = self.try_place(expected_id, record, entry_len)? {
+        if let Some(placed) = self.try_place(expected_id, record, entry_len, within)? {
             return Ok(Some(placed));
         }
         if self.try_retain_page()
-            && let Some(placed) = self.try_place(expected_id, record, entry_len)?
+            && let Some(placed) = self.try_place(expected_id, record, entry_len, within)?
         {
             return Ok(Some(placed));
         }
@@ -1123,6 +1169,7 @@ impl PagePool {
         expected_id: u64,
         record: &[u8],
         entry_len: u64,
+        within: Option<FileMark>,
     ) -> Result<Option<Placement>, PoolError> {
         let over_watermark;
         let placed = {
@@ -1163,6 +1210,14 @@ impl PagePool {
                         }
                         inner.forget_pages();
                     }
+                }
+            }
+            // Under the lock a seal takes too, so no flush can end the file
+            // between this look and the append.
+            if let Some(file) = within {
+                let (room, now) = file_room_locked(&inner);
+                if now != file || room.is_none_or(|room| record.len() > room) {
+                    return Err(PoolError::NotInFile);
                 }
             }
             let (outcome, opened_page) = append_locked(&mut inner, record);

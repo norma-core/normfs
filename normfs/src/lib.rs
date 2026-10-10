@@ -50,7 +50,7 @@ pub use uintn::{Error as UintNError, UintN, UintNType};
 #[derive(Debug, Clone, Copy)]
 pub struct FileRoom {
     room: Option<usize>,
-    file: u64,
+    file: normfs_wal::FileMark,
 }
 
 impl FileRoom {
@@ -66,7 +66,7 @@ impl FileRoom {
         self.room.is_none_or(|room| record_len > room)
     }
 
-    /// Whether no file started between this look and `later`, within one opening of the queue.
+    /// Whether no file started between this look and `later`.
     pub fn same_file(&self, later: &FileRoom) -> bool {
         self.file == later.file
     }
@@ -114,6 +114,9 @@ pub enum Error {
     /// No page could take the record within the wait the caller allowed
     /// ([`NormFS::try_enqueue`], [`NormFS::enqueue_timeout`]). It took no id.
     WouldBlock,
+    /// [`NormFS::try_enqueue_in`]: the file the caller saw has ended, or the
+    /// record no longer fits it. It took no id.
+    NotInFile,
     /// The queue is closed ([`NormFS::close_queue`]): writes are refused
     /// until it is started for write again. The data stays readable.
     QueueClosed,
@@ -155,6 +158,7 @@ impl std::fmt::Display for Error {
             Error::WouldBlock => {
                 write!(f, "No page became free within the wait the caller allowed")
             }
+            Error::NotInFile => write!(f, "Record would not join the file the caller saw"),
             Error::QueueClosed => write!(f, "Queue is closed and accepts no more writes"),
             Error::ReservedQueue => write!(f, "Queue is written by NormFS itself"),
             Error::MemoryBelowFloor {
@@ -190,6 +194,7 @@ impl std::error::Error for Error {
             Error::ClientDisconnected => None,
             Error::RecordTooLarge(_) => None,
             Error::WouldBlock => None,
+            Error::NotInFile => None,
             Error::QueueClosed => None,
             Error::ReservedQueue => None,
             Error::MemoryBelowFloor { .. } => None,
@@ -1578,6 +1583,29 @@ impl NormFS {
     /// a subscriber callback, which runs while its own queue holds the append
     /// gate. A refused record took no id.
     pub fn try_enqueue(&self, queue: &QueueId, data: Bytes) -> Result<UintN, Error> {
+        self.try_enqueue_within(queue, data, None)
+    }
+
+    /// [`NormFS::try_enqueue`] for a record that has to land in the file `room`
+    /// saw, such as a delta frame that needs its keyframe in the same file. The
+    /// check and the append are one step, so a flush cannot seal the file
+    /// between them; [`Error::NotInFile`] when it already has or the record no
+    /// longer fits.
+    pub fn try_enqueue_in(
+        &self,
+        queue: &QueueId,
+        room: &FileRoom,
+        data: Bytes,
+    ) -> Result<UintN, Error> {
+        self.try_enqueue_within(queue, data, Some(room.file))
+    }
+
+    fn try_enqueue_within(
+        &self,
+        queue: &QueueId,
+        data: Bytes,
+        within: Option<normfs_wal::FileMark>,
+    ) -> Result<UintN, Error> {
         self.refuse_reserved(queue)?;
         if self.mem.is_closed(queue) {
             return Err(Error::QueueClosed);
@@ -1590,12 +1618,13 @@ impl NormFS {
 
         let (entry_id, placement) = match self
             .mem
-            .try_enqueue(queue, data.clone())
+            .try_enqueue(queue, data.clone(), within)
             .ok_or(Error::QueueNotFound)?
         {
             mem::TryEnqueue::Placed(id, placement) => (id, placement),
             mem::TryEnqueue::Full => return Err(Error::WouldBlock),
             mem::TryEnqueue::Closed => return Err(Error::QueueClosed),
+            mem::TryEnqueue::NotInFile => return Err(Error::NotInFile),
         };
 
         self.after_place(queue, &entry_id, data, placement)?;
