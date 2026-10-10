@@ -509,49 +509,6 @@ async fn a_store_queue_after_a_crashed_cloud_life_writes_after_its_objects() {
     fs.close().await.unwrap();
 }
 
-#[tokio::test]
-async fn a_memory_life_between_cloud_and_store_lives_keeps_the_record() {
-    let Some((direct, cloud, _proxy)) = s3_behind_proxy(Link::Up).await else {
-        return;
-    };
-    let temp = tempfile::TempDir::new().unwrap();
-    let queue;
-    {
-        let fs = open(temp.path(), &cloud).await;
-        queue = fs.resolve("cam0");
-        fs.ensure_queue_exists_for_write(&queue).await.unwrap();
-        write(&fs, &queue, 2 * PER_PAGE, 1).await;
-        fs.close().await.unwrap();
-    }
-    let first = object(&direct, &queue, 1).await.expect("object 1");
-    {
-        let settings = persist_settings(&cloud, Persist::MEMORY);
-        let fs = NormFS::new(temp.path().to_path_buf(), settings)
-            .await
-            .unwrap();
-        fs.ensure_queue_exists_for_write(&queue).await.unwrap();
-        assert!(write(&fs, &queue, 2, 2).await[0] >= 2 * PER_PAGE);
-        fs.close().await.unwrap();
-    }
-
-    let fs = NormFS::new(
-        temp.path().to_path_buf(),
-        persist_settings(&cloud, STORE_CLOUD),
-    )
-    .await
-    .unwrap();
-    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
-    assert_eq!(write(&fs, &queue, PER_PAGE, 3).await[0], 2 * PER_PAGE);
-    fs.flush_queue(&queue).await.unwrap();
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while objects(&direct, &queue).await < 3 {
-        assert!(Instant::now() < deadline, "file 3 was never offloaded");
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert_eq!(object(&direct, &queue, 1).await, Some(first));
-    fs.close().await.unwrap();
-}
-
 /// A cloud-direct life lands two objects and crashes before its pointer
 /// names them; a local life follows, then one that offloads.
 async fn local_life_after_a_crashed_cloud_life(offline: bool) {
@@ -1146,6 +1103,49 @@ async fn a_slow_upload_that_keeps_moving_finishes() {
         "the link was not slow"
     );
     assert_eq!(objects(&direct, &queue).await, 1);
+    fs.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_memory_life_between_cloud_and_store_lives_keeps_the_record() {
+    let Some((direct, cloud, _proxy)) = s3_behind_proxy(Link::Up).await else {
+        return;
+    };
+    let temp = tempfile::TempDir::new().unwrap();
+    let queue;
+    {
+        let fs = open(temp.path(), &cloud).await;
+        queue = fs.resolve("cam0");
+        fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+        write(&fs, &queue, 2 * PER_PAGE, 1).await;
+        fs.close().await.unwrap();
+    }
+    let first = object(&direct, &queue, 1).await.expect("object 1");
+    {
+        let settings = persist_settings(&cloud, Persist::MEMORY);
+        let fs = NormFS::new(temp.path().to_path_buf(), settings)
+            .await
+            .unwrap();
+        fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+        assert!(write(&fs, &queue, 2, 2).await[0] >= 2 * PER_PAGE);
+        fs.close().await.unwrap();
+    }
+
+    let fs = NormFS::new(
+        temp.path().to_path_buf(),
+        persist_settings(&cloud, STORE_CLOUD),
+    )
+    .await
+    .unwrap();
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    assert_eq!(write(&fs, &queue, PER_PAGE, 3).await[0], 2 * PER_PAGE);
+    fs.flush_queue(&queue).await.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while objects(&direct, &queue).await < 3 {
+        assert!(Instant::now() < deadline, "file 3 was never offloaded");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(object(&direct, &queue, 1).await, Some(first));
     fs.close().await.unwrap();
 }
 

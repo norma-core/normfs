@@ -54,9 +54,9 @@ Every stage after memory is optional, per queue (`QueueConfig.persist`):
 with WAL and store (the default) records reach disk within `write_interval`;
 with store alone a sealed memory page becomes one store file directly, so a
 crash loses at most the open page; with neither the queue is memory-only and
-nothing survives a restart: its ids start again at 0. `cloud` sends that
-queue's store files to the bucket: offloaded from the local store when there
-is one, landed there directly from the sealed page when there is not.
+only its last id survives a restart. `cloud` sends that queue's store files to
+the bucket: offloaded from the local store when there is one, landed there
+directly from the sealed page when there is not.
 
 The WAL, the local store and the bucket are one interface, `Backend`
 (`normfs-wal/src/backend.rs`), so these stages are a queue's file layers in

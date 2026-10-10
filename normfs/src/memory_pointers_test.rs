@@ -77,26 +77,6 @@ async fn a_reserve_is_written_once_per_reserve_and_survives_a_crash() {
 }
 
 #[tokio::test]
-async fn records_older_versions_kept_for_memory_queues_are_dropped() {
-    let dir = tempfile::tempdir().unwrap();
-    let fs = Fs::new(FsConfig::default()).unwrap();
-    let resolver = QueueIdResolver::new("instance");
-    let (memory, cloud) = (resolver.resolve("memory"), resolver.resolve("cloud"));
-    let lines = format!("{}\t5\n{}\t7\t2\n", memory.as_str(), cloud.as_str());
-    let path = dir.path().join(".memory_pointers");
-
-    std::fs::write(&path, format!("# normfs memory-only pointers v1\n{lines}")).unwrap();
-    let old = MemoryPointers::open(fs.clone(), dir.path()).await.unwrap();
-    assert_eq!(old.last_id(&memory), None);
-    assert_eq!(old.last_id(&cloud), Some(UintN::from(7u64)));
-
-    // A reserve written since then has no file either, and stays.
-    std::fs::write(&path, format!("# normfs pointers v1\n{lines}")).unwrap();
-    let new = MemoryPointers::open(fs, dir.path()).await.unwrap();
-    assert_eq!(new.last_id(&memory), Some(UintN::from(5u64)));
-}
-
-#[tokio::test]
 async fn a_reserve_whose_write_failed_fails_again_until_written() {
     let dir = tempfile::tempdir().unwrap();
     let fs = Fs::new(FsConfig::default()).unwrap();
@@ -185,4 +165,67 @@ async fn a_record_whose_write_failed_is_written_on_retry() {
     drop(pointers);
     let recovered = MemoryPointers::open(fs, dir.path()).await.unwrap();
     assert_eq!(recovered.last_id(&queue), Some(UintN::zero()));
+}
+
+#[tokio::test]
+async fn lines_older_versions_kept_for_memory_queues_become_memory_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    let fs = Fs::new(FsConfig::default()).unwrap();
+    let resolver = QueueIdResolver::new("instance");
+    let (memory, cloud) = (resolver.resolve("memory"), resolver.resolve("cloud"));
+    let lines = format!("{}\t5\n{}\t7\t2\n", memory.as_str(), cloud.as_str());
+    let path = dir.path().join(".memory_pointers");
+
+    std::fs::write(&path, format!("# normfs memory-only pointers v1\n{lines}")).unwrap();
+    let old = MemoryPointers::open(fs.clone(), dir.path()).await.unwrap();
+    assert_eq!(old.last_id(&memory), None);
+    assert_eq!(old.used_id(&memory), Some(UintN::from(5u64)));
+    assert_eq!(old.last_id(&cloud), Some(UintN::from(7u64)));
+    old.flush_if_dirty().await.unwrap();
+    let moved = MemoryPointers::open(fs.clone(), dir.path()).await.unwrap();
+    assert_eq!(moved.last_id(&memory), None);
+    assert_eq!(moved.used_id(&memory), Some(UintN::from(5u64)));
+
+    // A reserve written since then has no file either, and stays.
+    std::fs::write(&path, format!("# normfs pointers v1\n{lines}")).unwrap();
+    let new = MemoryPointers::open(fs, dir.path()).await.unwrap();
+    assert_eq!(new.last_id(&memory), Some(UintN::from(5u64)));
+}
+
+#[tokio::test]
+async fn a_failing_memory_ids_write_holds_up_no_cloud_reserve() {
+    let dir = tempfile::tempdir().unwrap();
+    let fs = Fs::new(FsConfig::default()).unwrap();
+    let pointers = MemoryPointers::open(fs, dir.path()).await.unwrap();
+    let resolver = QueueIdResolver::new("instance");
+    let (memory, cloud) = (resolver.resolve("memory"), resolver.resolve("cloud"));
+    std::fs::create_dir(dir.path().join(".memory_ids.tmp")).unwrap();
+
+    pointers.mark(&memory, &UintN::from(3u64)).unwrap();
+    pointers.reserve(&cloud, &UintN::from(1u64)).await.unwrap();
+    assert!(pointers.flush_memory_ids().await.is_err());
+
+    std::fs::remove_dir(dir.path().join(".memory_ids.tmp")).unwrap();
+    pointers.flush_memory_ids().await.unwrap();
+    let fs = Fs::new(FsConfig::default()).unwrap();
+    let recovered = MemoryPointers::open(fs, dir.path()).await.unwrap();
+    assert_eq!(recovered.used_id(&memory), Some(UintN::from(3u64)));
+}
+
+#[tokio::test]
+async fn old_memory_lines_stay_put_until_their_new_file_is_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let fs = Fs::new(FsConfig::default()).unwrap();
+    let memory = QueueIdResolver::new("instance").resolve("memory");
+    let path = dir.path().join(".memory_pointers");
+    let old = format!("# normfs memory-only pointers v1\n{}\t5\n", memory.as_str());
+    std::fs::write(&path, &old).unwrap();
+    std::fs::create_dir(dir.path().join(".memory_ids.tmp")).unwrap();
+
+    assert!(MemoryPointers::open(fs.clone(), dir.path()).await.is_err());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), old);
+
+    std::fs::remove_dir(dir.path().join(".memory_ids.tmp")).unwrap();
+    let pointers = MemoryPointers::open(fs, dir.path()).await.unwrap();
+    assert_eq!(pointers.used_id(&memory), Some(UintN::from(5u64)));
 }
