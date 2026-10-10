@@ -64,6 +64,12 @@ pub struct CryptoContext {
 }
 
 impl CryptoContext {
+    /// Whether `data_dir` already holds a seed, so [`CryptoContext::open`]
+    /// loads one rather than making a new instance.
+    pub fn exists<P: AsRef<Path>>(data_dir: P) -> bool {
+        Seed::exists(data_dir)
+    }
+
     pub fn open<P: AsRef<Path>>(data_dir: P) -> Result<Self, CryptoError> {
         let seed = Seed::open(data_dir)?;
 

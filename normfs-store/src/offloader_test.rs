@@ -18,10 +18,10 @@ use uintn::UintN;
 /// A bucket in memory that turns the first `refuse` puts away, and answers
 /// the next `lose` puts with an error after keeping the file.
 #[derive(Default)]
-struct Memory {
-    files: Mutex<BTreeMap<(String, UintN), Bytes>>,
+pub(crate) struct Memory {
+    pub(crate) files: Mutex<BTreeMap<(String, UintN), Bytes>>,
     refuse: Mutex<u32>,
-    lose: Mutex<u32>,
+    pub(crate) lose: Mutex<u32>,
 }
 
 impl Backend for Memory {

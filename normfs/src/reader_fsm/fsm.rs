@@ -734,19 +734,24 @@ impl ReaderFSM {
         }
     }
 
-    /// Every entry at or above the id asked for is delivered, so a file
-    /// that begins above it reads as a valid answer and the walk moves on.
-    /// The records in between are never requested again and the caller
-    /// sees a complete read; the gap is real either way, but it is not
-    /// something to pass over in silence.
+    /// A queue that was cloud-direct may skip reserved ids after an offline
+    /// restart; other gaps indicate a failed flush.
     fn warn_gap(&self, ctx: &ReadContext, num_entries_before: &UintN) {
         if num_entries_before > &ctx.next_id {
-            log::error!(target: "normfs-reader-fsm",
+            let (level, why) = if self.pointers.last_id(&ctx.queue).is_some() {
+                (
+                    log::Level::Warn,
+                    "as after a restart that skipped an id reserve",
+                )
+            } else {
+                (log::Level::Error, "lost to a failed flush")
+            };
+            log::log!(target: "normfs-reader-fsm", level,
                 "Queue '{}' - file {} begins at {} while entry {} was still owed: ids \
-                 {}..{} reach no file this read can see, and the entries above them are \
-                 returned without them",
+                 {}..{} reach no file, {}, and the entries above them are returned \
+                 without them",
                 ctx.queue.short(), ctx.file_id, num_entries_before, ctx.next_id,
-                ctx.next_id, num_entries_before);
+                ctx.next_id, num_entries_before, why);
         }
     }
 

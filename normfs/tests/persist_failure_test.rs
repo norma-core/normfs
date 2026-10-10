@@ -3,17 +3,17 @@ use normfs::{NormFS, NormFsSettings, Persist, QueueSettings};
 use std::time::Duration;
 
 #[tokio::test]
-async fn cloud_recovery_refuses_writes_when_listing_fails() {
+async fn cloud_recovery_lands_nothing_while_listing_fails() {
     cloud_recovery_failure(false, 503).await;
 }
 
 #[tokio::test]
-async fn cloud_recovery_refuses_writes_when_the_latest_range_fails() {
+async fn cloud_recovery_lands_nothing_while_the_latest_range_fails() {
     cloud_recovery_failure(true, 503).await;
 }
 
 #[tokio::test]
-async fn cloud_recovery_refuses_writes_when_the_latest_object_is_missing() {
+async fn cloud_recovery_lands_nothing_while_the_latest_object_is_missing() {
     cloud_recovery_failure(true, 404).await;
 }
 
@@ -24,6 +24,8 @@ async fn cloud_recovery_failure(list_succeeds: bool, object_status: u16) {
     let temp = tempfile::tempdir().unwrap();
     let mut settings = NormFsSettings::all_active();
     settings.queue_settings = QueueSettings::all_active().with_default_persist(Persist::CLOUD);
+    settings.wal_settings.flush_max_retries = 2;
+    settings.wal_settings.flush_retry_delay = Duration::from_millis(1);
     settings.cloud_settings = Some(normfs::CloudSettings {
         endpoint,
         bucket: "test".into(),
@@ -46,8 +48,9 @@ async fn cloud_recovery_failure(list_succeeds: bool, object_status: u16) {
         .await
         .unwrap();
     let key = queue.to_cloud_key("test/", &uintn::UintN::from(2u64));
-    let server = tokio::spawn(async move {
-        let mut range_requests = 0;
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = requests.clone();
+    tokio::spawn(async move {
         loop {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut request = Vec::new();
@@ -57,13 +60,12 @@ async fn cloud_recovery_failure(list_succeeds: bool, object_status: u16) {
                 assert_ne!(n, 0);
                 request.extend_from_slice(&buf[..n]);
             }
-            let listing = String::from_utf8_lossy(&request).contains("list-type=");
+            let request = String::from_utf8_lossy(&request).to_string();
+            let listing = request.contains("list-type=");
+            seen.lock().unwrap().push(request);
             let (status, body) = if listing && list_succeeds {
                 (200, format!("<ListBucketResult><Contents><Key>{key}</Key><Size>256</Size></Contents></ListBucketResult>"))
             } else {
-                if !listing {
-                    range_requests += 1;
-                }
                 (object_status, String::new())
             };
             let response = format!(
@@ -71,18 +73,26 @@ async fn cloud_recovery_failure(list_succeeds: bool, object_status: u16) {
                 body.len()
             );
             socket.write_all(response.as_bytes()).await.unwrap();
-            if !list_succeeds || range_requests > 0 {
-                return range_requests;
-            }
         }
     });
-    let result = fs.ensure_queue_exists_for_write(&queue).await;
-    assert_eq!(server.await.unwrap(), usize::from(list_succeeds));
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    assert_eq!(fs.get_last_id(&queue).unwrap(), uintn::UintN::from(3u64));
+    fs.enqueue(&queue, Bytes::from_static(b"accepted"))
+        .await
+        .unwrap();
     assert!(
-        result.is_err(),
+        tokio::time::timeout(Duration::from_millis(500), fs.flush_queue(&queue))
+            .await
+            .is_err(),
         "a stale pointer must not authorize reuse of an unchecked object key"
     );
-    fs.close().await.unwrap();
+    let requests = requests.lock().unwrap().clone();
+    assert!(
+        requests.len() >= 2,
+        "the bucket is asked again before the first file"
+    );
+    assert!(requests.iter().all(|r| !r.starts_with("PUT")));
+    assert!(fs.close().await.is_err());
 }
 
 #[tokio::test]
