@@ -18,8 +18,9 @@ const STALL: Duration = Duration::from_secs(30);
 
 /// How long a PUT waits for its answer once the whole body is handed to the
 /// socket. What the socket still holds drains at the link's pace, which the
-/// client cannot see; on Linux `TCP_USER_TIMEOUT` fails a link that stops
-/// acking within `STALL`, so this only bounds a bucket that never answers.
+/// client cannot see. On Linux it is also the `TCP_USER_TIMEOUT` of uploads:
+/// at `STALL` the kernel aborted uploads on a slow link that was still
+/// acking, while a body that stops moving is already caught by `STALL`.
 const ANSWER_WAIT: Duration = Duration::from_secs(300);
 
 /// When an upload body last moved, and how much of it has.
@@ -102,7 +103,7 @@ impl S3Client {
             .build()?;
         let upload_client = reqwest::Client::builder().connect_timeout(connect);
         #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
-        let upload_client = upload_client.tcp_user_timeout(STALL);
+        let upload_client = upload_client.tcp_user_timeout(ANSWER_WAIT);
         let upload_client = upload_client.build()?;
 
         Ok(Self {
