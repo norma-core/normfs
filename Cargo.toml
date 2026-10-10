@@ -14,7 +14,7 @@ members = [
 exclude = ["normfs_go", "go.work", "go.work.sum"]
 
 [workspace.package]
-version = "0.4.3"
+version = "0.4.4"
 edition = "2024"
 rust-version = "1.99"
 authors = ["Norma Core Team"]
@@ -30,14 +30,14 @@ prost = "0.12"
 log = "0.4.28"
 
 # Internal workspace crates
-uintn = { version = "0.4.3", path = "uintn-rs" }
-normfs-types = { version = "0.4.3", path = "normfs-types" }
-normfs-time = { version = "0.4.3", path = "normfs-time" }
-normfs-wal = { version = "0.4.3", path = "normfs-wal" }
-normfs-store = { version = "0.4.3", path = "normfs-store" }
-normfs-cloud = { version = "0.4.3", path = "normfs-cloud" }
-normfs-crypto = { version = "0.4.3", path = "normfs-crypto" }
-normfs-fs = { version = "0.4.3", path = "normfs-fs" }
+uintn = { version = "0.4.4", path = "uintn-rs" }
+normfs-types = { version = "0.4.4", path = "normfs-types" }
+normfs-time = { version = "0.4.4", path = "normfs-time" }
+normfs-wal = { version = "0.4.4", path = "normfs-wal" }
+normfs-store = { version = "0.4.4", path = "normfs-store" }
+normfs-cloud = { version = "0.4.4", path = "normfs-cloud" }
+normfs-crypto = { version = "0.4.4", path = "normfs-crypto" }
+normfs-fs = { version = "0.4.4", path = "normfs-fs" }
 
 # Dev dependencies
 tempfile = "3.25"

@@ -154,3 +154,95 @@ async fn a_flush_between_two_looks_is_seen() {
     assert!(!joined.same_file(&fs.file_room(&queue).unwrap()));
     fs.close().await.unwrap();
 }
+
+fn record(len: usize) -> Bytes {
+    Bytes::from(vec![0x5A; len])
+}
+
+#[tokio::test]
+async fn an_append_into_a_sealed_file_is_refused_and_takes_no_id() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let fs = open(temp.path(), Persist::STORE).await;
+    let queue = fs.resolve("cam0");
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    write(&fs, &queue, RECORD_LEN).await;
+
+    let room = fs.file_room(&queue).unwrap();
+    fs.flush_queue(&queue).await.unwrap();
+    assert!(matches!(
+        fs.try_enqueue_in(&queue, &room, record(RECORD_LEN)),
+        Err(Error::NotInFile)
+    ));
+    assert_eq!(fs.get_last_id(&queue).unwrap().to_u64().unwrap(), 0);
+
+    let id = fs.try_enqueue(&queue, record(RECORD_LEN)).unwrap();
+    assert_eq!(id.to_u64().unwrap(), 1);
+    fs.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_append_joins_the_file_it_saw_while_it_fits() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let fs = open(temp.path(), Persist::STORE).await;
+    let queue = fs.resolve("cam0");
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    write(&fs, &queue, RECORD_LEN).await;
+
+    let room = fs.file_room(&queue).unwrap();
+    fs.try_enqueue_in(&queue, &room, record(RECORD_LEN))
+        .unwrap();
+    let room = fs.file_room(&queue).unwrap();
+    let wider = room.room().unwrap() + 1;
+    assert!(matches!(
+        fs.try_enqueue_in(&queue, &room, record(wider)),
+        Err(Error::NotInFile)
+    ));
+    fs.try_enqueue_in(&queue, &room, record(room.room().unwrap()))
+        .unwrap();
+
+    fs.flush_queue(&queue).await.unwrap();
+    assert_eq!(store_files(temp.path(), &queue), 1);
+    fs.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_memory_queue_refuses_an_append_past_its_page() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let fs = open(temp.path(), Persist::MEMORY).await;
+    let queue = fs.resolve("cam0");
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    write(&fs, &queue, RECORD_LEN).await;
+
+    let room = fs.file_room(&queue).unwrap();
+    fs.try_enqueue_in(&queue, &room, record(RECORD_LEN))
+        .unwrap();
+    for _ in 0..2 {
+        write(&fs, &queue, RECORD_LEN).await;
+    }
+    assert!(matches!(
+        fs.try_enqueue_in(&queue, &room, record(RECORD_LEN)),
+        Err(Error::NotInFile)
+    ));
+    fs.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_look_from_before_a_reopen_matches_no_later_file() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let fs = open(temp.path(), Persist::STORE).await;
+    let queue = fs.resolve("cam0");
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    write(&fs, &queue, RECORD_LEN).await;
+    let stale = fs.file_room(&queue).unwrap();
+
+    fs.close_queue(&queue).await.unwrap();
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    write(&fs, &queue, RECORD_LEN).await;
+
+    assert!(!stale.same_file(&fs.file_room(&queue).unwrap()));
+    assert!(matches!(
+        fs.try_enqueue_in(&queue, &stale, record(RECORD_LEN)),
+        Err(Error::NotInFile)
+    ));
+    fs.close().await.unwrap();
+}

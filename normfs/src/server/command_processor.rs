@@ -633,6 +633,7 @@ impl CommandProcessor {
                     | Error::QueueClosed
                     | Error::ReservedQueue
                     | Error::WouldBlock
+                    | Error::NotInFile
                     | Error::MemoryBelowFloor { .. }
                     | Error::BucketUnreachable { .. }
                     | Error::PageBelowMinimum { .. } => {
