@@ -350,6 +350,9 @@ pub struct NormFsSettings {
     pub cloud_settings: Option<CloudSettings>,
     pub queue_settings: QueueSettings,
     pub memory_pointers_flush_interval: Duration,
+    /// Store and cloud files a read may hold decoded at once. A file is decoded
+    /// whole, so this many file sizes bound what cold reads hold.
+    pub cold_read_files: usize,
     /// Record cloud uploads, file metadata and failures in [`SYSTEM_QUEUE`].
     /// The path stays reserved when this is off.
     pub system_queue: bool,
@@ -374,6 +377,7 @@ impl Default for NormFsSettings {
             cloud_settings: None,
             queue_settings: Default::default(),
             memory_pointers_flush_interval: Duration::from_secs(5),
+            cold_read_files: 2,
             system_queue: true,
         }
     }
@@ -682,6 +686,7 @@ impl NormFS {
             cloud.clone(),
             Arc::new(settings.queue_settings.clone()),
             memory_pointers.clone(),
+            settings.cold_read_files,
         );
 
         let placer = Placer {

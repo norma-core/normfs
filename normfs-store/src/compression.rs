@@ -39,7 +39,16 @@ pub fn zstd_decompress(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
 
     #[cfg(all(feature = "c-libs", not(feature = "pure-rust")))]
     {
-        zstd::decode_all(data)
+        // Decoding into a buffer sized from the block headers needs no window
+        // of its own, which at window_log 27 is another 128 MiB.
+        let mut out = Vec::new();
+        match zstd::bulk::Decompressor::upper_bound(data) {
+            Some(bound) if out.try_reserve_exact(bound).is_ok() => {
+                zstd::bulk::Decompressor::new()?.decompress_to_buffer(data, &mut out)?;
+                Ok(out)
+            }
+            _ => zstd::decode_all(data),
+        }
     }
 
     #[cfg(not(any(feature = "c-libs", feature = "pure-rust")))]
