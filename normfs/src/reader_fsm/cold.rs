@@ -53,7 +53,7 @@ struct Recent {
 /// same file share one load.
 pub(crate) struct ColdFiles {
     slots: Arc<Semaphore>,
-    loading: Mutex<BTreeMap<FileKey, Arc<OnceCell<Shared>>>>,
+    loading: Loading,
     recent: Arc<Mutex<Recent>>,
     waiting: AtomicUsize,
 }
@@ -81,25 +81,15 @@ impl ColdFiles {
                 return Ok(Cold::Found(bytes));
             }
 
-            let cell = self
-                .loading
-                .lock()
-                .unwrap()
-                .entry(key.clone())
-                .or_default()
-                .clone();
+            let pending = Pending::join(&self.loading, &key);
             let mut own = None;
             let (own_ref, key_ref, load_ref) = (&mut own, &key, &load);
-            let shared = cell
+            let shared = pending
+                .cell()
                 .get_or_init(move || self.lead(key_ref, wait, load_ref, own_ref))
                 .await
                 .clone();
-            {
-                let mut loading = self.loading.lock().unwrap();
-                if loading.get(&key).is_some_and(|c| Arc::ptr_eq(c, &cell)) {
-                    loading.remove(&key);
-                }
-            }
+            drop(pending);
 
             if let Some(own) = own {
                 return own;
@@ -151,7 +141,7 @@ impl ColdFiles {
         if !wait {
             return None;
         }
-        self.waiting.fetch_add(1, Ordering::SeqCst);
+        let _waiting = Waiting::start(&self.waiting);
         // The kept file may be what holds the slot.
         self.recent.lock().unwrap().file = None;
         let permit = match tokio::time::timeout(SLOW_SLOT, self.slots.clone().acquire_owned()).await
@@ -164,8 +154,12 @@ impl ColdFiles {
                 self.slots.clone().acquire_owned().await
             }
         };
-        self.waiting.fetch_sub(1, Ordering::SeqCst);
         Some(permit.expect("the semaphore is never closed"))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn loading(&self) -> usize {
+        self.loading.lock().unwrap().len()
     }
 
     fn recent(&self, key: &FileKey) -> Option<Bytes> {
@@ -195,5 +189,68 @@ impl ColdFiles {
                 }
             }
         });
+    }
+}
+
+type Loading = Mutex<BTreeMap<FileKey, Arc<OnceCell<Shared>>>>;
+
+/// A read's share of a load, dropped also when the read is cancelled. Every
+/// clone of a cell is made and dropped under the map's lock, so the count
+/// there says whether anyone else still waits on it.
+struct Pending<'a> {
+    loading: &'a Loading,
+    key: &'a FileKey,
+    cell: Option<Arc<OnceCell<Shared>>>,
+}
+
+impl<'a> Pending<'a> {
+    fn join(loading: &'a Loading, key: &'a FileKey) -> Self {
+        let cell = loading
+            .lock()
+            .unwrap()
+            .entry(key.clone())
+            .or_default()
+            .clone();
+        Self {
+            loading,
+            key,
+            cell: Some(cell),
+        }
+    }
+
+    fn cell(&self) -> &OnceCell<Shared> {
+        self.cell.as_ref().expect("taken only on drop")
+    }
+}
+
+impl Drop for Pending<'_> {
+    fn drop(&mut self) {
+        let mut loading = self.loading.lock().unwrap();
+        let Some(cell) = self.cell.take() else {
+            return;
+        };
+        // A finished load leaves at once; an unfinished one stays while
+        // another read can still take it over.
+        let ours = loading.get(self.key).is_some_and(|c| Arc::ptr_eq(c, &cell));
+        if ours && (cell.initialized() || Arc::strong_count(&cell) == 2) {
+            loading.remove(self.key);
+        }
+        drop(cell);
+    }
+}
+
+/// Counts a read waiting for a slot, also when the wait is cancelled.
+struct Waiting<'a>(&'a AtomicUsize);
+
+impl<'a> Waiting<'a> {
+    fn start(count: &'a AtomicUsize) -> Self {
+        count.fetch_add(1, Ordering::SeqCst);
+        Self(count)
+    }
+}
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
