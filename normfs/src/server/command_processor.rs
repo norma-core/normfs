@@ -112,8 +112,8 @@ fn wire_slots() -> Arc<Semaphore> {
 
 /// The reader's entries in order, each with the data to send. With `compress`
 /// a task drains the reader's channel, so a follow drains as fast as without
-/// compression (a full channel drops a follower), and the entries wait for a
-/// slot of `slots` before they compress on the blocking pool.
+/// compression (a full channel drops a follower). An entry compresses on the
+/// blocking pool when `slots` has one free and goes raw when it has none.
 fn encoded(rx: mpsc::Receiver<ReadEntry>, compress: bool) -> mpsc::Receiver<(ReadEntry, Encoded)> {
     encoded_with(rx, compress, wire_slots())
 }
@@ -140,28 +140,20 @@ pub(crate) fn encoded_with(
         return out_rx;
     }
     let (pending_tx, mut pending_rx) = mpsc::channel(ENCODE_AHEAD);
-    // Closed once the sending side has dropped the read, so a client that has
-    // gone is seen while this waits for a slot, not after the drain's next send.
-    let client = out_tx.clone();
     tokio::spawn(async move {
         while let Some(mut entry) = rx.recv().await {
             let data = std::mem::take(&mut entry.data);
-            let job = if data.len() >= MIN_WIRE_SIZE {
-                // A read whose client has gone starts nothing more.
-                let permit = tokio::select! {
-                    permit = slots.clone().acquire_owned() => permit.ok(),
-                    _ = client.closed() => return,
-                };
-                permit.map(|permit| {
-                    let data = data.clone();
-                    tokio::task::spawn_blocking(move || {
-                        let _permit = permit;
-                        compress_counted(&data)
-                    })
+            // Waiting for a slot would stall the drain until the follower is dropped.
+            let permit = (data.len() >= MIN_WIRE_SIZE)
+                .then(|| slots.clone().try_acquire_owned().ok())
+                .flatten();
+            let job = permit.map(|permit| {
+                let data = data.clone();
+                tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    compress_counted(&data)
                 })
-            } else {
-                None
-            };
+            });
             if pending_tx.send((entry, data, job)).await.is_err() {
                 return;
             }

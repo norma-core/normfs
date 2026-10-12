@@ -39,8 +39,11 @@ async fn many_compressed_reads_share_one_cap_and_keep_order() {
         for i in 0..ENTRIES {
             let (entry, (data, encoding)) = out.recv().await.unwrap();
             assert_eq!(entry.id, UintN::from(i));
-            assert_eq!(encoding, Encoding::EncZstd);
-            assert_eq!(normfs_store::zstd_decompress(&data).unwrap(), record(i));
+            let data = match encoding {
+                Encoding::EncZstd => Bytes::from(normfs_store::zstd_decompress(&data).unwrap()),
+                Encoding::EncNone => data,
+            };
+            assert_eq!(data, record(i));
         }
     }
     let peak = PEAK.load(SeqCst);
@@ -51,19 +54,29 @@ async fn many_compressed_reads_share_one_cap_and_keep_order() {
 }
 
 #[tokio::test]
-async fn a_read_waiting_for_a_slot_stops_once_its_client_is_gone() {
+async fn a_follow_keeps_draining_while_every_slot_is_taken() {
+    const ENTRIES: u64 = 2100;
     let slots = Arc::new(Semaphore::new(0));
-    let (tx, rx) = mpsc::channel(16);
-    tx.send(ReadEntry::new(
-        UintN::from(0u64),
-        record(0),
-        DataSource::Memory,
-    ))
-    .await
-    .unwrap();
-    let out = encoded_with(rx, true, slots);
-    drop(out);
-    tokio::time::timeout(std::time::Duration::from_secs(2), tx.closed())
-        .await
-        .expect("the read kept waiting for a slot after its client went");
+    let (tx, rx) = mpsc::channel(2048);
+    let mut out = encoded_with(rx, true, slots);
+    let reader = tokio::spawn(async move {
+        let mut raw = 0;
+        while let Some((_, (_, encoding))) = out.recv().await {
+            assert_eq!(encoding, Encoding::EncNone);
+            raw += 1;
+        }
+        raw
+    });
+    for i in 0..ENTRIES {
+        let entry = ReadEntry::new(
+            UintN::from(i),
+            Bytes::from(vec![7u8; 2048]),
+            DataSource::Memory,
+        );
+        tx.try_send(entry)
+            .unwrap_or_else(|_| panic!("the follow's channel filled at entry {i}"));
+        tokio::task::yield_now().await;
+    }
+    drop(tx);
+    assert_eq!(reader.await.unwrap(), ENTRIES);
 }
