@@ -12,7 +12,7 @@ static WARNINGS: Capture = Capture(Mutex::new(Vec::new()));
 
 impl log::Log for Capture {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
-        metadata.level() <= log::Level::Warn
+        metadata.level() <= log::Level::Debug
     }
 
     fn log(&self, record: &log::Record) {
@@ -27,7 +27,8 @@ impl log::Log for Capture {
 #[tokio::test]
 async fn recovery_does_not_ask_for_file_zero() {
     log::set_logger(&WARNINGS).unwrap();
-    log::set_max_level(log::LevelFilter::Warn);
+    // Debug: a probe of a missing WAL file is logged at debug.
+    log::set_max_level(log::LevelFilter::Debug);
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().to_path_buf();
