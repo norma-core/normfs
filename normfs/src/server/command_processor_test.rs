@@ -63,3 +63,21 @@ fn an_entry_above_the_client_limit_goes_raw() {
     assert!(!worth_compressing(MAX_WIRE_ENTRY + 1, &wire));
     assert!(!worth_compressing(wire.min_size - 1, &wire));
 }
+
+#[tokio::test]
+async fn a_read_waiting_for_a_slot_stops_once_its_client_is_gone() {
+    let slots = Arc::new(Semaphore::new(0));
+    let (tx, rx) = mpsc::channel(16);
+    tx.send(ReadEntry::new(
+        UintN::from(0u64),
+        record(0),
+        DataSource::Memory,
+    ))
+    .await
+    .unwrap();
+    let out = encoded_with(rx, Some(WireCompression::default()), slots);
+    drop(out);
+    tokio::time::timeout(std::time::Duration::from_secs(2), tx.closed())
+        .await
+        .expect("the read kept waiting for a slot after its client went");
+}

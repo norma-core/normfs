@@ -147,6 +147,9 @@ pub(crate) fn encoded_with(
         return out_rx;
     };
     let (pending_tx, mut pending_rx) = mpsc::channel(ENCODE_AHEAD);
+    // Closed once the sending side has dropped the read, so a client that has
+    // gone is seen while this waits for a slot, not after the drain's next send.
+    let client = out_tx.clone();
     tokio::spawn(async move {
         while let Some(mut entry) = rx.recv().await {
             let data = std::mem::take(&mut entry.data);
@@ -154,7 +157,7 @@ pub(crate) fn encoded_with(
                 // A read whose client has gone starts nothing more.
                 let permit = tokio::select! {
                     permit = slots.clone().acquire_owned() => permit.ok(),
-                    _ = pending_tx.closed() => return,
+                    _ = client.closed() => return,
                 };
                 permit.map(|permit| {
                     let data = data.clone();
