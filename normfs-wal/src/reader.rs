@@ -173,7 +173,9 @@ pub(crate) async fn read_wal_header_from(
     log::debug!("WAL reader: reading header from file {}", file_id);
 
     let Some((file, file_len)) = file else {
-        log::warn!("WAL reader: file {} not found", file_id);
+        // Usually archived to the store, which callers read next; a file in
+        // neither shows up as a gap in ids.
+        log::debug!("WAL reader: file {} not found", file_id);
         return Err(WalError::WalNotFound);
     };
 
@@ -220,7 +222,7 @@ pub(crate) async fn get_wal_range_from(
     log::debug!("WAL reader: getting entry range from file {}", file_id);
 
     let Some((file, file_len)) = file else {
-        log::warn!("WAL reader: file {} not found", file_id);
+        log::debug!("WAL reader: file {} not found", file_id);
         return Err(WalError::WalNotFound);
     };
 
@@ -401,7 +403,7 @@ pub(crate) fn get_wal_content_from(
     log::debug!("WAL reader: getting content from file {}", file_id);
 
     let Some(content) = content else {
-        log::warn!("WAL reader: file {} not found", file_id);
+        log::debug!("WAL reader: file {} not found", file_id);
         return Err(WalError::WalNotFound);
     };
 
@@ -582,7 +584,7 @@ pub(crate) async fn read_wal_file_range_from(
     );
 
     let Some((file, file_len)) = file else {
-        log::warn!("WAL reader: file {} not found", file_id);
+        log::debug!("WAL reader: file {} not found", file_id);
         return Err(WalError::WalNotFound);
     };
 
