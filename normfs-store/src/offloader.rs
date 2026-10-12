@@ -103,8 +103,12 @@ impl QueueOffloader {
             events,
         };
         let worker_shared = shared.clone();
+        // Files above everything on disk now are written by this process, so
+        // no earlier life can have put them. Without that bound every PUT
+        // looks first.
+        let born_after = worker.newest_on_disk().await;
         let worker = tokio::spawn(async move {
-            Self::offload_worker(worker, worker_shared).await;
+            Self::offload_worker(worker, worker_shared, born_after).await;
         });
         Self { shared, worker }
     }
@@ -119,7 +123,11 @@ impl QueueOffloader {
         self.shared.moved_through.lock().unwrap().clone()
     }
 
-    async fn offload_worker(worker: QueueOffloaderWorker, shared: Arc<Shared>) {
+    async fn offload_worker(
+        worker: QueueOffloaderWorker,
+        shared: Arc<Shared>,
+        born_after: Option<Option<UintN>>,
+    ) {
         info!(
             "Starting offload worker for queue_id: {}",
             worker.queue_id.short()
@@ -135,6 +143,8 @@ impl QueueOffloader {
         let mut dropped: u64 = 0;
         let mut later = BTreeMap::new();
         let mut retry_at = Instant::now();
+        // A file at or below this was tried already, so it may have landed.
+        let mut newest_tried: Option<UintN> = None;
 
         loop {
             if !scanned && Instant::now() >= scan_at {
@@ -165,7 +175,14 @@ impl QueueOffloader {
                 continue;
             };
             let tried = later.remove(&file_id).unwrap_or_default();
-            match worker.move_file(&file_id, tried).await {
+            let fresh = born_after
+                .as_ref()
+                .is_some_and(|b| b.as_ref().is_none_or(|b| &file_id > b))
+                && newest_tried.as_ref().is_none_or(|t| &file_id > t);
+            if newest_tried.as_ref().is_none_or(|t| &file_id > t) {
+                newest_tried = Some(file_id.clone());
+            }
+            match worker.move_file(&file_id, tried, fresh).await {
                 Outcome::Moved(put) => {
                     moved.mark(file_id);
                     if let Some(put) = put {
@@ -459,6 +476,24 @@ impl QueueOffloaderWorker {
         Ok(first)
     }
 
+    /// The newest file the first layer or the WAL holds, `Some(None)` when
+    /// they hold none, `None` when that cannot be told.
+    /// The WAL first, as in [`Self::may_land`]: a file archived between the
+    /// two looks is then still seen in the store.
+    async fn newest_on_disk(&self) -> Option<Option<UintN>> {
+        let mut newest = None;
+        if let Some(wal) = &self.wal {
+            newest = wal.find(&self.queue_id, End::Max).await.ok()?;
+        }
+        let stored = self
+            .from
+            .backend()
+            .find(&self.queue_id, End::Max)
+            .await
+            .ok()?;
+        Some(newest.max(stored))
+    }
+
     /// The files in the WAL and in the first layer, the WAL first as in
     /// [`Self::may_land`].
     async fn list_ids(&self) -> Result<BTreeSet<UintN>, BackendError> {
@@ -503,14 +538,22 @@ impl QueueOffloaderWorker {
         false
     }
 
-    async fn move_file(&self, file_id: &UintN, tried: Tried) -> Outcome {
+    async fn move_file(&self, file_id: &UintN, tried: Tried, fresh: bool) -> Outcome {
         let Tried {
             mut attempt,
             mut first_put,
         } = tried;
         let mut remote_failures: u32 = 0;
+        // A failed PUT can still have landed, so every later try looks first.
+        let mut look = !fresh || first_put.is_some();
         loop {
-            let failed = match self.is_file_offloaded(file_id).await {
+            let offloaded = if look {
+                self.is_file_offloaded(file_id).await
+            } else {
+                Ok(false)
+            };
+            look = true;
+            let failed = match offloaded {
                 Ok(true) => {
                     // A put this worker saw fail can still have landed.
                     let landed =
@@ -620,7 +663,9 @@ impl QueueOffloaderWorker {
             Ok(read) => read,
             Err(e) => {
                 let e = OffloadError::local(e);
-                if report {
+                // A file gone from disk is no failure: the PUT that skipped
+                // its look first is where a fresh file finds that out.
+                if report && !matches!(e, OffloadError::LocalFileError(_)) {
                     self.report_failure(file_id, UploadFailure::LocalRead, &e);
                 }
                 return Err(e);

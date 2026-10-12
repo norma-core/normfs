@@ -77,6 +77,8 @@ pub struct S3Client {
     /// Without the read timeout, which runs from the send to the answer and
     /// would cut off a slow upload that is still moving; see `put_body`.
     upload_client: reqwest::Client,
+    /// Shared by every clone, so the cap holds across queues.
+    uploads: Option<Arc<tokio::sync::Semaphore>>,
     list_page_size: Option<usize>,
 }
 
@@ -110,8 +112,17 @@ impl S3Client {
             credentials,
             http_client,
             upload_client,
+            uploads: None,
             list_page_size: None,
         })
+    }
+
+    /// Lets at most `uploads` PUTs run at once, the rest waiting their turn
+    /// in the order they asked; 0 is no cap.
+    pub fn with_upload_limit(mut self, uploads: usize) -> Self {
+        let uploads = uploads.min(tokio::sync::Semaphore::MAX_PERMITS);
+        self.uploads = (uploads > 0).then(|| Arc::new(tokio::sync::Semaphore::new(uploads)));
+        self
     }
 
     /// Caps each listing page below the endpoint's own limit, so a test can
@@ -170,6 +181,11 @@ impl S3Client {
     where
         S: Stream<Item = std::io::Result<Bytes>> + Unpin + Send + 'static,
     {
+        // Waiting for a turn is not a stall: the clock starts once it is ours.
+        let _turn = match &self.uploads {
+            Some(uploads) => uploads.clone().acquire_owned().await.ok(),
+            None => None,
+        };
         let action = self.bucket.put_object(Some(&self.credentials), key);
         let url = action.sign(PRESIGNED_URL_DURATION);
         let progress = Arc::new(Mutex::new(Progress {

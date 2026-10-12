@@ -18,4 +18,6 @@ pub struct CloudSettings {
 }
 
 #[cfg(test)]
+mod client_test;
+#[cfg(test)]
 mod store_test;
