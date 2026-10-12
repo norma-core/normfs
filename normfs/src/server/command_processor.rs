@@ -14,7 +14,7 @@ use crate::proto::{
 };
 use crate::proto::{Encoding, OffsetType};
 use crate::{DataSource, Error, NormFS, WireCompression};
-use normfs_types::{QueueId, ReadPosition};
+use normfs_types::{QueueId, ReadEntry, ReadPosition};
 
 fn get_local_stamp_ns() -> u64 {
     SystemTime::now()
@@ -89,20 +89,71 @@ fn get_monotonic_stamp_ns() -> u64 {
 }
 
 /// Convert DataSource to protobuf enum value
-/// zstd off the async workers; the raw entry when compression fails or saves
-/// less than a tenth, so a client never pays a decode for nothing.
-async fn encode(data: Bytes, wire: WireCompression) -> (Bytes, Encoding, u64) {
-    let len = data.len();
-    let raw = data.clone();
-    let packed =
-        tokio::task::spawn_blocking(move || normfs_store::zstd_compress_at(&data, wire.level))
-            .await;
-    match packed {
-        Ok(Ok(packed)) if packed.len() * 10 < len * 9 => {
-            (Bytes::from(packed), Encoding::EncZstd, len as u64)
+type Encoded = (Bytes, Encoding, u64);
+
+/// How many entries of one read may be compressing at once.
+const ENCODE_AHEAD: usize = 16;
+
+/// The reader's entries in order, each with the data to send. With a wire
+/// rule the reader's channel is drained by a task of its own and up to
+/// `ENCODE_AHEAD` entries compress at once on the blocking pool, so a follow
+/// drains as fast as without compression: a full channel drops a follower.
+fn encoded(
+    mut rx: mpsc::Receiver<ReadEntry>,
+    wire: Option<WireCompression>,
+) -> mpsc::Receiver<(ReadEntry, Encoded)> {
+    let (out_tx, out_rx) = mpsc::channel(ENCODE_AHEAD);
+    let Some(wire) = wire else {
+        tokio::spawn(async move {
+            while let Some(mut entry) = rx.recv().await {
+                let data = std::mem::take(&mut entry.data);
+                if out_tx
+                    .send((entry, (data, Encoding::EncNone, 0)))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        });
+        return out_rx;
+    };
+    let (pending_tx, mut pending_rx) = mpsc::channel(ENCODE_AHEAD);
+    tokio::spawn(async move {
+        while let Some(mut entry) = rx.recv().await {
+            let data = std::mem::take(&mut entry.data);
+            let job = (data.len() >= wire.min_size).then(|| {
+                let data = data.clone();
+                tokio::task::spawn_blocking(move || {
+                    normfs_store::zstd_compress_at(&data, wire.level)
+                })
+            });
+            if pending_tx.send((entry, data, job)).await.is_err() {
+                return;
+            }
         }
-        _ => (raw, Encoding::EncNone, 0),
-    }
+    });
+    tokio::spawn(async move {
+        while let Some((entry, data, job)) = pending_rx.recv().await {
+            let len = data.len();
+            let packed = match job {
+                Some(job) => job.await.ok().and_then(Result::ok),
+                None => None,
+            };
+            // Raw when zstd fails or saves less than a tenth, so a client
+            // never pays a decode for nothing.
+            let sent = match packed {
+                Some(packed) if packed.len() * 10 < len * 9 => {
+                    (Bytes::from(packed), Encoding::EncZstd, len as u64)
+                }
+                _ => (data, Encoding::EncNone, 0),
+            };
+            if out_tx.send((entry, sent)).await.is_err() {
+                return;
+            }
+        }
+    });
+    out_rx
 }
 
 fn data_source_to_proto(source: DataSource) -> i32 {
@@ -537,7 +588,7 @@ impl CommandProcessor {
                 .contains(&(Encoding::EncZstd as i32))
         });
 
-        let (tx, mut rx) = mpsc::channel(2048);
+        let (tx, rx) = mpsc::channel(2048);
 
         let normfs = self.normfs.clone();
         let queue_id_clone = queue_id.clone();
@@ -547,14 +598,10 @@ impl CommandProcessor {
                 .read(queue_id_clone, position, limit, step, tx)
                 .await
         });
-        while let Some(entry) = rx.recv().await {
+        let mut entries = encoded(rx, wire);
+        while let Some((entry, (data, encoding, uncompressed_size))) = entries.recv().await {
             let mut buffer = BytesMut::new();
             entry.id.write_value_to_buffer(&mut buffer);
-
-            let (data, encoding, uncompressed_size) = match wire {
-                Some(wire) if entry.data.len() >= wire.min_size => encode(entry.data, wire).await,
-                _ => (entry.data, Encoding::EncNone, 0),
-            };
 
             let entry_response = ServerResponse {
                 read: Some(ReadResponse {
