@@ -22,6 +22,8 @@ pub(crate) struct Memory {
     pub(crate) files: Mutex<BTreeMap<(String, UintN), Bytes>>,
     refuse: Mutex<u32>,
     pub(crate) lose: Mutex<u32>,
+    /// Puts and size lookups, in order.
+    ops: Mutex<Vec<(UintN, &'static str)>>,
 }
 
 impl Backend for Memory {
@@ -34,6 +36,7 @@ impl Backend for Memory {
     }
 
     fn put<'a>(&'a self, q: &'a QueueId, id: &'a UintN, body: Body) -> BackendFuture<'a, ()> {
+        self.ops.lock().unwrap().push((id.clone(), "put"));
         Box::pin(async move {
             {
                 let mut refuse = self.refuse.lock().unwrap();
@@ -93,6 +96,7 @@ impl Backend for Memory {
     }
 
     fn size<'a>(&'a self, q: &'a QueueId, id: &'a UintN) -> BackendFuture<'a, Option<u64>> {
+        self.ops.lock().unwrap().push((id.clone(), "size"));
         Box::pin(async move { Ok(self.get(q, id).await?.map(|b| b.len() as u64)) })
     }
 
@@ -824,4 +828,115 @@ async fn a_put_that_keeps_failing_is_logged_on_tries_1_2_4_8() {
         .filter(|e| matches!(e, SystemEvent::UploadFailed { .. }))
         .count();
     assert_eq!(failed, 4);
+}
+
+fn first_op(remote: &Memory, id: u64) -> Option<&'static str> {
+    let id = UintN::from(id);
+    remote
+        .ops
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(op_id, _)| *op_id == id)
+        .map(|(_, op)| *op)
+}
+
+async fn moved(remote: &Memory, queue: &QueueId, id: u64) {
+    wait_for("the file in the next layer", async || {
+        remote
+            .files
+            .lock()
+            .unwrap()
+            .contains_key(&(queue.to_string(), UintN::from(id)))
+    })
+    .await;
+}
+
+async fn offloader_over(
+    local: &Arc<dyn Backend>,
+    remote: &Arc<Memory>,
+    queue: &QueueId,
+) -> QueueOffloader {
+    QueueOffloader::new(
+        Arc::new(Layer::new(local.clone(), None, false)),
+        Arc::new(Layer::new(remote.clone(), None, true)),
+        None,
+        queue.clone(),
+        events::discard(),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn a_file_newer_than_the_disk_at_start_is_put_without_a_look_first() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let local = local_layer(&temp);
+    let queue = QueueIdResolver::new("inst").resolve("cam");
+    put(local.as_ref(), &queue, 1).await;
+    let remote = Arc::new(Memory::default());
+    let offloader = offloader_over(&local, &remote, &queue).await;
+    put(local.as_ref(), &queue, 2).await;
+    offloader.file_landed(UintN::from(2u64));
+    moved(&remote, &queue, 1).await;
+    moved(&remote, &queue, 2).await;
+    assert_eq!(first_op(&remote, 1), Some("size"));
+    assert_eq!(first_op(&remote, 2), Some("put"));
+}
+
+#[tokio::test]
+async fn the_first_file_of_an_empty_queue_is_put_without_a_look_first() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let local = local_layer(&temp);
+    let queue = QueueIdResolver::new("inst").resolve("cam");
+    let remote = Arc::new(Memory::default());
+    let offloader = offloader_over(&local, &remote, &queue).await;
+    put(local.as_ref(), &queue, 1).await;
+    offloader.file_landed(UintN::from(1u64));
+    moved(&remote, &queue, 1).await;
+    assert_eq!(first_op(&remote, 1), Some("put"));
+}
+
+#[tokio::test]
+async fn a_file_on_disk_at_start_is_looked_up_even_when_reported_again() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let local = local_layer(&temp);
+    let queue = QueueIdResolver::new("inst").resolve("cam");
+    put(local.as_ref(), &queue, 1).await;
+    let remote = Arc::new(Memory::default());
+    let offloader = offloader_over(&local, &remote, &queue).await;
+    // As a WAL an earlier life left behind, migrated again.
+    offloader.file_landed(UintN::from(1u64));
+    moved(&remote, &queue, 1).await;
+    assert_eq!(first_op(&remote, 1), Some("size"));
+}
+
+#[tokio::test]
+async fn a_retry_looks_whether_the_failed_put_landed() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let local = local_layer(&temp);
+    let queue = QueueIdResolver::new("inst").resolve("cam");
+    put(local.as_ref(), &queue, 1).await;
+    let remote = Arc::new(Memory::default());
+    remote.files.lock().unwrap().insert(
+        (queue.to_string(), UintN::from(1u64)),
+        Bytes::from("store file 1"),
+    );
+    *remote.lose.lock().unwrap() = 1;
+    let offloader = offloader_over(&local, &remote, &queue).await;
+    put(local.as_ref(), &queue, 2).await;
+    offloader.file_landed(UintN::from(2u64));
+    wait_for("the bound over file 2", async || {
+        offloader.get_latest_offloaded_id().await == Some(UintN::from(2u64))
+    })
+    .await;
+    let ops: Vec<_> = remote
+        .ops
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(id, _)| *id == UintN::from(2u64))
+        .map(|(_, op)| *op)
+        .collect();
+    assert_eq!(&ops[..2], ["put", "size"], "{ops:?}");
+    assert_eq!(ops.iter().filter(|op| **op == "put").count(), 1, "{ops:?}");
 }

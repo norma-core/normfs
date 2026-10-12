@@ -358,6 +358,12 @@ pub struct NormFsSettings {
     /// Store and cloud files a read may hold decoded at once. A file is decoded
     /// whole, so this many file sizes bound what cold reads hold.
     pub cold_read_files: usize,
+    /// Uploads to the bucket in flight at once, across every queue; 0 is no
+    /// cap. A thin uplink shared by every queue otherwise splits into as many
+    /// slow uploads as there are queues, and each one that times out is sent
+    /// again from the start. Offloads of local files and cloud-direct
+    /// landings each have this many.
+    pub max_concurrent_uploads: usize,
     /// Record cloud uploads, file metadata and failures in [`SYSTEM_QUEUE`].
     /// The path stays reserved when this is off.
     pub system_queue: bool,
@@ -383,6 +389,7 @@ impl Default for NormFsSettings {
             queue_settings: Default::default(),
             memory_pointers_flush_interval: Duration::from_secs(5),
             cold_read_files: 2,
+            max_concurrent_uploads: 2,
             system_queue: true,
         }
     }
@@ -590,6 +597,7 @@ impl NormFS {
                 cloud_settings.secret_key.clone(),
             ) {
                 Ok(client) => {
+                    let client = client.with_upload_limit(settings.max_concurrent_uploads);
                     log::info!(target: "normfs",
                         "Created S3 client for bucket '{}' at endpoint '{}' with prefix '{}'",
                         cloud_settings.bucket, cloud_settings.endpoint, cloud_settings.prefix
@@ -676,14 +684,23 @@ impl NormFS {
 
         // A queue whose first layer is the bucket keeps nothing local to list
         // on restart, so its landings are recorded.
-        let cloud_sink = cloud.as_ref().map(|cloud| {
-            let after = normfs_store::AfterLanding::Record(memory_pointers.clone());
-            Arc::new(normfs_store::LayerSink::new(
-                cloud.clone(),
-                after,
-                events.clone(),
-            ))
-        });
+        // Landings take turns among themselves, apart from the offloaders: a
+        // landing holds a pack slot while it waits, and what the offloaders
+        // send is already on disk.
+        let cloud_sink = match (&cloud, &cloud_client, &cloud_prefix) {
+            (Some(cloud), Some(client), Some(prefix)) => {
+                let after = normfs_store::AfterLanding::Record(memory_pointers.clone());
+                let client = (**client)
+                    .clone()
+                    .with_upload_limit(settings.max_concurrent_uploads);
+                let put = normfs_cloud::S3Store::new(Arc::new(client), prefix);
+                Some(Arc::new(
+                    normfs_store::LayerSink::new(cloud.clone(), after, events.clone())
+                        .with_put(Arc::new(put)),
+                ))
+            }
+            _ => None,
+        };
         let reader_fsm = reader_fsm::ReaderFSM::new(
             wal.clone(),
             store_arc.clone(),
