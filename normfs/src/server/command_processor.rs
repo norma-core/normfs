@@ -13,7 +13,7 @@ use crate::proto::{
     ReadResponse, ServerResponse, SetupRequest, SetupResponse, WriteRequest, WriteResponse,
 };
 use crate::proto::{Encoding, OffsetType};
-use crate::{DataSource, Error, NormFS, WireCompression};
+use crate::{DataSource, Error, NormFS};
 use normfs_types::{QueueId, ReadEntry, ReadPosition};
 
 fn get_local_stamp_ns() -> u64 {
@@ -88,14 +88,14 @@ fn get_monotonic_stamp_ns() -> u64 {
     get_local_stamp_ns()
 }
 
-/// Convert DataSource to protobuf enum value
-type Encoded = (Bytes, Encoding, u64);
+type Encoded = (Bytes, Encoding);
 
 /// How many entries of one read may wait for their compression, in order.
 const ENCODE_AHEAD: usize = 16;
 
-/// Entries above this go raw; the Go client refuses a larger decode.
-pub(crate) const MAX_WIRE_ENTRY: usize = 256 << 20;
+/// Smaller entries go raw: zstd's frame costs more than it saves on them.
+const MIN_WIRE_SIZE: usize = 1024;
+const WIRE_LEVEL: i32 = 3;
 
 /// Compressions in flight across every read of the process. They run on the
 /// blocking pool, which store sealing needs too; without one cap, many
@@ -110,33 +110,26 @@ fn wire_slots() -> Arc<Semaphore> {
         .clone()
 }
 
-pub(crate) fn worth_compressing(len: usize, wire: &WireCompression) -> bool {
-    len >= wire.min_size && len <= MAX_WIRE_ENTRY
-}
-
-/// The reader's entries in order, each with the data to send. With a wire
-/// rule a task drains the reader's channel, so a follow drains as fast as
-/// without compression (a full channel drops a follower), and the entries
-/// wait for a slot of `slots` before they compress on the blocking pool.
-fn encoded(
-    rx: mpsc::Receiver<ReadEntry>,
-    wire: Option<WireCompression>,
-) -> mpsc::Receiver<(ReadEntry, Encoded)> {
-    encoded_with(rx, wire, wire_slots())
+/// The reader's entries in order, each with the data to send. With `compress`
+/// a task drains the reader's channel, so a follow drains as fast as without
+/// compression (a full channel drops a follower), and the entries wait for a
+/// slot of `slots` before they compress on the blocking pool.
+fn encoded(rx: mpsc::Receiver<ReadEntry>, compress: bool) -> mpsc::Receiver<(ReadEntry, Encoded)> {
+    encoded_with(rx, compress, wire_slots())
 }
 
 pub(crate) fn encoded_with(
     mut rx: mpsc::Receiver<ReadEntry>,
-    wire: Option<WireCompression>,
+    compress: bool,
     slots: Arc<Semaphore>,
 ) -> mpsc::Receiver<(ReadEntry, Encoded)> {
     let (out_tx, out_rx) = mpsc::channel(ENCODE_AHEAD);
-    let Some(wire) = wire else {
+    if !compress {
         tokio::spawn(async move {
             while let Some(mut entry) = rx.recv().await {
                 let data = std::mem::take(&mut entry.data);
                 if out_tx
-                    .send((entry, (data, Encoding::EncNone, 0)))
+                    .send((entry, (data, Encoding::EncNone)))
                     .await
                     .is_err()
                 {
@@ -145,7 +138,7 @@ pub(crate) fn encoded_with(
             }
         });
         return out_rx;
-    };
+    }
     let (pending_tx, mut pending_rx) = mpsc::channel(ENCODE_AHEAD);
     // Closed once the sending side has dropped the read, so a client that has
     // gone is seen while this waits for a slot, not after the drain's next send.
@@ -153,7 +146,7 @@ pub(crate) fn encoded_with(
     tokio::spawn(async move {
         while let Some(mut entry) = rx.recv().await {
             let data = std::mem::take(&mut entry.data);
-            let job = if worth_compressing(data.len(), &wire) {
+            let job = if data.len() >= MIN_WIRE_SIZE {
                 // A read whose client has gone starts nothing more.
                 let permit = tokio::select! {
                     permit = slots.clone().acquire_owned() => permit.ok(),
@@ -163,7 +156,7 @@ pub(crate) fn encoded_with(
                     let data = data.clone();
                     tokio::task::spawn_blocking(move || {
                         let _permit = permit;
-                        compress_counted(&data, wire.level)
+                        compress_counted(&data)
                     })
                 })
             } else {
@@ -185,9 +178,9 @@ pub(crate) fn encoded_with(
             // never pays a decode for nothing.
             let sent = match packed {
                 Some(packed) if packed.len() * 10 < len * 9 => {
-                    (Bytes::from(packed), Encoding::EncZstd, len as u64)
+                    (Bytes::from(packed), Encoding::EncZstd)
                 }
-                _ => (data, Encoding::EncNone, 0),
+                _ => (data, Encoding::EncNone),
             };
             if out_tx.send((entry, sent)).await.is_err() {
                 return;
@@ -203,7 +196,7 @@ pub(crate) static IN_FLIGHT: std::sync::atomic::AtomicUsize =
 #[cfg(test)]
 pub(crate) static PEAK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-fn compress_counted(data: &[u8], level: i32) -> std::io::Result<Vec<u8>> {
+fn compress_counted(data: &[u8]) -> std::io::Result<Vec<u8>> {
     #[cfg(test)]
     let _counted = {
         use std::sync::atomic::Ordering::SeqCst;
@@ -211,7 +204,7 @@ fn compress_counted(data: &[u8], level: i32) -> std::io::Result<Vec<u8>> {
         PEAK.fetch_max(now, SeqCst);
         InFlight
     };
-    normfs_store::zstd_compress_at(data, level)
+    normfs_store::zstd_compress_at(data, WIRE_LEVEL)
 }
 
 #[cfg(test)]
@@ -224,6 +217,7 @@ impl Drop for InFlight {
     }
 }
 
+/// Convert DataSource to protobuf enum value
 fn data_source_to_proto(source: DataSource) -> i32 {
     use read_response::DataSource as ProtoDataSource;
     match source {
@@ -648,13 +642,12 @@ impl CommandProcessor {
             return;
         }
 
-        // Only a client that asked for zstd gets it, and only on queues with
-        // a rule for it.
-        let wire = self.normfs.wire_compression(&queue_id).filter(|_| {
-            request
+        // Only a client that asked for zstd gets it, and only on queues
+        // stored with it.
+        let compress = self.normfs.stores_compressed(&queue_id)
+            && request
                 .accept_encodings
-                .contains(&(Encoding::EncZstd as i32))
-        });
+                .contains(&(Encoding::EncZstd as i32));
 
         let (tx, rx) = mpsc::channel(2048);
 
@@ -666,8 +659,8 @@ impl CommandProcessor {
                 .read(queue_id_clone, position, limit, step, tx)
                 .await
         });
-        let mut entries = encoded(rx, wire);
-        while let Some((entry, (data, encoding, uncompressed_size))) = entries.recv().await {
+        let mut entries = encoded(rx, compress);
+        while let Some((entry, (data, encoding))) = entries.recv().await {
             let mut buffer = BytesMut::new();
             entry.id.write_value_to_buffer(&mut buffer);
 
@@ -681,7 +674,6 @@ impl CommandProcessor {
                     data,
                     data_source: data_source_to_proto(entry.source),
                     encoding: encoding as i32,
-                    uncompressed_size,
                 }),
                 ..Default::default()
             };

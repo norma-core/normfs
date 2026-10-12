@@ -6,9 +6,8 @@ use normfs_types::{DataSource, ReadEntry};
 use tokio::sync::{mpsc, Semaphore};
 use uintn::UintN;
 
-use super::command_processor::{encoded_with, worth_compressing, MAX_WIRE_ENTRY, PEAK};
+use super::command_processor::{encoded_with, PEAK};
 use crate::proto::Encoding;
-use crate::WireCompression;
 
 fn record(i: u64) -> Bytes {
     let mut out = Vec::new();
@@ -34,19 +33,14 @@ async fn many_compressed_reads_share_one_cap_and_keep_order() {
             tx.send(entry).await.unwrap();
         }
         drop(tx);
-        reads.push(encoded_with(
-            rx,
-            Some(WireCompression::default()),
-            slots.clone(),
-        ));
+        reads.push(encoded_with(rx, true, slots.clone()));
     }
     for mut out in reads {
         for i in 0..ENTRIES {
-            let (entry, (data, encoding, size)) = out.recv().await.unwrap();
+            let (entry, (data, encoding)) = out.recv().await.unwrap();
             assert_eq!(entry.id, UintN::from(i));
             assert_eq!(encoding, Encoding::EncZstd);
             assert_eq!(normfs_store::zstd_decompress(&data).unwrap(), record(i));
-            assert_eq!(size as usize, record(i).len());
         }
     }
     let peak = PEAK.load(SeqCst);
@@ -54,14 +48,6 @@ async fn many_compressed_reads_share_one_cap_and_keep_order() {
         peak <= SLOTS,
         "{peak} compressions ran at once, the cap is {SLOTS}"
     );
-}
-
-#[test]
-fn an_entry_above_the_client_limit_goes_raw() {
-    let wire = WireCompression::default();
-    assert!(worth_compressing(MAX_WIRE_ENTRY, &wire));
-    assert!(!worth_compressing(MAX_WIRE_ENTRY + 1, &wire));
-    assert!(!worth_compressing(wire.min_size - 1, &wire));
 }
 
 #[tokio::test]
@@ -75,7 +61,7 @@ async fn a_read_waiting_for_a_slot_stops_once_its_client_is_gone() {
     ))
     .await
     .unwrap();
-    let out = encoded_with(rx, Some(WireCompression::default()), slots);
+    let out = encoded_with(rx, true, slots);
     drop(out);
     tokio::time::timeout(std::time::Duration::from_secs(2), tx.closed())
         .await

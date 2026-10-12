@@ -6,7 +6,8 @@ use normfs::proto::{
     read_response, ClientRequest, Encoding, ReadRequest, ReadResponse, ServerResponse, WriteRequest,
 };
 use normfs::server::Server;
-use normfs::{NormFS, QueueSettings, WireCompression};
+use normfs::{NormFS, QueueConfig, QueueSettings};
+use normfs_types::CompressionType;
 use prost::Message;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -109,10 +110,12 @@ async fn round_trip(
     }
 }
 
-fn sysinfo_rule() -> QueueSettings {
-    QueueSettings::all_active()
-        .with_wire_compression("*/system/rx", WireCompression::default())
-        .unwrap()
+fn video_raw() -> QueueSettings {
+    let raw = QueueConfig {
+        compression_type: CompressionType::None,
+        ..QueueConfig::active()
+    };
+    QueueSettings::new(vec![("*video/*".to_string(), raw)], QueueConfig::active()).unwrap()
 }
 
 const ZSTD: i32 = Encoding::EncZstd as i32;
@@ -120,9 +123,8 @@ const ZSTD: i32 = Encoding::EncZstd as i32;
 #[tokio::test]
 async fn a_client_that_asks_gets_zstd_it_can_decode() {
     let data = compressible(64 * 1024);
-    let read = round_trip(sysinfo_rule(), "system/rx", data.clone(), vec![ZSTD]).await;
+    let read = round_trip(video_raw(), "system/rx", data.clone(), vec![ZSTD]).await;
     assert_eq!(read.encoding, ZSTD);
-    assert_eq!(read.uncompressed_size, data.len() as u64);
     assert!(
         read.data.len() < data.len() / 4,
         "{} bytes",
@@ -134,24 +136,23 @@ async fn a_client_that_asks_gets_zstd_it_can_decode() {
 #[tokio::test]
 async fn a_client_that_does_not_ask_gets_the_record_as_stored() {
     let data = compressible(64 * 1024);
-    let read = round_trip(sysinfo_rule(), "system/rx", data.clone(), Vec::new()).await;
+    let read = round_trip(video_raw(), "system/rx", data.clone(), Vec::new()).await;
     assert_eq!(read.encoding, Encoding::EncNone as i32);
-    assert_eq!(read.uncompressed_size, 0);
     assert_eq!(read.data, data);
 }
 
 #[tokio::test]
-async fn a_queue_without_a_rule_is_sent_raw() {
+async fn a_queue_stored_raw_is_sent_raw() {
     let data = compressible(64 * 1024);
-    let read = round_trip(sysinfo_rule(), "dmesg/rx", data.clone(), vec![ZSTD]).await;
+    let read = round_trip(video_raw(), "usbvideo/frames", data.clone(), vec![ZSTD]).await;
     assert_eq!(read.encoding, Encoding::EncNone as i32);
     assert_eq!(read.data, data);
 }
 
 #[tokio::test]
 async fn a_record_below_the_minimum_is_sent_raw() {
-    let data = compressible(WireCompression::default().min_size - 1);
-    let read = round_trip(sysinfo_rule(), "system/rx", data.clone(), vec![ZSTD]).await;
+    let data = compressible(1023);
+    let read = round_trip(video_raw(), "system/rx", data.clone(), vec![ZSTD]).await;
     assert_eq!(read.encoding, Encoding::EncNone as i32);
     assert_eq!(read.data, data);
 }
@@ -159,7 +160,7 @@ async fn a_record_below_the_minimum_is_sent_raw() {
 #[tokio::test]
 async fn a_record_zstd_cannot_shrink_is_sent_raw() {
     let data = incompressible(64 * 1024);
-    let read = round_trip(sysinfo_rule(), "system/rx", data.clone(), vec![ZSTD]).await;
+    let read = round_trip(video_raw(), "system/rx", data.clone(), vec![ZSTD]).await;
     assert_eq!(read.encoding, Encoding::EncNone as i32);
     assert_eq!(read.data, data);
 }

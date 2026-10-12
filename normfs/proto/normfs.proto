@@ -80,8 +80,6 @@ message WriteResponse {
     repeated Id ids = 10;
 }
 
-// How an entry's data is encoded on the wire. Clients that list no
-// encoding get ENC_NONE, as before.
 enum Encoding {
     ENC_NONE = 0;
     ENC_ZSTD = 1;
@@ -91,7 +89,6 @@ message ReadRequest {
     uint64 read_id  = 1;
     string queue_id = 2;
     uint64 step     = 3;
-    // Encodings this client can decode; the server may still send ENC_NONE.
     repeated Encoding accept_encodings = 4;
 
     Offset offset = 10;
@@ -123,6 +120,4 @@ message ReadResponse {
     bytes      data        = 11;
     DataSource data_source = 12;
     Encoding   encoding    = 13;
-    // The size of `data` decoded, set when `encoding` is not ENC_NONE.
-    uint64 uncompressed_size = 14;
 }

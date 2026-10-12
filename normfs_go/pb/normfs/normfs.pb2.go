@@ -2979,7 +2979,6 @@ const (
 	wireReadResponse_Data gremlin.ProtoWireNumber = 11
 	wireReadResponse_DataSource gremlin.ProtoWireNumber = 12
 	wireReadResponse_Encoding gremlin.ProtoWireNumber = 13
-	wireReadResponse_UncompressedSize gremlin.ProtoWireNumber = 14
 )
 
 type ReadResponseReader struct {
@@ -2991,7 +2990,6 @@ type ReadResponseReader struct {
 	dataData     []byte
 	dataDataSource     ReadResponse_DataSource
 	dataEncoding     Encoding
-	dataUncompressedSize     uint64
 
 	offsetReadId   int
 	offsetResult   int
@@ -2999,7 +2997,6 @@ type ReadResponseReader struct {
 	offsetData   int
 	offsetDataSource   int
 	offsetEncoding   int
-	offsetUncompressedSize   int
 
 	parsedReadId   bool
 	parsedResult   bool
@@ -3007,7 +3004,6 @@ type ReadResponseReader struct {
 	parsedData   bool
 	parsedDataSource   bool
 	parsedEncoding   bool
-	parsedUncompressedSize   bool
 }
 
 func NewReadResponseReader() *ReadResponseReader {
@@ -3159,29 +3155,6 @@ func (m *ReadResponseReader) readEncoding() Encoding {
 	return entry
 }
 
-func (m *ReadResponseReader) GetUncompressedSize() uint64 {
-	if m == nil {
-		return 0
-	}
-	return m.readUncompressedSize()
-}
-
-func (m *ReadResponseReader) readUncompressedSize() uint64 {
-	if m.parsedUncompressedSize {
-		return m.dataUncompressedSize
-	}
-	wOffset := m.offsetUncompressedSize
-	
-	var entry uint64
-	if wOffset > 0 {
-		entry = m.buf.ReadUint64(wOffset)
-	}
-	
-	m.dataUncompressedSize = entry
-	m.parsedUncompressedSize = true
-	return entry
-}
-
 func (m *ReadResponseReader) Unmarshal(data []byte) error {
 	m.buf = gremlin.NewReader(data)
 	offset := 0
@@ -3205,8 +3178,6 @@ func (m *ReadResponseReader) Unmarshal(data []byte) error {
 			m.offsetDataSource = offset
 		case wireReadResponse_Encoding:
 			m.offsetEncoding = offset
-		case wireReadResponse_UncompressedSize:
-			m.offsetUncompressedSize = offset
 		}
 
 		offset, err = m.buf.SkipData(offset, wire)
@@ -3236,7 +3207,6 @@ func (m *ReadResponseReader) ToStruct() *ReadResponse {
 	res.Data = m.GetData()
 	res.DataSource = m.GetDataSource()
 	res.Encoding = m.GetEncoding()
-	res.UncompressedSize = m.GetUncompressedSize()
 
 	return res
 }
@@ -3255,7 +3225,6 @@ type ReadResponse struct {
 	Data	[]byte	`json:"data,omitempty"`
 	DataSource	ReadResponse_DataSource	`json:"data_source,omitempty"`
 	Encoding	Encoding	`json:"encoding,omitempty"`
-	UncompressedSize	uint64	`json:"uncompressed_size,omitempty"`
 }
 
 func (s *ReadResponse) Marshal() []byte {
@@ -3296,9 +3265,6 @@ func (s *ReadResponse) MarshalTo(res *gremlin.Writer) {
 	if s.Encoding != 0 {
 		res.AppendInt32(wireReadResponse_Encoding, int32(s.Encoding))
 	}
-	if s.UncompressedSize != 0 {
-		res.AppendUint64(wireReadResponse_UncompressedSize, s.UncompressedSize)
-	}
 }
 
 func (s *ReadResponse) Copy() *ReadResponse {
@@ -3314,7 +3280,6 @@ func (s *ReadResponse) Copy() *ReadResponse {
 	res.Data = s.Data
 	res.DataSource = s.DataSource
 	res.Encoding = s.Encoding
-	res.UncompressedSize = s.UncompressedSize
 
 	return res
 }
@@ -3361,12 +3326,6 @@ func (s *ReadResponse) XXX_PbContentSize() int {
 	if s.Encoding != 0 {
 		var entrySize = 0
 		entrySize = gremlin.SizeTag(wireReadResponse_Encoding) + gremlin.SizeInt32(int32(s.Encoding))
-		size += entrySize
-	}
-
-	if s.UncompressedSize != 0 {
-		var entrySize = 0
-		entrySize = gremlin.SizeTag(wireReadResponse_UncompressedSize) + gremlin.SizeUint64(s.UncompressedSize)
 		size += entrySize
 	}
 

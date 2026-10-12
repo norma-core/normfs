@@ -10,7 +10,7 @@ use hyper_util::rt::TokioIo;
 use normfs::proto::{
     read_response, ClientRequest, Encoding, PingRequest, ReadRequest, ServerResponse, WriteRequest,
 };
-use normfs::{NormFS, QueueSettings, WireCompression};
+use normfs::{NormFS, QueueSettings};
 use prost::Message;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -172,10 +172,7 @@ async fn writes_from_one_connection_land_in_order() {
 #[tokio::test]
 async fn a_client_that_asks_gets_zstd_over_a_websocket() {
     let temp_dir = TempDir::new().unwrap();
-    let settings = QueueSettings::all_active()
-        .with_wire_compression("*/system/rx", WireCompression::default())
-        .unwrap();
-    let fs = memory_fs(&temp_dir, settings).await;
+    let fs = memory_fs(&temp_dir, QueueSettings::all_active()).await;
     let mut stream = connect(serve(fs).await).await;
 
     let data: Vec<u8> = (0..4096)
@@ -217,6 +214,5 @@ async fn a_client_that_asks_gets_zstd_over_a_websocket() {
         }
     };
     assert_eq!(entry.encoding, Encoding::EncZstd as i32);
-    assert_eq!(entry.uncompressed_size, data.len() as u64);
     assert_eq!(normfs_store::zstd_decompress(&entry.data).unwrap(), data);
 }

@@ -23,20 +23,11 @@ func TestDecodeEntryZstd(t *testing.T) {
 	packed := enc.EncodeAll(data, nil)
 
 	got, err := decodeEntry(response(t, &pb.ReadResponse{
-		Data:             packed,
-		Encoding:         pb.Encoding_ENC_ZSTD,
-		UncompressedSize: uint64(len(data)),
+		Data:     packed,
+		Encoding: pb.Encoding_ENC_ZSTD,
 	}))
 	if err != nil || !bytes.Equal(got, data) {
 		t.Fatalf("decoded %d bytes, err %v", len(got), err)
-	}
-
-	if _, err := decodeEntry(response(t, &pb.ReadResponse{
-		Data:             packed,
-		Encoding:         pb.Encoding_ENC_ZSTD,
-		UncompressedSize: uint64(len(data)) + 1,
-	})); err == nil {
-		t.Fatal("a size that does not match was accepted")
 	}
 }
 

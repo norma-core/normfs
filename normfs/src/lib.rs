@@ -25,6 +25,7 @@ use normfs_fs::{Fs, FsConfig, Runs, TmpMode};
 use normfs_store::layer::LayerError;
 use normfs_store::{Layer, PersistStore};
 use normfs_types::events::{EventSink, SystemEvent};
+use normfs_types::CompressionType;
 use normfs_wal::{WalFile, WalSettings, WalStore};
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -41,7 +42,7 @@ use offload::disk_monitor::DiskMonitor;
 pub use offload::disk_monitor::DiskMonitorConfig;
 
 pub use crate::config::{
-    ConfigError, Drainer, Persist, PoolKind, QueueConfig, QueueMode, QueueSettings, WireCompression,
+    ConfigError, Drainer, Persist, PoolKind, QueueConfig, QueueMode, QueueSettings,
 };
 
 pub use system::SYSTEM_QUEUE;
@@ -889,10 +890,8 @@ impl NormFS {
         self.settings.queue_settings.get_config(&queue.to_string())
     }
 
-    pub(crate) fn wire_compression(&self, queue: &QueueId) -> Option<WireCompression> {
-        self.settings
-            .queue_settings
-            .wire_compression(queue.as_str())
+    pub(crate) fn stores_compressed(&self, queue: &QueueId) -> bool {
+        self.get_config_for_queue(queue).compression_type == CompressionType::Zstd
     }
 
     // From config, not the live queue: the size check runs on the first

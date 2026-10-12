@@ -151,7 +151,6 @@ pub struct ReadRequest {
     pub queue_id: ::prost::alloc::string::String,
     #[prost(uint64, tag = "3")]
     pub step: u64,
-    /// Encodings this client can decode; the server may still send ENC_NONE.
     #[prost(enumeration = "Encoding", repeated, tag = "4")]
     pub accept_encodings: ::prost::alloc::vec::Vec<i32>,
     #[prost(message, optional, tag = "10")]
@@ -174,9 +173,6 @@ pub struct ReadResponse {
     pub data_source: i32,
     #[prost(enumeration = "Encoding", tag = "13")]
     pub encoding: i32,
-    /// The size of `data` decoded, set when `encoding` is not ENC_NONE.
-    #[prost(uint64, tag = "14")]
-    pub uncompressed_size: u64,
 }
 /// Nested message and enum types in `ReadResponse`.
 pub mod read_response {
@@ -300,8 +296,6 @@ impl OffsetType {
         }
     }
 }
-/// How an entry's data is encoded on the wire. Clients that list no
-/// encoding get ENC_NONE, as before.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum Encoding {
