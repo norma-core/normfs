@@ -91,16 +91,44 @@ fn get_monotonic_stamp_ns() -> u64 {
 /// Convert DataSource to protobuf enum value
 type Encoded = (Bytes, Encoding, u64);
 
-/// How many entries of one read may be compressing at once.
+/// How many entries of one read may wait for their compression, in order.
 const ENCODE_AHEAD: usize = 16;
 
+/// Entries above this go raw; the Go client refuses a larger decode.
+pub(crate) const MAX_WIRE_ENTRY: usize = 256 << 20;
+
+/// Compressions in flight across every read of the process. They run on the
+/// blocking pool, which store sealing needs too; without one cap, many
+/// follows could take every thread of it.
+fn wire_slots() -> Arc<Semaphore> {
+    static SLOTS: std::sync::OnceLock<Arc<Semaphore>> = std::sync::OnceLock::new();
+    SLOTS
+        .get_or_init(|| {
+            let cores = std::thread::available_parallelism().map_or(2, |n| n.get());
+            Arc::new(Semaphore::new(cores))
+        })
+        .clone()
+}
+
+pub(crate) fn worth_compressing(len: usize, wire: &WireCompression) -> bool {
+    len >= wire.min_size && len <= MAX_WIRE_ENTRY
+}
+
 /// The reader's entries in order, each with the data to send. With a wire
-/// rule the reader's channel is drained by a task of its own and up to
-/// `ENCODE_AHEAD` entries compress at once on the blocking pool, so a follow
-/// drains as fast as without compression: a full channel drops a follower.
+/// rule a task drains the reader's channel, so a follow drains as fast as
+/// without compression (a full channel drops a follower), and the entries
+/// wait for a slot of `slots` before they compress on the blocking pool.
 fn encoded(
+    rx: mpsc::Receiver<ReadEntry>,
+    wire: Option<WireCompression>,
+) -> mpsc::Receiver<(ReadEntry, Encoded)> {
+    encoded_with(rx, wire, wire_slots())
+}
+
+pub(crate) fn encoded_with(
     mut rx: mpsc::Receiver<ReadEntry>,
     wire: Option<WireCompression>,
+    slots: Arc<Semaphore>,
 ) -> mpsc::Receiver<(ReadEntry, Encoded)> {
     let (out_tx, out_rx) = mpsc::channel(ENCODE_AHEAD);
     let Some(wire) = wire else {
@@ -122,12 +150,22 @@ fn encoded(
     tokio::spawn(async move {
         while let Some(mut entry) = rx.recv().await {
             let data = std::mem::take(&mut entry.data);
-            let job = (data.len() >= wire.min_size).then(|| {
-                let data = data.clone();
-                tokio::task::spawn_blocking(move || {
-                    normfs_store::zstd_compress_at(&data, wire.level)
+            let job = if worth_compressing(data.len(), &wire) {
+                // A read whose client has gone starts nothing more.
+                let permit = tokio::select! {
+                    permit = slots.clone().acquire_owned() => permit.ok(),
+                    _ = pending_tx.closed() => return,
+                };
+                permit.map(|permit| {
+                    let data = data.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let _permit = permit;
+                        compress_counted(&data, wire.level)
+                    })
                 })
-            });
+            } else {
+                None
+            };
             if pending_tx.send((entry, data, job)).await.is_err() {
                 return;
             }
@@ -154,6 +192,33 @@ fn encoded(
         }
     });
     out_rx
+}
+
+#[cfg(test)]
+pub(crate) static IN_FLIGHT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+pub(crate) static PEAK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn compress_counted(data: &[u8], level: i32) -> std::io::Result<Vec<u8>> {
+    #[cfg(test)]
+    let _counted = {
+        use std::sync::atomic::Ordering::SeqCst;
+        let now = IN_FLIGHT.fetch_add(1, SeqCst) + 1;
+        PEAK.fetch_max(now, SeqCst);
+        InFlight
+    };
+    normfs_store::zstd_compress_at(data, level)
+}
+
+#[cfg(test)]
+struct InFlight;
+
+#[cfg(test)]
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 fn data_source_to_proto(source: DataSource) -> i32 {

@@ -11,7 +11,8 @@ import (
 // Sent with every read: the server compresses only queues with a rule for it.
 var acceptEncodings = []pb.Encoding{pb.Encoding_ENC_ZSTD}
 
-// Bounds what a single entry may claim to decode to.
+// Bounds what a single entry may claim to decode to; the server sends
+// anything larger raw (MAX_WIRE_ENTRY in command_processor.rs).
 const maxDecodedEntry = 256 << 20
 
 var zstdDecoder, _ = zstd.NewReader(nil, zstd.WithDecoderConcurrency(0), zstd.WithDecoderMaxMemory(maxDecodedEntry))

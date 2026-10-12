@@ -1,5 +1,7 @@
 mod client_handler;
 pub mod command_processor;
+#[cfg(test)]
+mod command_processor_test;
 
 #[cfg(feature = "websocket")]
 pub mod websocket;
