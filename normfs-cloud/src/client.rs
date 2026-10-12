@@ -120,6 +120,7 @@ impl S3Client {
     /// Lets at most `uploads` PUTs run at once, the rest waiting their turn
     /// in the order they asked; 0 is no cap.
     pub fn with_upload_limit(mut self, uploads: usize) -> Self {
+        let uploads = uploads.min(tokio::sync::Semaphore::MAX_PERMITS);
         self.uploads = (uploads > 0).then(|| Arc::new(tokio::sync::Semaphore::new(uploads)));
         self
     }

@@ -92,3 +92,16 @@ async fn uploads_past_the_limit_wait_their_turn() {
 async fn no_limit_lets_every_upload_run() {
     assert_eq!(most_in_flight(0).await, 6);
 }
+
+#[test]
+fn an_upload_limit_past_the_semaphore_maximum_does_not_panic() {
+    S3Client::new(
+        "http://127.0.0.1:1".parse().unwrap(),
+        "b".into(),
+        "us-east-1".into(),
+        "k".into(),
+        "s".into(),
+    )
+    .unwrap()
+    .with_upload_limit(usize::MAX);
+}

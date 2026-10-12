@@ -478,17 +478,20 @@ impl QueueOffloaderWorker {
 
     /// The newest file the first layer or the WAL holds, `Some(None)` when
     /// they hold none, `None` when that cannot be told.
+    /// The WAL first, as in [`Self::may_land`]: a file archived between the
+    /// two looks is then still seen in the store.
     async fn newest_on_disk(&self) -> Option<Option<UintN>> {
-        let mut newest = self
+        let mut newest = None;
+        if let Some(wal) = &self.wal {
+            newest = wal.find(&self.queue_id, End::Max).await.ok()?;
+        }
+        let stored = self
             .from
             .backend()
             .find(&self.queue_id, End::Max)
             .await
             .ok()?;
-        if let Some(wal) = &self.wal {
-            newest = newest.max(wal.find(&self.queue_id, End::Max).await.ok()?);
-        }
-        Some(newest)
+        Some(newest.max(stored))
     }
 
     /// The files in the WAL and in the first layer, the WAL first as in
