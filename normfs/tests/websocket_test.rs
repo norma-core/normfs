@@ -7,8 +7,10 @@ use common::{entries, memory_fs};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
-use normfs::proto::{ClientRequest, PingRequest, ServerResponse, WriteRequest};
-use normfs::{NormFS, QueueSettings};
+use normfs::proto::{
+    read_response, ClientRequest, Encoding, PingRequest, ReadRequest, ServerResponse, WriteRequest,
+};
+use normfs::{NormFS, QueueSettings, WireCompression};
 use prost::Message;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -165,4 +167,56 @@ async fn writes_from_one_connection_land_in_order() {
     if let Some(i) = (0..N).position(|i| got[i as usize] != i) {
         panic!("entry {i} holds write {}", got[i]);
     }
+}
+
+#[tokio::test]
+async fn a_client_that_asks_gets_zstd_over_a_websocket() {
+    let temp_dir = TempDir::new().unwrap();
+    let settings = QueueSettings::all_active()
+        .with_wire_compression("*/system/rx", WireCompression::default())
+        .unwrap();
+    let fs = memory_fs(&temp_dir, settings).await;
+    let mut stream = connect(serve(fs).await).await;
+
+    let data: Vec<u8> = (0..4096)
+        .flat_map(|pid| format!("pid={pid} user=root status=sleeping\n").into_bytes())
+        .collect();
+    let write = ClientRequest {
+        write: Some(WriteRequest {
+            write_id: 0,
+            queue_id: "system/rx".into(),
+            packets: vec![Bytes::from(data.clone())],
+        }),
+        ..Default::default()
+    };
+    stream
+        .write_all(&frame(&write.encode_to_vec()))
+        .await
+        .unwrap();
+    assert_eq!(read_response(&mut stream).await.write.unwrap().result, 0);
+
+    let read = ClientRequest {
+        read: Some(ReadRequest {
+            read_id: 1,
+            queue_id: "system/rx".into(),
+            step: 1,
+            offset: None,
+            limit: 1,
+            accept_encodings: vec![Encoding::EncZstd as i32],
+        }),
+        ..Default::default()
+    };
+    stream
+        .write_all(&frame(&read.encode_to_vec()))
+        .await
+        .unwrap();
+    let entry = loop {
+        let read = read_response(&mut stream).await.read.unwrap();
+        if read.result == read_response::Result::RrEntry as i32 {
+            break read;
+        }
+    };
+    assert_eq!(entry.encoding, Encoding::EncZstd as i32);
+    assert_eq!(entry.uncompressed_size, data.len() as u64);
+    assert_eq!(normfs_store::zstd_decompress(&entry.data).unwrap(), data);
 }

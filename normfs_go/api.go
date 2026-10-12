@@ -204,6 +204,8 @@ func (c *client) ReadFromOffset(queueID string, offset uintn.UintN, limit uint64
 					Offset:  &pb.Offset{Id: &pb.Id{Raw: offset.ToLEBytes()}, Type: pb.OffsetType_OT_ABSOLUTE},
 					Limit:   limit,
 					Step:    step,
+
+					AcceptEncodings: acceptEncodings,
 				},
 			}
 		},
@@ -230,6 +232,8 @@ func (c *client) ReadFromTail(queueID string, offset uintn.UintN, limit uint64, 
 					Offset:  &pb.Offset{Id: &pb.Id{Raw: offset.ToLEBytes()}, Type: pb.OffsetType_OT_SHIFT_FROM_TAIL},
 					Limit:   limit,
 					Step:    step,
+
+					AcceptEncodings: acceptEncodings,
 				},
 			}
 		},
@@ -371,9 +375,16 @@ func (c *client) read(queueID string, createReq func(readId uint64) *pb.ClientRe
 					EOL = true // Treat as fatal stream error
 					break
 				}
+				data, err := decodeEntry(readResp)
+				if err != nil {
+					c.logger.Error("Failed to decode entry", "readID", readID, "error", err)
+					setFinalError(err)
+					EOL = true
+					break
+				}
 				entry := StreamEntry{
 					ID:         StreamEntryId{ID: idx},
-					Data:       readResp.GetData(),
+					Data:       data,
 					DataSource: readResp.GetDataSource(),
 				}
 				qr.Data <- entry

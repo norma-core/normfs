@@ -8,12 +8,12 @@ use std::time::{Duration, SystemTime};
 use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 use uintn::UintN;
 
-use crate::proto::OffsetType;
 use crate::proto::{
     read_response, write_response, ClientRequest, Id, PingRequest, PingResponse, ReadRequest,
     ReadResponse, ServerResponse, SetupRequest, SetupResponse, WriteRequest, WriteResponse,
 };
-use crate::{DataSource, Error, NormFS};
+use crate::proto::{Encoding, OffsetType};
+use crate::{DataSource, Error, NormFS, WireCompression};
 use normfs_types::{QueueId, ReadPosition};
 
 fn get_local_stamp_ns() -> u64 {
@@ -89,6 +89,22 @@ fn get_monotonic_stamp_ns() -> u64 {
 }
 
 /// Convert DataSource to protobuf enum value
+/// zstd off the async workers; the raw entry when compression fails or saves
+/// less than a tenth, so a client never pays a decode for nothing.
+async fn encode(data: Bytes, wire: WireCompression) -> (Bytes, Encoding, u64) {
+    let len = data.len();
+    let raw = data.clone();
+    let packed =
+        tokio::task::spawn_blocking(move || normfs_store::zstd_compress_at(&data, wire.level))
+            .await;
+    match packed {
+        Ok(Ok(packed)) if packed.len() * 10 < len * 9 => {
+            (Bytes::from(packed), Encoding::EncZstd, len as u64)
+        }
+        _ => (raw, Encoding::EncNone, 0),
+    }
+}
+
 fn data_source_to_proto(source: DataSource) -> i32 {
     use read_response::DataSource as ProtoDataSource;
     match source {
@@ -513,6 +529,14 @@ impl CommandProcessor {
             return;
         }
 
+        // Only a client that asked for zstd gets it, and only on queues with
+        // a rule for it.
+        let wire = self.normfs.wire_compression(&queue_id).filter(|_| {
+            request
+                .accept_encodings
+                .contains(&(Encoding::EncZstd as i32))
+        });
+
         let (tx, mut rx) = mpsc::channel(2048);
 
         let normfs = self.normfs.clone();
@@ -527,6 +551,11 @@ impl CommandProcessor {
             let mut buffer = BytesMut::new();
             entry.id.write_value_to_buffer(&mut buffer);
 
+            let (data, encoding, uncompressed_size) = match wire {
+                Some(wire) if entry.data.len() >= wire.min_size => encode(entry.data, wire).await,
+                _ => (entry.data, Encoding::EncNone, 0),
+            };
+
             let entry_response = ServerResponse {
                 read: Some(ReadResponse {
                     read_id,
@@ -534,8 +563,10 @@ impl CommandProcessor {
                     id: Some(Id {
                         raw: buffer.freeze(),
                     }),
-                    data: entry.data,
+                    data,
                     data_source: data_source_to_proto(entry.source),
+                    encoding: encoding as i32,
+                    uncompressed_size,
                 }),
                 ..Default::default()
             };

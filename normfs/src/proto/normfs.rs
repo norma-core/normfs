@@ -151,6 +151,9 @@ pub struct ReadRequest {
     pub queue_id: ::prost::alloc::string::String,
     #[prost(uint64, tag = "3")]
     pub step: u64,
+    /// Encodings this client can decode; the server may still send ENC_NONE.
+    #[prost(enumeration = "Encoding", repeated, tag = "4")]
+    pub accept_encodings: ::prost::alloc::vec::Vec<i32>,
     #[prost(message, optional, tag = "10")]
     pub offset: ::core::option::Option<Offset>,
     #[prost(uint64, tag = "11")]
@@ -169,6 +172,11 @@ pub struct ReadResponse {
     pub data: ::prost::bytes::Bytes,
     #[prost(enumeration = "read_response::DataSource", tag = "12")]
     pub data_source: i32,
+    #[prost(enumeration = "Encoding", tag = "13")]
+    pub encoding: i32,
+    /// The size of `data` decoded, set when `encoding` is not ENC_NONE.
+    #[prost(uint64, tag = "14")]
+    pub uncompressed_size: u64,
 }
 /// Nested message and enum types in `ReadResponse`.
 pub mod read_response {
@@ -288,6 +296,34 @@ impl OffsetType {
         match value {
             "OT_ABSOLUTE" => Some(Self::OtAbsolute),
             "OT_SHIFT_FROM_TAIL" => Some(Self::OtShiftFromTail),
+            _ => None,
+        }
+    }
+}
+/// How an entry's data is encoded on the wire. Clients that list no
+/// encoding get ENC_NONE, as before.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum Encoding {
+    EncNone = 0,
+    EncZstd = 1,
+}
+impl Encoding {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Encoding::EncNone => "ENC_NONE",
+            Encoding::EncZstd => "ENC_ZSTD",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "ENC_NONE" => Some(Self::EncNone),
+            "ENC_ZSTD" => Some(Self::EncZstd),
             _ => None,
         }
     }

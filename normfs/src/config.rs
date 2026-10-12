@@ -211,10 +211,29 @@ impl QueueConfig {
     }
 }
 
+/// zstd for a queue's entries on the wire, sent only to a client that asks
+/// for it and only for entries of at least `min_size` bytes. Storage is not
+/// affected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WireCompression {
+    pub min_size: usize,
+    pub level: i32,
+}
+
+impl Default for WireCompression {
+    fn default() -> Self {
+        Self {
+            min_size: 1024,
+            level: 3,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct QueueSettings {
     rules: Vec<(GlobMatcher, QueueConfig)>,
     pub default_config: QueueConfig,
+    wire: Vec<(GlobMatcher, WireCompression)>,
 }
 
 impl QueueSettings {
@@ -234,7 +253,27 @@ impl QueueSettings {
         Ok(Self {
             rules,
             default_config,
+            wire: Vec::new(),
         })
+    }
+
+    /// Compresses on the wire the entries of queues matching `pattern`; the
+    /// first matching pattern wins, as for the rules.
+    pub fn with_wire_compression(
+        mut self,
+        pattern: &str,
+        wire: WireCompression,
+    ) -> Result<Self, ConfigError> {
+        let matcher = Glob::new(pattern)?.compile_matcher();
+        self.wire.push((matcher, wire));
+        Ok(self)
+    }
+
+    pub fn wire_compression(&self, queue_path: &str) -> Option<WireCompression> {
+        self.wire
+            .iter()
+            .find(|(matcher, _)| matcher.is_match(queue_path))
+            .map(|(_, wire)| *wire)
     }
 
     pub fn get_config(&self, queue_path: &str) -> QueueConfig {
@@ -250,6 +289,7 @@ impl QueueSettings {
         Self {
             rules: Vec::new(),
             default_config: QueueConfig::active(),
+            wire: Vec::new(),
         }
     }
 

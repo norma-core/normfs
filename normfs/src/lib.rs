@@ -41,7 +41,7 @@ use offload::disk_monitor::DiskMonitor;
 pub use offload::disk_monitor::DiskMonitorConfig;
 
 pub use crate::config::{
-    ConfigError, Drainer, Persist, PoolKind, QueueConfig, QueueMode, QueueSettings,
+    ConfigError, Drainer, Persist, PoolKind, QueueConfig, QueueMode, QueueSettings, WireCompression,
 };
 
 pub use system::SYSTEM_QUEUE;
@@ -887,6 +887,12 @@ impl NormFS {
 
     fn get_config_for_queue(&self, queue: &QueueId) -> QueueConfig {
         self.settings.queue_settings.get_config(&queue.to_string())
+    }
+
+    pub(crate) fn wire_compression(&self, queue: &QueueId) -> Option<WireCompression> {
+        self.settings
+            .queue_settings
+            .wire_compression(queue.as_str())
     }
 
     // From config, not the live queue: the size check runs on the first
