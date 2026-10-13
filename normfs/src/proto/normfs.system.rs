@@ -199,7 +199,8 @@ pub enum EventType {
     /// Set: queue_state (last_id).
     EtQueueClosed = 7,
     /// A read sent entries raw to a client that asked for zstd: every
-    /// compression slot was taken. Set: sent_uncompressed.
+    /// compression slot was taken, or a compression had not finished when the
+    /// read backed up. Set: sent_uncompressed.
     EtSentUncompressed = 8,
 }
 impl EventType {

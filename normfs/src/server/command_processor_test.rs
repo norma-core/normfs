@@ -106,3 +106,38 @@ async fn a_follow_keeps_draining_while_every_slot_is_taken() {
     assert_eq!((entries, bytes), (ENTRIES, ENTRIES * 2048));
     assert!(events <= 2, "{events} events for one read under 30 seconds");
 }
+
+#[test]
+fn a_follow_keeps_draining_past_a_stuck_compression() {
+    const ENTRIES: u64 = 2100;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let (release, gate) = std::sync::mpsc::channel::<()>();
+    rt.spawn_blocking(move || gate.recv());
+    rt.block_on(async {
+        let raw = Arc::new(RawCount::default());
+        let queue = QueueIdResolver::new("test").resolve("follow");
+        let (tx, rx) = mpsc::channel(2048);
+        let mut out = encoded_with(rx, true, Arc::new(Semaphore::new(1)), (raw.clone(), queue));
+        let reader = tokio::spawn(async move {
+            let mut n = 0;
+            while out.recv().await.is_some() {
+                n += 1;
+            }
+            n
+        });
+        for i in 0..ENTRIES {
+            let entry = ReadEntry::new(UintN::from(i), record(i), DataSource::Memory);
+            tx.try_send(entry)
+                .unwrap_or_else(|_| panic!("the follow's channel filled at entry {i}"));
+            tokio::task::yield_now().await;
+        }
+        drop(tx);
+        assert_eq!(reader.await.unwrap(), ENTRIES);
+        assert_eq!(raw.0.lock().unwrap().1, ENTRIES);
+    });
+    release.send(()).unwrap();
+}

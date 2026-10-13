@@ -5,7 +5,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime};
-use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{mpsc, Notify, OwnedSemaphorePermit, Semaphore};
 use uintn::UintN;
 
 use crate::proto::{
@@ -116,7 +116,8 @@ fn wire_slots() -> Arc<Semaphore> {
 /// The reader's entries in order, each with the data to send. With `compress`
 /// a task drains the reader's channel, so a follow drains as fast as without
 /// compression (a full channel drops a follower). An entry compresses on the
-/// blocking pool when `slots` has one free and goes raw when it has none.
+/// blocking pool when `slots` has one free, and goes raw when it has none or
+/// its compression is still running once the drain backs up.
 fn encoded(
     rx: mpsc::Receiver<ReadEntry>,
     compress: bool,
@@ -151,6 +152,30 @@ pub(crate) fn encoded_with(
         return out_rx;
     }
     let (pending_tx, mut pending_rx) = mpsc::channel(ENCODE_AHEAD);
+    let stalled = Arc::new(Notify::new());
+    let drain_stalled = stalled.clone();
+    tokio::spawn(async move {
+        while let Some(mut entry) = rx.recv().await {
+            let data = std::mem::take(&mut entry.data);
+            // Waiting for a slot would stall the drain until the follower is dropped.
+            let permit = (data.len() >= MIN_WIRE_SIZE)
+                .then(|| slots.clone().try_acquire_owned().ok())
+                .flatten();
+            let job = permit.map(|permit| {
+                let data = data.clone();
+                tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    compress_counted(&data)
+                })
+            });
+            if pending_tx.capacity() == 0 {
+                drain_stalled.notify_one();
+            }
+            if pending_tx.send((entry, data, job)).await.is_err() {
+                return;
+            }
+        }
+    });
     tokio::spawn(async move {
         let (mut entries, mut bytes) = (0, 0);
         let mut reported: Option<Instant> = None;
@@ -161,43 +186,31 @@ pub(crate) fn encoded_with(
                 bytes,
             })
         };
-        while let Some(mut entry) = rx.recv().await {
-            let data = std::mem::take(&mut entry.data);
-            // Waiting for a slot would stall the drain until the follower is dropped.
-            let permit = (data.len() >= MIN_WIRE_SIZE)
-                .then(|| slots.clone().try_acquire_owned().ok())
-                .flatten();
-            if permit.is_none() && data.len() >= MIN_WIRE_SIZE {
+        while let Some((entry, data, job)) = pending_rx.recv().await {
+            let len = data.len();
+            let mut skipped = len >= MIN_WIRE_SIZE && job.is_none();
+            // A compression still running once the drain backs up is left
+            // behind, as waiting for it would stall the drain too.
+            let packed = match job {
+                Some(job) => tokio::select! {
+                    biased;
+                    done = job => done.ok().and_then(Result::ok),
+                    _ = stalled.notified() => {
+                        skipped = true;
+                        None
+                    }
+                },
+                None => None,
+            };
+            if skipped {
                 entries += 1;
-                bytes += data.len() as u64;
+                bytes += len as u64;
                 if reported.is_none_or(|at| at.elapsed() >= REPORT_RAW_EVERY) {
                     report(entries, bytes);
                     (entries, bytes) = (0, 0);
                     reported = Some(Instant::now());
                 }
             }
-            let job = permit.map(|permit| {
-                let data = data.clone();
-                tokio::task::spawn_blocking(move || {
-                    let _permit = permit;
-                    compress_counted(&data)
-                })
-            });
-            if pending_tx.send((entry, data, job)).await.is_err() {
-                break;
-            }
-        }
-        if entries > 0 {
-            report(entries, bytes);
-        }
-    });
-    tokio::spawn(async move {
-        while let Some((entry, data, job)) = pending_rx.recv().await {
-            let len = data.len();
-            let packed = match job {
-                Some(job) => job.await.ok().and_then(Result::ok),
-                None => None,
-            };
             // Raw when zstd fails or saves less than a tenth, so a client
             // never pays a decode for nothing.
             let sent = match packed {
@@ -207,8 +220,11 @@ pub(crate) fn encoded_with(
                 _ => (data, Encoding::EncNone),
             };
             if out_tx.send((entry, sent)).await.is_err() {
-                return;
+                break;
             }
+        }
+        if entries > 0 {
+            report(entries, bytes);
         }
     });
     out_rx
