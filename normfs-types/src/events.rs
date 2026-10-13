@@ -59,6 +59,13 @@ pub enum SystemEvent {
         queue: QueueId,
         last_id: Option<UintN>,
     },
+    /// A read sent entries raw to a client that asked for zstd: every
+    /// compression slot was taken, or a compression did not finish in time.
+    SentUncompressed {
+        queue: QueueId,
+        entries: u64,
+        bytes: u64,
+    },
 }
 
 impl SystemEvent {
@@ -70,7 +77,8 @@ impl SystemEvent {
             | SystemEvent::EvictionBlocked { queue, .. }
             | SystemEvent::PoolStalled { queue, .. }
             | SystemEvent::QueueStarted { queue, .. }
-            | SystemEvent::QueueClosed { queue, .. } => queue,
+            | SystemEvent::QueueClosed { queue, .. }
+            | SystemEvent::SentUncompressed { queue, .. } => queue,
         }
     }
 }

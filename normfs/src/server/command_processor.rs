@@ -4,17 +4,18 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, Weak};
-use std::time::{Duration, SystemTime};
-use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
+use std::time::{Duration, Instant, SystemTime};
+use tokio::sync::{mpsc, Notify, OwnedSemaphorePermit, Semaphore};
 use uintn::UintN;
 
-use crate::proto::OffsetType;
 use crate::proto::{
     read_response, write_response, ClientRequest, Id, PingRequest, PingResponse, ReadRequest,
     ReadResponse, ServerResponse, SetupRequest, SetupResponse, WriteRequest, WriteResponse,
 };
+use crate::proto::{Encoding, OffsetType};
 use crate::{DataSource, Error, NormFS};
-use normfs_types::{QueueId, ReadPosition};
+use normfs_types::events::{EventSink, SystemEvent};
+use normfs_types::{QueueId, ReadEntry, ReadPosition};
 
 fn get_local_stamp_ns() -> u64 {
     SystemTime::now()
@@ -86,6 +87,174 @@ fn get_monotonic_stamp_ns() -> u64 {
 fn get_monotonic_stamp_ns() -> u64 {
     // Fallback for unsupported platforms
     get_local_stamp_ns()
+}
+
+type Encoded = (Bytes, Encoding);
+
+/// How many entries of one read may wait for their compression, in order.
+const ENCODE_AHEAD: usize = 16;
+
+/// Smaller entries go raw: zstd's frame costs more than it saves on them.
+const MIN_WIRE_SIZE: usize = 1024;
+const WIRE_LEVEL: i32 = 3;
+
+const REPORT_RAW_EVERY: Duration = Duration::from_secs(30);
+
+/// Compressions in flight across every read of the process. They run on the
+/// blocking pool, which store sealing needs too; without one cap, many
+/// follows could take every thread of it.
+fn wire_slots() -> Arc<Semaphore> {
+    static SLOTS: std::sync::OnceLock<Arc<Semaphore>> = std::sync::OnceLock::new();
+    SLOTS
+        .get_or_init(|| {
+            let cores = std::thread::available_parallelism().map_or(2, |n| n.get());
+            Arc::new(Semaphore::new(cores))
+        })
+        .clone()
+}
+
+/// The reader's entries in order, each with the data to send. With `compress`
+/// a task drains the reader's channel, so a follow drains as fast as without
+/// compression (a full channel drops a follower). An entry compresses on the
+/// blocking pool when `slots` has one free, and goes raw when it has none or
+/// its compression is still running once the drain backs up.
+fn encoded(
+    rx: mpsc::Receiver<ReadEntry>,
+    compress: bool,
+    report: RawReport,
+) -> mpsc::Receiver<(ReadEntry, Encoded)> {
+    encoded_with(rx, compress, wire_slots(), report)
+}
+
+/// Where a read counts the entries it sent raw for want of a slot.
+pub(crate) type RawReport = (EventSink, QueueId);
+
+pub(crate) fn encoded_with(
+    mut rx: mpsc::Receiver<ReadEntry>,
+    compress: bool,
+    slots: Arc<Semaphore>,
+    (events, queue): RawReport,
+) -> mpsc::Receiver<(ReadEntry, Encoded)> {
+    let (out_tx, out_rx) = mpsc::channel(ENCODE_AHEAD);
+    if !compress {
+        tokio::spawn(async move {
+            while let Some(mut entry) = rx.recv().await {
+                let data = std::mem::take(&mut entry.data);
+                if out_tx
+                    .send((entry, (data, Encoding::EncNone)))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        });
+        return out_rx;
+    }
+    let (pending_tx, mut pending_rx) = mpsc::channel(ENCODE_AHEAD);
+    let stalled = Arc::new(Notify::new());
+    let drain_stalled = stalled.clone();
+    tokio::spawn(async move {
+        while let Some(mut entry) = rx.recv().await {
+            let data = std::mem::take(&mut entry.data);
+            // Waiting for a slot would stall the drain until the follower is dropped.
+            let permit = (data.len() >= MIN_WIRE_SIZE)
+                .then(|| slots.clone().try_acquire_owned().ok())
+                .flatten();
+            let job = permit.map(|permit| {
+                let data = data.clone();
+                tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    compress_counted(&data)
+                })
+            });
+            if pending_tx.capacity() == 0 {
+                drain_stalled.notify_one();
+            }
+            if pending_tx.send((entry, data, job)).await.is_err() {
+                return;
+            }
+        }
+    });
+    tokio::spawn(async move {
+        let (mut entries, mut bytes) = (0, 0);
+        let mut reported: Option<Instant> = None;
+        let report = |entries, bytes| {
+            events.emit(SystemEvent::SentUncompressed {
+                queue: queue.clone(),
+                entries,
+                bytes,
+            })
+        };
+        while let Some((entry, data, job)) = pending_rx.recv().await {
+            let len = data.len();
+            let mut skipped = len >= MIN_WIRE_SIZE && job.is_none();
+            // A compression still running once the drain backs up is left
+            // behind, as waiting for it would stall the drain too.
+            let packed = match job {
+                Some(job) => tokio::select! {
+                    biased;
+                    done = job => done.ok().and_then(Result::ok),
+                    _ = stalled.notified() => {
+                        skipped = true;
+                        None
+                    }
+                },
+                None => None,
+            };
+            if skipped {
+                entries += 1;
+                bytes += len as u64;
+                if reported.is_none_or(|at| at.elapsed() >= REPORT_RAW_EVERY) {
+                    report(entries, bytes);
+                    (entries, bytes) = (0, 0);
+                    reported = Some(Instant::now());
+                }
+            }
+            // Raw when zstd fails or saves less than a tenth, so a client
+            // never pays a decode for nothing.
+            let sent = match packed {
+                Some(packed) if packed.len() * 10 < len * 9 => {
+                    (Bytes::from(packed), Encoding::EncZstd)
+                }
+                _ => (data, Encoding::EncNone),
+            };
+            if out_tx.send((entry, sent)).await.is_err() {
+                break;
+            }
+        }
+        if entries > 0 {
+            report(entries, bytes);
+        }
+    });
+    out_rx
+}
+
+#[cfg(test)]
+pub(crate) static IN_FLIGHT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+pub(crate) static PEAK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn compress_counted(data: &[u8]) -> std::io::Result<Vec<u8>> {
+    #[cfg(test)]
+    let _counted = {
+        use std::sync::atomic::Ordering::SeqCst;
+        let now = IN_FLIGHT.fetch_add(1, SeqCst) + 1;
+        PEAK.fetch_max(now, SeqCst);
+        InFlight
+    };
+    normfs_store::zstd_compress_at(data, WIRE_LEVEL)
+}
+
+#[cfg(test)]
+struct InFlight;
+
+#[cfg(test)]
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// Convert DataSource to protobuf enum value
@@ -513,7 +682,14 @@ impl CommandProcessor {
             return;
         }
 
-        let (tx, mut rx) = mpsc::channel(2048);
+        // Only a client that asked for zstd gets it, and only on queues
+        // stored with it.
+        let compress = self.normfs.stores_compressed(&queue_id)
+            && request
+                .accept_encodings
+                .contains(&(Encoding::EncZstd as i32));
+
+        let (tx, rx) = mpsc::channel(2048);
 
         let normfs = self.normfs.clone();
         let queue_id_clone = queue_id.clone();
@@ -523,7 +699,8 @@ impl CommandProcessor {
                 .read(queue_id_clone, position, limit, step, tx)
                 .await
         });
-        while let Some(entry) = rx.recv().await {
+        let mut entries = encoded(rx, compress, (self.normfs.events.clone(), queue_id.clone()));
+        while let Some((entry, (data, encoding))) = entries.recv().await {
             let mut buffer = BytesMut::new();
             entry.id.write_value_to_buffer(&mut buffer);
 
@@ -534,8 +711,9 @@ impl CommandProcessor {
                     id: Some(Id {
                         raw: buffer.freeze(),
                     }),
-                    data: entry.data,
+                    data,
                     data_source: data_source_to_proto(entry.source),
+                    encoding: encoding as i32,
                 }),
                 ..Default::default()
             };

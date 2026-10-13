@@ -139,6 +139,7 @@ async fn a_follow_past_the_limit_is_refused() {
                 step: 1,
                 offset: None,
                 limit: 0,
+                accept_encodings: Vec::new(),
             }),
             ..Default::default()
         }));

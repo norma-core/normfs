@@ -26,6 +26,28 @@ pub fn zstd_compress(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
     compile_error!("Either 'c-libs' or 'pure-rust' feature must be enabled");
 }
 
+/// One zstd frame at `level` with the library's default window, so a small
+/// decoder (fzstd, klauspost) reads it.
+pub fn zstd_compress_at(data: &[u8], level: i32) -> Result<Vec<u8>, std::io::Error> {
+    #[cfg(feature = "pure-rust")]
+    {
+        // ruzstd 0.8 implements only Fastest; the others panic.
+        let _ = level;
+        return Ok(ruzstd::encoding::compress_to_vec(
+            data,
+            ruzstd::encoding::CompressionLevel::Fastest,
+        ));
+    }
+
+    #[cfg(all(feature = "c-libs", not(feature = "pure-rust")))]
+    {
+        zstd::bulk::compress(data, level)
+    }
+
+    #[cfg(not(any(feature = "c-libs", feature = "pure-rust")))]
+    compile_error!("Either 'c-libs' or 'pure-rust' feature must be enabled");
+}
+
 pub fn zstd_decompress(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
     #[cfg(feature = "pure-rust")]
     {

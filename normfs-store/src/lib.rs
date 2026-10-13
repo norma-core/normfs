@@ -14,6 +14,7 @@ use crate::layer::LayerError;
 
 pub mod backend;
 mod compression;
+pub use compression::{zstd_compress_at, zstd_decompress};
 mod disk_usage;
 pub use disk_usage::{DiskUsage, QueueBytes};
 pub mod header;
