@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use aes_gcm::{
-    aead::{Aead, AeadInPlace, KeyInit},
-    Aes256Gcm, Key, Nonce,
+    aead::{Aead, AeadInOut, KeyInit},
+    Aes256Gcm, Nonce, Tag,
 };
 use bytes::Bytes;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier};
@@ -137,7 +137,7 @@ impl CryptoContext {
 
         let mut aes_key = [0u8; 32];
         rng.fill_bytes(&mut aes_key);
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&aes_key));
+        let cipher = Aes256Gcm::new(&aes_key.into());
 
         let mut nonce_bytes = [0u8; 12];
         rng.fill_bytes(&mut nonce_bytes);
@@ -152,7 +152,7 @@ impl CryptoContext {
     ) -> Result<(Bytes, Bytes), CryptoError> {
         let (cipher, nonce_bytes) = self.file_cipher(queue_id, file_id)?;
         let ciphertext = cipher
-            .encrypt(Nonce::from_slice(&nonce_bytes), content.as_ref())
+            .encrypt(&nonce_bytes.into(), content.as_ref())
             .map_err(|_| CryptoError::Encryption)?;
 
         Ok((
@@ -171,7 +171,7 @@ impl CryptoContext {
     ) -> Result<([u8; 12], [u8; 16]), CryptoError> {
         let (cipher, nonce_bytes) = self.file_cipher(queue_id, file_id)?;
         let tag = cipher
-            .encrypt_in_place_detached(Nonce::from_slice(&nonce_bytes), b"", buf)
+            .encrypt_inout_detached(&nonce_bytes.into(), b"", buf.into())
             .map_err(|_| CryptoError::Encryption)?;
         Ok((nonce_bytes, tag.into()))
     }
@@ -191,13 +191,13 @@ impl CryptoContext {
 
         let mut aes_key = [0u8; 32];
         rng.fill_bytes(&mut aes_key);
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&aes_key));
+        let cipher = Aes256Gcm::new(&aes_key.into());
 
         let nonce_array: [u8; 12] = nonce.as_ref().try_into().unwrap();
-        let nonce = Nonce::from_slice(&nonce_array);
+        let nonce = Nonce::from(nonce_array);
 
         let plaintext = cipher
-            .decrypt(nonce, ciphertext.as_ref())
+            .decrypt(&nonce, ciphertext.as_ref())
             .map_err(|_| CryptoError::Decryption)?;
 
         Ok(Bytes::from(plaintext))
@@ -217,8 +217,9 @@ impl CryptoContext {
         let len = buf.len().checked_sub(16).ok_or(CryptoError::Decryption)?;
         let (cipher, _) = self.file_cipher(queue_id, file_id)?;
         let (plaintext, tag) = buf.split_at_mut(len);
+        let tag = Tag::try_from(&*tag).map_err(|_| CryptoError::Decryption)?;
         cipher
-            .decrypt_in_place_detached(Nonce::from_slice(&nonce), b"", plaintext, (&*tag).into())
+            .decrypt_inout_detached(&nonce.into(), b"", plaintext.into(), &tag)
             .map_err(|_| CryptoError::Decryption)?;
         Ok(len)
     }
