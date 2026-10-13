@@ -1,13 +1,34 @@
 use std::sync::atomic::Ordering::SeqCst;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use normfs_types::{DataSource, ReadEntry};
+use normfs_types::events::{self, SystemEvent, SystemEvents};
+use normfs_types::{DataSource, QueueIdResolver, ReadEntry};
 use tokio::sync::{mpsc, Semaphore};
 use uintn::UintN;
 
-use super::command_processor::{encoded_with, PEAK};
+use super::command_processor::{encoded_with, RawReport, PEAK};
 use crate::proto::Encoding;
+
+/// Events, entries and bytes reported as sent raw.
+#[derive(Default)]
+struct RawCount(Mutex<(u64, u64, u64)>);
+
+impl SystemEvents for RawCount {
+    fn emit(&self, event: SystemEvent) {
+        if let SystemEvent::SentUncompressed { entries, bytes, .. } = event {
+            let mut count = self.0.lock().unwrap();
+            *count = (count.0 + 1, count.1 + entries, count.2 + bytes);
+        }
+    }
+}
+
+fn quiet() -> RawReport {
+    (
+        events::discard(),
+        QueueIdResolver::new("test").resolve("read"),
+    )
+}
 
 fn record(i: u64) -> Bytes {
     let mut out = Vec::new();
@@ -33,7 +54,7 @@ async fn many_compressed_reads_share_one_cap_and_keep_order() {
             tx.send(entry).await.unwrap();
         }
         drop(tx);
-        reads.push(encoded_with(rx, true, slots.clone()));
+        reads.push(encoded_with(rx, true, slots.clone(), quiet()));
     }
     for mut out in reads {
         for i in 0..ENTRIES {
@@ -58,7 +79,9 @@ async fn a_follow_keeps_draining_while_every_slot_is_taken() {
     const ENTRIES: u64 = 2100;
     let slots = Arc::new(Semaphore::new(0));
     let (tx, rx) = mpsc::channel(2048);
-    let mut out = encoded_with(rx, true, slots);
+    let raw = Arc::new(RawCount::default());
+    let queue = QueueIdResolver::new("test").resolve("follow");
+    let mut out = encoded_with(rx, true, slots, (raw.clone(), queue));
     let reader = tokio::spawn(async move {
         let mut raw = 0;
         while let Some((_, (_, encoding))) = out.recv().await {
@@ -79,4 +102,7 @@ async fn a_follow_keeps_draining_while_every_slot_is_taken() {
     }
     drop(tx);
     assert_eq!(reader.await.unwrap(), ENTRIES);
+    let (events, entries, bytes) = *raw.0.lock().unwrap();
+    assert_eq!((entries, bytes), (ENTRIES, ENTRIES * 2048));
+    assert!(events <= 2, "{events} events for one read under 30 seconds");
 }

@@ -44,6 +44,9 @@ enum EventType {
     ET_QUEUE_OPENED = 6;
     // Set: queue_state (last_id).
     ET_QUEUE_CLOSED = 7;
+    // A read sent entries raw to a client that asked for zstd: every
+    // compression slot was taken. Set: sent_uncompressed.
+    ET_SENT_UNCOMPRESSED = 8;
 }
 
 // Values as in the store header.
@@ -152,6 +155,13 @@ message QueueState {
     bool      cloud    = 5;
 }
 
+// ET_SENT_UNCOMPRESSED: on the first such entry of a read, then at most every
+// 30 seconds, and once when the read ends.
+message SentUncompressed {
+    uint64 entries = 1;
+    uint64 bytes   = 2;
+}
+
 // The fields after queue belong to the event types named on each; the rest
 // are left unset.
 message Event {
@@ -169,4 +179,5 @@ message Event {
     DiskCleanupBlocked disk_cleanup_blocked = 14;
     MemoryWait         memory_wait          = 15;
     QueueState         queue_state          = 16;
+    SentUncompressed   sent_uncompressed    = 17;
 }

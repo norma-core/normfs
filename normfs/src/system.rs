@@ -379,6 +379,10 @@ fn event(event: SystemEvent) -> pb::Event {
             });
             T::EtQueueClosed
         }
+        SystemEvent::SentUncompressed { entries, bytes, .. } => {
+            out.sent_uncompressed = Some(pb::SentUncompressed { entries, bytes });
+            T::EtSentUncompressed
+        }
     };
     out.r#type = kind as i32;
     out

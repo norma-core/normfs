@@ -113,6 +113,16 @@ pub struct QueueState {
     #[prost(bool, tag = "5")]
     pub cloud: bool,
 }
+/// ET_SENT_UNCOMPRESSED: on the first such entry of a read, then at most every
+/// 30 seconds, and once when the read ends.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SentUncompressed {
+    #[prost(uint64, tag = "1")]
+    pub entries: u64,
+    #[prost(uint64, tag = "2")]
+    pub bytes: u64,
+}
 /// The fields after queue belong to the event types named on each; the rest
 /// are left unset.
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -143,6 +153,8 @@ pub struct Event {
     pub memory_wait: ::core::option::Option<MemoryWait>,
     #[prost(message, optional, tag = "16")]
     pub queue_state: ::core::option::Option<QueueState>,
+    #[prost(message, optional, tag = "17")]
+    pub sent_uncompressed: ::core::option::Option<SentUncompressed>,
 }
 /// What NormFS did with a queue's files, one Event per record of
 /// `<instance>/normfs/system`. Only NormFS writes there.
@@ -186,6 +198,9 @@ pub enum EventType {
     EtQueueOpened = 6,
     /// Set: queue_state (last_id).
     EtQueueClosed = 7,
+    /// A read sent entries raw to a client that asked for zstd: every
+    /// compression slot was taken. Set: sent_uncompressed.
+    EtSentUncompressed = 8,
 }
 impl EventType {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -202,6 +217,7 @@ impl EventType {
             EventType::EtQueueWaitingForMemory => "ET_QUEUE_WAITING_FOR_MEMORY",
             EventType::EtQueueOpened => "ET_QUEUE_OPENED",
             EventType::EtQueueClosed => "ET_QUEUE_CLOSED",
+            EventType::EtSentUncompressed => "ET_SENT_UNCOMPRESSED",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -215,6 +231,7 @@ impl EventType {
             "ET_QUEUE_WAITING_FOR_MEMORY" => Some(Self::EtQueueWaitingForMemory),
             "ET_QUEUE_OPENED" => Some(Self::EtQueueOpened),
             "ET_QUEUE_CLOSED" => Some(Self::EtQueueClosed),
+            "ET_SENT_UNCOMPRESSED" => Some(Self::EtSentUncompressed),
             _ => None,
         }
     }

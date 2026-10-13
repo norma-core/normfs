@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, Weak};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 use uintn::UintN;
 
@@ -14,6 +14,7 @@ use crate::proto::{
 };
 use crate::proto::{Encoding, OffsetType};
 use crate::{DataSource, Error, NormFS};
+use normfs_types::events::{EventSink, SystemEvent};
 use normfs_types::{QueueId, ReadEntry, ReadPosition};
 
 fn get_local_stamp_ns() -> u64 {
@@ -97,6 +98,8 @@ const ENCODE_AHEAD: usize = 16;
 const MIN_WIRE_SIZE: usize = 1024;
 const WIRE_LEVEL: i32 = 3;
 
+const REPORT_RAW_EVERY: Duration = Duration::from_secs(30);
+
 /// Compressions in flight across every read of the process. They run on the
 /// blocking pool, which store sealing needs too; without one cap, many
 /// follows could take every thread of it.
@@ -114,14 +117,22 @@ fn wire_slots() -> Arc<Semaphore> {
 /// a task drains the reader's channel, so a follow drains as fast as without
 /// compression (a full channel drops a follower). An entry compresses on the
 /// blocking pool when `slots` has one free and goes raw when it has none.
-fn encoded(rx: mpsc::Receiver<ReadEntry>, compress: bool) -> mpsc::Receiver<(ReadEntry, Encoded)> {
-    encoded_with(rx, compress, wire_slots())
+fn encoded(
+    rx: mpsc::Receiver<ReadEntry>,
+    compress: bool,
+    report: RawReport,
+) -> mpsc::Receiver<(ReadEntry, Encoded)> {
+    encoded_with(rx, compress, wire_slots(), report)
 }
+
+/// Where a read counts the entries it sent raw for want of a slot.
+pub(crate) type RawReport = (EventSink, QueueId);
 
 pub(crate) fn encoded_with(
     mut rx: mpsc::Receiver<ReadEntry>,
     compress: bool,
     slots: Arc<Semaphore>,
+    (events, queue): RawReport,
 ) -> mpsc::Receiver<(ReadEntry, Encoded)> {
     let (out_tx, out_rx) = mpsc::channel(ENCODE_AHEAD);
     if !compress {
@@ -141,12 +152,30 @@ pub(crate) fn encoded_with(
     }
     let (pending_tx, mut pending_rx) = mpsc::channel(ENCODE_AHEAD);
     tokio::spawn(async move {
+        let (mut entries, mut bytes) = (0, 0);
+        let mut reported: Option<Instant> = None;
+        let report = |entries, bytes| {
+            events.emit(SystemEvent::SentUncompressed {
+                queue: queue.clone(),
+                entries,
+                bytes,
+            })
+        };
         while let Some(mut entry) = rx.recv().await {
             let data = std::mem::take(&mut entry.data);
             // Waiting for a slot would stall the drain until the follower is dropped.
             let permit = (data.len() >= MIN_WIRE_SIZE)
                 .then(|| slots.clone().try_acquire_owned().ok())
                 .flatten();
+            if permit.is_none() && data.len() >= MIN_WIRE_SIZE {
+                entries += 1;
+                bytes += data.len() as u64;
+                if reported.is_none_or(|at| at.elapsed() >= REPORT_RAW_EVERY) {
+                    report(entries, bytes);
+                    (entries, bytes) = (0, 0);
+                    reported = Some(Instant::now());
+                }
+            }
             let job = permit.map(|permit| {
                 let data = data.clone();
                 tokio::task::spawn_blocking(move || {
@@ -155,8 +184,11 @@ pub(crate) fn encoded_with(
                 })
             });
             if pending_tx.send((entry, data, job)).await.is_err() {
-                return;
+                break;
             }
+        }
+        if entries > 0 {
+            report(entries, bytes);
         }
     });
     tokio::spawn(async move {
@@ -651,7 +683,7 @@ impl CommandProcessor {
                 .read(queue_id_clone, position, limit, step, tx)
                 .await
         });
-        let mut entries = encoded(rx, compress);
+        let mut entries = encoded(rx, compress, (self.normfs.events.clone(), queue_id.clone()));
         while let Some((entry, (data, encoding))) = entries.recv().await {
             let mut buffer = BytesMut::new();
             entry.id.write_value_to_buffer(&mut buffer);

@@ -70,7 +70,8 @@ NormFS records its own work in the queue `normfs/system`, one
 store file once it is on the local disk (`ET_FILE_ON_DISK`) and once it is in
 the bucket (`ET_FILE_IN_CLOUD`), with its id range, sizes and content
 signature; failed uploads; files the disk monitor deleted or could not delete;
-appenders waiting for memory; queues opened and closed. The proto's header
+appenders waiting for memory; queues opened and closed; entries a read sent
+raw because every compression slot was taken. The proto's header
 says which of these a queue gets for each `Persist`. Clients can read it
 and cannot write it. It keeps its files locally, offloaded like any store
 queue when cloud is configured, and in memory when queues keep nothing on disk
