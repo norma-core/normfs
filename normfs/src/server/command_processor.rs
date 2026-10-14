@@ -384,7 +384,12 @@ impl CommandProcessor {
                             }),
                             ..Default::default()
                         };
-                        let _ = sender.send_response(response).await;
+                        // Not awaited here: on a backed-up link it would hold up the
+                        // pings and writes behind this request.
+                        let sender = sender.clone();
+                        tokio::spawn(async move {
+                            let _ = sender.send_response(response).await;
+                        });
                         return;
                     }
                 }
