@@ -39,7 +39,7 @@ async fn the_range_and_queue_start_come_from_the_file_header() {
     let layer = Layer::new(backend.clone(), Some(crypto.clone()), false);
     let queue = QueueIdResolver::new("inst").resolve("cam");
 
-    for (id, before) in [(3u64, 30u64), (4, 40)] {
+    for (id, before, entries) in [(3u64, 30u64, 5u64), (4, 40, 5), (5, 45, 0)] {
         let file_id = UintN::from(id);
         let file = store_file::build(
             &queue,
@@ -47,7 +47,7 @@ async fn the_range_and_queue_start_come_from_the_file_header() {
             CompressionType::Zstd,
             EncryptionType::Aes,
             UintN::from(before),
-            UintN::from(5u64),
+            UintN::from(entries),
             &Bytes::from_static(b"entries"),
             &crypto,
         )
@@ -66,5 +66,12 @@ async fn the_range_and_queue_start_come_from_the_file_header() {
     assert_eq!(
         layer.get_queue_start(&queue).await.unwrap(),
         Some(UintN::from(30u64))
+    );
+    // An empty file has no range but still says where the next one starts.
+    let empty = UintN::from(5u64);
+    assert_eq!(layer.get_file_range(&queue, &empty).await.unwrap(), None);
+    assert_eq!(
+        layer.get_entries_before(&queue, &empty).await.unwrap(),
+        Some(UintN::from(45u64))
     );
 }

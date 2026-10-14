@@ -1073,6 +1073,20 @@ impl NormFS {
         max_last_entry_id
     }
 
+    /// The first id of a file from its WAL or store header alone. The full
+    /// header of a store file costs decrypting and decompressing the body.
+    async fn get_entries_before_all_sources(
+        &self,
+        queue: &QueueId,
+        file_id: &UintN,
+    ) -> Option<UintN> {
+        let (wal, store) = tokio::join!(
+            self.wal.get_entries_before(queue, file_id),
+            self.store.get_entries_before(queue, file_id)
+        );
+        wal.ok().or_else(|| store.ok().flatten())
+    }
+
     /// Get the format header from a specific file across all sources.
     /// Queries WAL and Store in parallel and returns the first valid header found,
     /// or None if the file doesn't exist in any source. (S3 is too slow for recovery)
@@ -1160,7 +1174,7 @@ impl NormFS {
                 Ok(lower) if !lower.is_zero() => lower,
                 _ => return,
             };
-            let Some(header) = self.get_file_header_all_sources(queue, &upper).await else {
+            let Some(upper_first) = self.get_entries_before_all_sources(queue, &upper).await else {
                 return;
             };
             let Some(lower_last) = self.get_file_end_all_sources(queue, &lower).await else {
@@ -1169,22 +1183,19 @@ impl NormFS {
                 continue;
             };
             let expected = lower_last.increment();
-            if header.num_entries_before == expected {
+            if upper_first == expected {
                 // Keep going down: the tear is at the *bottom* of the run of
                 // files written after it, because the queue kept rotating while
                 // the retry was stuck.
                 upper = lower;
                 continue;
             }
-            if header.num_entries_before < expected {
+            if upper_first < expected {
                 // Only ids both files hold: the later start to the earlier end.
-                let lower_first = self
-                    .get_file_header_all_sources(queue, &lower)
-                    .await
-                    .map(|h| h.num_entries_before);
+                let lower_first = self.get_entries_before_all_sources(queue, &lower).await;
                 let upper_last = self.get_file_end_all_sources(queue, &upper).await;
                 if let (Some(lower_first), Some(upper_last)) = (lower_first, upper_last) {
-                    let first = header.num_entries_before.clone().max(lower_first);
+                    let first = upper_first.clone().max(lower_first);
                     let last = upper_last.min(lower_last.clone());
                     if first <= last {
                         log::error!(target: "normfs",
@@ -1193,7 +1204,7 @@ impl NormFS {
                              when this one recovered it, so both wrote those ids; a read gets \
                              one of the two.",
                             queue.short(), first, last, lower, lower_last, upper,
-                            header.num_entries_before);
+                            upper_first);
                     }
                 }
             } else {
@@ -1202,8 +1213,8 @@ impl NormFS {
                      starts at {}. A closing flush lost them and the retry did not land before \
                      the process ended. Nothing is discarded to close the gap -- the records \
                      above it were reported durable -- so reads for those ids find nothing.",
-                    queue.short(), expected, header.num_entries_before, lower, lower_last, upper,
-                    header.num_entries_before);
+                    queue.short(), expected, upper_first, lower, lower_last, upper,
+                    upper_first);
             }
 
             if link + 1 == MAX_LINKS {

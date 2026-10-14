@@ -494,6 +494,16 @@ impl PersistStore {
         Ok(range.map(|(_, last)| last))
     }
 
+    /// The file's `num_entries_before` from its store header, without decoding
+    /// the body.
+    pub async fn get_entries_before(
+        &self,
+        queue: &QueueId,
+        file_id: &UintN,
+    ) -> Result<Option<UintN>, StoreError> {
+        Ok(self.local.get_entries_before(queue, file_id).await?)
+    }
+
     /// Get the header from a specific Store file by decrypting/decompressing its contents.
     /// Returns None if the file doesn't exist or can't be read.
     pub async fn get_file_header(

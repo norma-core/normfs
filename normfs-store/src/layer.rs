@@ -143,11 +143,39 @@ impl Layer {
         Ok(range)
     }
 
+    /// The file's `num_entries_before`, read from its header alone.
+    pub async fn get_entries_before(
+        &self,
+        queue: &QueueId,
+        file_id: &UintN,
+    ) -> Result<Option<UintN>, LayerError> {
+        Ok(self
+            .read_header(queue, file_id)
+            .await?
+            .map(|h| h.num_entries_before()))
+    }
+
     async fn read_range(
         &self,
         queue: &QueueId,
         file_id: &UintN,
     ) -> Result<Option<(UintN, UintN)>, LayerError> {
+        let Some(header) = self.read_header(queue, file_id).await? else {
+            return Ok(None);
+        };
+        if header.num_entries().is_zero() {
+            return Ok(None);
+        }
+        let first = header.num_entries_before();
+        let last = first.add(&header.num_entries().sub(&UintN::one())?);
+        Ok(Some((first, last)))
+    }
+
+    async fn read_header(
+        &self,
+        queue: &QueueId,
+        file_id: &UintN,
+    ) -> Result<Option<AnyStoreHeader>, LayerError> {
         let Some(head) = self
             .backend
             .get_range(queue, file_id, 0, HEAD_LEN as u64)
@@ -167,13 +195,7 @@ impl Layer {
                 .verify(&after_auth[..header_size], &file_auth.header_signature)
                 .map_err(|_| LayerError::SignatureVerificationFailed)?;
         }
-
-        if header.num_entries().is_zero() {
-            return Ok(None);
-        }
-        let first = header.num_entries_before();
-        let last = first.add(&header.num_entries().sub(&UintN::one())?);
-        Ok(Some((first, last)))
+        Ok(Some(header))
     }
 
     pub fn record_range(&self, queue: &QueueId, file_id: &UintN, first: &UintN, last: &UintN) {
