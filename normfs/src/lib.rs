@@ -495,12 +495,15 @@ impl NormFS {
             normfs_types::events::discard()
         };
 
-        let mem = Arc::new(mem::MemStore::with_pools(
-            settings.max_memory_usage,
-            settings.mem_page_size,
-            settings.max_passive_memory_usage,
-            settings.mem_passive_page_size,
-        )?);
+        let mem = Arc::new(
+            mem::MemStore::with_pools(
+                settings.max_memory_usage,
+                settings.mem_page_size,
+                settings.max_passive_memory_usage,
+                settings.mem_passive_page_size,
+            )?
+            .with_events(events.clone()),
+        );
 
         settings.queue_settings.validate()?;
         let cloud_rules = settings.queue_settings.cloud_rules();

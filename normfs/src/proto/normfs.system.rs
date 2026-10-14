@@ -123,6 +123,14 @@ pub struct SentUncompressed {
     #[prost(uint64, tag = "2")]
     pub bytes: u64,
 }
+/// ET_FOLLOWER_DROPPED
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FollowerDropped {
+    /// The first entry the follower did not get.
+    #[prost(message, optional, tag = "1")]
+    pub first_missed: ::core::option::Option<super::Id>,
+}
 /// The fields after queue belong to the event types named on each; the rest
 /// are left unset.
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -155,6 +163,8 @@ pub struct Event {
     pub queue_state: ::core::option::Option<QueueState>,
     #[prost(message, optional, tag = "17")]
     pub sent_uncompressed: ::core::option::Option<SentUncompressed>,
+    #[prost(message, optional, tag = "18")]
+    pub follower_dropped: ::core::option::Option<FollowerDropped>,
 }
 /// What NormFS did with a queue's files, one Event per record of
 /// `<instance>/normfs/system`. Only NormFS writes there.
@@ -202,6 +212,9 @@ pub enum EventType {
     /// compression slot was taken, or a compression had not finished when the
     /// read backed up. Set: sent_uncompressed.
     EtSentUncompressed = 8,
+    /// A follower read too slowly, its channel filled and it was dropped: the
+    /// client gets nothing more on that read. Set: follower_dropped.
+    EtFollowerDropped = 9,
 }
 impl EventType {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -219,6 +232,7 @@ impl EventType {
             EventType::EtQueueOpened => "ET_QUEUE_OPENED",
             EventType::EtQueueClosed => "ET_QUEUE_CLOSED",
             EventType::EtSentUncompressed => "ET_SENT_UNCOMPRESSED",
+            EventType::EtFollowerDropped => "ET_FOLLOWER_DROPPED",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -233,6 +247,7 @@ impl EventType {
             "ET_QUEUE_OPENED" => Some(Self::EtQueueOpened),
             "ET_QUEUE_CLOSED" => Some(Self::EtQueueClosed),
             "ET_SENT_UNCOMPRESSED" => Some(Self::EtSentUncompressed),
+            "ET_FOLLOWER_DROPPED" => Some(Self::EtFollowerDropped),
             _ => None,
         }
     }

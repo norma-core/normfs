@@ -48,6 +48,9 @@ enum EventType {
     // compression slot was taken, or a compression had not finished when the
     // read backed up. Set: sent_uncompressed.
     ET_SENT_UNCOMPRESSED = 8;
+    // A follower read too slowly, its channel filled and it was dropped: the
+    // client gets nothing more on that read. Set: follower_dropped.
+    ET_FOLLOWER_DROPPED = 9;
 }
 
 // Values as in the store header.
@@ -163,6 +166,12 @@ message SentUncompressed {
     uint64 bytes   = 2;
 }
 
+// ET_FOLLOWER_DROPPED
+message FollowerDropped {
+    // The first entry the follower did not get.
+    normfs.Id first_missed = 1;
+}
+
 // The fields after queue belong to the event types named on each; the rest
 // are left unset.
 message Event {
@@ -181,4 +190,5 @@ message Event {
     MemoryWait         memory_wait          = 15;
     QueueState         queue_state          = 16;
     SentUncompressed   sent_uncompressed    = 17;
+    FollowerDropped    follower_dropped     = 18;
 }

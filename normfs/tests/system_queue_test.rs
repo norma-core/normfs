@@ -198,3 +198,47 @@ async fn turned_off_it_records_nothing() {
     assert!(recorded(&fs).await.is_empty());
     fs.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn a_follower_dropped_for_a_full_channel_is_recorded() {
+    let dir = tempfile::tempdir().unwrap();
+    let fs = NormFS::new(dir.path().to_path_buf(), settings())
+        .await
+        .unwrap();
+    let cam = fs.resolve("cam");
+    fs.ensure_queue_exists_for_write(&cam).await.unwrap();
+
+    let (tx, _rx) = mpsc::channel(1);
+    fs.read(&cam, ReadPosition::ShiftFromTail(UintN::zero()), 0, 1, tx)
+        .await
+        .unwrap();
+    for i in 0..3u8 {
+        fs.enqueue(&cam, Bytes::from(vec![i; 10])).await.unwrap();
+    }
+
+    let events = wait_for(&fs, |events| {
+        events
+            .iter()
+            .any(|e| e.r#type() == EventType::EtFollowerDropped)
+    })
+    .await;
+    let dropped: Vec<_> = events
+        .iter()
+        .filter(|e| e.r#type() == EventType::EtFollowerDropped)
+        .collect();
+    assert_eq!(dropped.len(), 1);
+    assert_eq!(dropped[0].queue, cam.as_str());
+    let first = &dropped[0]
+        .follower_dropped
+        .as_ref()
+        .unwrap()
+        .first_missed
+        .as_ref()
+        .unwrap()
+        .raw;
+    assert_eq!(
+        UintN::read_value_from_slice(first, first.len()).unwrap(),
+        UintN::from(1u64)
+    );
+    fs.close().await.unwrap();
+}
