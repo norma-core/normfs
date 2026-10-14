@@ -384,12 +384,13 @@ impl CommandProcessor {
                             }),
                             ..Default::default()
                         };
-                        // Not awaited here: on a backed-up link it would hold up the
-                        // pings and writes behind this request.
+                        // Sent from its own task so a backed-up link does not hold up
+                        // the pings and writes behind it, under the in-flight cap.
                         let sender = sender.clone();
-                        tokio::spawn(async move {
+                        self.spawn(async move {
                             let _ = sender.send_response(response).await;
-                        });
+                        })
+                        .await;
                         return;
                     }
                 }
