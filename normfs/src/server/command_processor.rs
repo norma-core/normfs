@@ -384,7 +384,13 @@ impl CommandProcessor {
                             }),
                             ..Default::default()
                         };
-                        let _ = sender.send_response(response).await;
+                        // Sent from its own task so a backed-up link does not hold up
+                        // the pings and writes behind it, under the in-flight cap.
+                        let sender = sender.clone();
+                        self.spawn(async move {
+                            let _ = sender.send_response(response).await;
+                        })
+                        .await;
                         return;
                     }
                 }

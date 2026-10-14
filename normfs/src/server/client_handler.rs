@@ -20,14 +20,20 @@ const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// TCP-specific implementation of ResponseSender
 pub struct TcpResponseSender {
     client_addr: SocketAddr,
-    response_tx: mpsc::Sender<ServerResponse>,
+    replies: mpsc::Sender<ServerResponse>,
+    reads: mpsc::Sender<ServerResponse>,
 }
 
 impl TcpResponseSender {
-    fn new(client_addr: SocketAddr, response_tx: mpsc::Sender<ServerResponse>) -> Self {
+    fn new(
+        client_addr: SocketAddr,
+        replies: mpsc::Sender<ServerResponse>,
+        reads: mpsc::Sender<ServerResponse>,
+    ) -> Self {
         TcpResponseSender {
             client_addr,
-            response_tx,
+            replies,
+            reads,
         }
     }
 }
@@ -37,7 +43,14 @@ impl ResponseSender for TcpResponseSender {
         &self,
         response: ServerResponse,
     ) -> Pin<Box<dyn Future<Output = bool> + Send + '_>> {
-        Box::pin(async move { self.response_tx.send(response).await.is_ok() })
+        // Read responses keep one queue so a read's end never overtakes its
+        // entries; pongs and write acks go ahead of them.
+        let tx = if response.read.is_some() {
+            &self.reads
+        } else {
+            &self.replies
+        };
+        Box::pin(async move { tx.send(response).await.is_ok() })
     }
 
     fn client_id(&self) -> String {
@@ -59,7 +72,8 @@ impl ClientHandler {
         debug!("Starting handler (client_addr: {})", self.addr);
 
         let (incoming_requests_tx, mut incoming_requests) = mpsc::channel(REQUEST_CHANNEL_BUFFER);
-        let (outgoing_responses, outgoing_responses_rx) = mpsc::channel(RESPONSE_CHANNEL_BUFFER);
+        let (replies, replies_rx) = mpsc::channel(RESPONSE_CHANNEL_BUFFER);
+        let (reads, reads_rx) = mpsc::channel(RESPONSE_CHANNEL_BUFFER);
         let (done_tx, mut done) = mpsc::channel::<()>(1);
 
         let (read_half, write_half) = conn.into_split();
@@ -76,11 +90,12 @@ impl ClientHandler {
         let done_tx_write = done_tx.clone();
         let addr = self.addr;
         let write_handle = tokio::spawn(async move {
-            Self::write_loop(write_half, outgoing_responses_rx, done_tx_write, addr).await;
+            Self::write_loop(write_half, replies_rx, reads_rx, done_tx_write, addr).await;
         });
 
         // Process loop runs in current task
-        self.process_loop(&mut incoming_requests, &outgoing_responses, &mut done)
+        let sender = Arc::new(TcpResponseSender::new(self.addr, replies, reads));
+        self.process_loop(&mut incoming_requests, sender, &mut done)
             .await;
 
         // Wait for other loops to finish
@@ -188,13 +203,20 @@ impl ClientHandler {
 
     async fn write_loop(
         mut write_half: tokio::net::tcp::OwnedWriteHalf,
-        mut outgoing_rx: mpsc::Receiver<ServerResponse>,
+        mut replies: mpsc::Receiver<ServerResponse>,
+        mut reads: mpsc::Receiver<ServerResponse>,
         done_tx: mpsc::Sender<()>,
         addr: SocketAddr,
     ) {
         debug!("Write loop started (client_addr: {})", addr);
 
-        while let Some(response) = outgoing_rx.recv().await {
+        loop {
+            let response = tokio::select! {
+                biased;
+                Some(response) = replies.recv() => response,
+                Some(response) = reads.recv() => response,
+                else => break,
+            };
             let size = response.encoded_len();
             let mut message = Vec::with_capacity(8 + size);
             message.extend_from_slice(&(size as u64).to_le_bytes());
@@ -220,17 +242,12 @@ impl ClientHandler {
     async fn process_loop(
         &self,
         incoming_requests: &mut mpsc::Receiver<ClientRequest>,
-        outgoing_responses: &mpsc::Sender<ServerResponse>,
+        response_sender: Arc<TcpResponseSender>,
         done: &mut mpsc::Receiver<()>,
     ) {
         debug!("Process loop started (client_addr: {})", self.addr);
 
-        // Create command processor and response sender
         let command_processor = CommandProcessor::new(self.normfs.clone());
-        let response_sender = Arc::new(TcpResponseSender::new(
-            self.addr,
-            outgoing_responses.clone(),
-        ));
 
         loop {
             tokio::select! {

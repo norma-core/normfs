@@ -1,7 +1,7 @@
 mod common;
 
 use common::memory_fs;
-use normfs::proto::{ClientRequest, PingRequest, ServerResponse};
+use normfs::proto::{ClientRequest, PingRequest, ReadRequest, ServerResponse};
 use normfs::server::{CommandProcessor, ResponseSender};
 use std::future::Future;
 use std::pin::Pin;
@@ -83,4 +83,50 @@ async fn a_client_that_does_not_read_stops_being_served() {
     })
     .await
     .expect("not every ping was answered");
+}
+
+fn follow(read_id: u64) -> ClientRequest {
+    ClientRequest {
+        read: Some(ReadRequest {
+            read_id,
+            queue_id: "follow".into(),
+            limit: 0,
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn refused_follows_stop_being_taken_while_their_replies_are_pending() {
+    const FOLLOWS: u64 = 256;
+    const IN_FLIGHT: u64 = 1024;
+    let dir = TempDir::new().unwrap();
+    let processor = CommandProcessor::new(memory_fs(&dir, Default::default()).await);
+    let (open, rx) = watch::channel(false);
+    let client = Arc::new(Stalled {
+        open: rx,
+        sent: AtomicUsize::new(0),
+    });
+
+    for i in 0..FOLLOWS + IN_FLIGHT {
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            processor.handle_request(follow(i), client.clone()),
+        )
+        .await
+        .expect("a follow below the limit waited");
+    }
+    let mut next = Box::pin(processor.handle_request(follow(FOLLOWS + IN_FLIGHT), client.clone()));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), &mut next)
+            .await
+            .is_err(),
+        "a refused follow was taken while every refusal before it was still pending"
+    );
+
+    open.send(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), next)
+        .await
+        .expect("the follow past the limit was not taken once replies drained");
 }
