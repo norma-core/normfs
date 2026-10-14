@@ -66,6 +66,9 @@ pub enum SystemEvent {
         entries: u64,
         bytes: u64,
     },
+    /// A follow's channel was full, so the follower was dropped; its client
+    /// gets nothing more on that read.
+    FollowerDropped { queue: QueueId, first_missed: UintN },
 }
 
 impl SystemEvent {
@@ -78,7 +81,8 @@ impl SystemEvent {
             | SystemEvent::PoolStalled { queue, .. }
             | SystemEvent::QueueStarted { queue, .. }
             | SystemEvent::QueueClosed { queue, .. }
-            | SystemEvent::SentUncompressed { queue, .. } => queue,
+            | SystemEvent::SentUncompressed { queue, .. }
+            | SystemEvent::FollowerDropped { queue, .. } => queue,
         }
     }
 }

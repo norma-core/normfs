@@ -383,6 +383,12 @@ fn event(event: SystemEvent) -> pb::Event {
             out.sent_uncompressed = Some(pb::SentUncompressed { entries, bytes });
             T::EtSentUncompressed
         }
+        SystemEvent::FollowerDropped { first_missed, .. } => {
+            out.follower_dropped = Some(pb::FollowerDropped {
+                first_missed: Some(id(&first_missed)),
+            });
+            T::EtFollowerDropped
+        }
     };
     out.r#type = kind as i32;
     out

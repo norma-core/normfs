@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::Sender;
 
 use crate::config::PoolKind;
 use bytes::Bytes;
+use normfs_types::events::{EventSink, SystemEvent};
 use normfs_types::{DataSource, QueueId, ReadEntry, SubscriberCallback};
 use normfs_wal::{AppendOutcome, FileMark, PagePool, Placement, WalArena};
 use uintn::UintN;
@@ -104,6 +106,7 @@ pub struct MemStore {
     /// the queue from the map above, and a later follow still needs to know
     /// where the sequence ended. A reopen removes the entry.
     closed: RwLock<HashMap<QueueId, Option<UintN>>>,
+    events: EventSink,
 }
 
 struct Inner {
@@ -130,6 +133,20 @@ struct MemQueue {
     append_gate: tokio::sync::Mutex<()>,
     subscribers: Mutex<HashMap<usize, SubscriberCallback>>,
     next_subscriber_id: Mutex<usize>,
+}
+
+/// Called with the first id a follower missed when its channel was full.
+type Dropped = Arc<dyn Fn(UintN) + Send + Sync>;
+
+fn deliver(chan: &Sender<ReadEntry>, id: &UintN, data: &Bytes, dropped: &Dropped) -> bool {
+    match chan.try_send(ReadEntry::new(id.clone(), data.clone(), DataSource::Memory)) {
+        Ok(()) => true,
+        Err(TrySendError::Full(_)) => {
+            dropped(id.clone());
+            false
+        }
+        Err(TrySendError::Closed(_)) => false,
+    }
 }
 
 impl MemQueue {
@@ -728,6 +745,7 @@ impl MemQueue {
         start_id: UintN,
         step: usize,
         target_chan: &Sender<ReadEntry>,
+        dropped: Dropped,
     ) -> MemReadResult {
         // Read all existing entries from start_id onwards
         let (entries_to_send, last_sent_id) = {
@@ -811,9 +829,7 @@ impl MemQueue {
                 }
 
                 if id.in_step(&from_id_clone, step)
-                    && target_chan_clone
-                        .try_send(ReadEntry::new(id.clone(), data.clone(), DataSource::Memory))
-                        .is_err()
+                    && !deliver(&target_chan_clone, id, data, &dropped)
                 {
                     return false;
                 }
@@ -839,6 +855,7 @@ impl MemQueue {
         offset: UintN,
         step: usize,
         target_chan: &Sender<ReadEntry>,
+        dropped: Dropped,
     ) -> MemReadResult {
         // Special case: offset 0 means just subscribe from now on, no existing entries
         if offset == UintN::zero() {
@@ -870,9 +887,7 @@ impl MemQueue {
                     }
 
                     if id.in_step(&from_id_clone, step)
-                        && target_chan_clone
-                            .try_send(ReadEntry::new(id.clone(), data.clone(), DataSource::Memory))
-                            .is_err()
+                        && !deliver(&target_chan_clone, id, data, &dropped)
                     {
                         return false;
                     }
@@ -997,9 +1012,7 @@ impl MemQueue {
                 }
 
                 if id.in_step(&start_id_clone, step)
-                    && target_chan_clone
-                        .try_send(ReadEntry::new(id.clone(), data.clone(), DataSource::Memory))
-                        .is_err()
+                    && !deliver(&target_chan_clone, id, data, &dropped)
                 {
                     return false;
                 }
@@ -1091,6 +1104,24 @@ impl MemStore {
             passive_arena,
             next_ring_id: AtomicU64::new(0),
             closed: RwLock::new(HashMap::new()),
+            events: normfs_types::events::discard(),
+        })
+    }
+
+    pub fn with_events(mut self, events: EventSink) -> Self {
+        self.events = events;
+        self
+    }
+
+    fn dropped(&self, queue: &QueueId) -> Dropped {
+        let (events, queue) = (self.events.clone(), queue.clone());
+        Arc::new(move |first_missed| {
+            log::warn!(target: "normfs-mem", "Follower of '{}' dropped at {}: its channel is full",
+                queue.short(), first_missed);
+            events.emit(SystemEvent::FollowerDropped {
+                queue: queue.clone(),
+                first_missed,
+            });
         })
     }
 
@@ -1379,7 +1410,7 @@ impl MemStore {
 
         if let Some(mem_queue) = mem_queue {
             let result = mem_queue
-                .follow_full(from_id, start_id, step, target_chan)
+                .follow_full(from_id, start_id, step, target_chan, self.dropped(queue))
                 .await;
             log::debug!(target: "normfs-mem", "Follow_full from queue '{}' - Success: {}, Subscription ID: {:?}",
                 queue.short(), result.success, result.subscription_id);
@@ -1430,7 +1461,7 @@ impl MemStore {
 
         if let Some(mem_queue) = mem_queue {
             let result = mem_queue
-                .follow_full_negative(offset, step, target_chan)
+                .follow_full_negative(offset, step, target_chan, self.dropped(queue))
                 .await;
             log::debug!(target: "normfs-mem", "Follow_full_negative from queue '{}' - Success: {}, Subscription ID: {:?}, Start ID: {:?}",
                 queue.short(), result.success, result.subscription_id, result.start_id);
