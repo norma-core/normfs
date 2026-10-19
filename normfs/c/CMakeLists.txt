@@ -10,7 +10,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(NORMFS_UINTN_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../../uintn-rs/c/include"
     CACHE PATH "Path to the uintn C include directory")
 
-add_library(normfs_c STATIC src/disk_monitor.c src/disk_monitor_sys.c src/frame.c)
+add_library(normfs_c STATIC src/disk_monitor.c src/disk_monitor_sys.c src/frame.c
+    src/net_sys.c)
 target_include_directories(normfs_c PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<BUILD_INTERFACE:${NORMFS_UINTN_INCLUDE}>
@@ -23,6 +24,9 @@ enable_testing()
 add_executable(test_disk_monitor tests/test_disk_monitor.c)
 target_link_libraries(test_disk_monitor PRIVATE normfs_c)
 add_test(NAME disk_monitor COMMAND test_disk_monitor)
+add_executable(test_net tests/test_net.c)
+target_link_libraries(test_net PRIVATE normfs_c)
+add_test(NAME net COMMAND test_net)
 
 find_program(FRAMAC frama-c)
 if(FRAMAC)
