@@ -1,6 +1,6 @@
 /*
- * Bodies behind normfs/net_sys.h. The macros must precede every #include:
- * -std=c99 hides the POSIX declarations.
+ * Bodies behind normfs/net_sys.h; never given to Frama-C. The macros must
+ * precede every #include: -std=c99 hides the POSIX declarations.
  */
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE 1
@@ -26,6 +26,10 @@
  * a pong or write ack would wait behind all of it. */
 #define NORMFS_NET_SYS_UNSENT_LIMIT (128 * 1024)
 
+/* macOS fails a read or write of more than INT_MAX bytes with EINVAL; Linux
+ * caps one at this much itself. */
+#define NORMFS_NET_SYS_IO_MAX 0x7ffff000u
+
 static int
 normfs_net_sys_errno(void)
 {
@@ -40,6 +44,49 @@ normfs_net_sys_would_block(int e)
 
 /* Failed connections one accept call takes off the queue before Rust gets a turn. */
 #define NORMFS_NET_SYS_ACCEPT_TRIES 64
+
+long
+normfs_net_sys_read(int fd, uint8_t *buf, size_t off, size_t len, int *os_error)
+{
+	ssize_t n;
+
+	*os_error = 0;
+	if (len > NORMFS_NET_SYS_IO_MAX)
+		len = NORMFS_NET_SYS_IO_MAX;
+	do {
+		n = read(fd, buf + off, len);
+	} while (n < 0 && errno == EINTR);
+	if (n >= 0)
+		return (long)n;
+	if (normfs_net_sys_would_block(errno))
+		return NORMFS_NET_SYS_WOULD_BLOCK;
+	*os_error = normfs_net_sys_errno();
+	return -1;
+}
+
+long
+normfs_net_sys_write(int fd, const uint8_t *buf, size_t off, size_t len,
+    int *os_error)
+{
+	ssize_t n;
+
+	*os_error = 0;
+	if (len > NORMFS_NET_SYS_IO_MAX)
+		len = NORMFS_NET_SYS_IO_MAX;
+	do {
+#if defined(MSG_NOSIGNAL)
+		n = send(fd, buf + off, len, MSG_NOSIGNAL);
+#else
+		n = write(fd, buf + off, len);
+#endif
+	} while (n < 0 && errno == EINTR);
+	if (n > 0)
+		return (long)n;
+	if (n < 0 && normfs_net_sys_would_block(errno))
+		return NORMFS_NET_SYS_WOULD_BLOCK;
+	*os_error = n == 0 ? EIO : normfs_net_sys_errno();
+	return -1;
+}
 
 #if !(defined(SOCK_CLOEXEC) && defined(SOCK_NONBLOCK))
 static int
@@ -190,6 +237,10 @@ normfs_net_sys_accept(int fd, struct normfs_net_sys_accepted *out, int *os_error
 	}
 #endif
 
+#if defined(SO_NOSIGPIPE)
+	(void)setsockopt(c, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+#endif
+
 	out->fd = c;
 	normfs_net_sys_from_sockaddr(&ss, &out->peer);
 	/* A response is one write, but Nagle would still hold one that follows
@@ -205,6 +256,12 @@ normfs_net_sys_accept(int fd, struct normfs_net_sys_accepted *out, int *os_error
 	}
 #endif
 	return 1;
+}
+
+void
+normfs_net_sys_shutdown_write(int fd)
+{
+	(void)shutdown(fd, SHUT_WR);
 }
 
 void

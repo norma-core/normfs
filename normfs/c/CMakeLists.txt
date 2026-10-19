@@ -11,7 +11,7 @@ set(NORMFS_UINTN_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../../uintn-rs/c/include"
     CACHE PATH "Path to the uintn C include directory")
 
 add_library(normfs_c STATIC src/disk_monitor.c src/disk_monitor_sys.c src/frame.c
-    src/net_sys.c)
+    src/net.c src/net_sys.c)
 target_include_directories(normfs_c PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<BUILD_INTERFACE:${NORMFS_UINTN_INCLUDE}>
@@ -118,6 +118,41 @@ if(FRAMAC)
             src/frame.c
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
         COMMENT "WP: normfs TCP frame header"
+        VERBATIM
+    )
+
+    # Every function with a body in src/net.c and what it calls in frame.c;
+    # frame.c's copy of the inline le64 read is the one Frama-C renames _0.
+    set(NORMFS_NET_WP_FCTS
+        normfs_uintn_le64_read_0
+        normfs_frame_header_decode
+        normfs_net_reader_init
+        normfs_net_result
+        normfs_net_read_header
+        normfs_net_read_payload
+        normfs_net_write)
+    string(REPLACE ";" "," NORMFS_NET_WP_FCTS_ARG "${NORMFS_NET_WP_FCTS}")
+
+    add_custom_target(verify-net
+        COMMAND ${FRAMAC}
+            -machdep gcc_x86_64
+            -wp-report-json ${CMAKE_CURRENT_BINARY_DIR}/verify-net.json
+            -wp -wp-rte -wp-timeout 240
+            -wp-split -wp-split-conj
+            -wp-prover alt-ergo,z3
+            -wp-par ${NPROC}
+            -wp-cache none
+            -wp-cache-env
+            -wp-smoke-tests
+            -wp-msg-key shell
+            -kernel-warn-key annot:missing-spec=inactive
+            -wp-warn-key pedantic-assigns=inactive
+            -wp-no-warn-memory-model
+            -cpp-extra-args=-I${CMAKE_CURRENT_SOURCE_DIR}/include\ -I${NORMFS_UINTN_INCLUDE}
+            -wp-fct ${NORMFS_NET_WP_FCTS_ARG}
+            src/net.c src/frame.c
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "WP: normfs TCP socket reads and writes"
         VERBATIM
     )
 endif()
