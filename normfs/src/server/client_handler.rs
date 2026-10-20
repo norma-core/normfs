@@ -1,5 +1,4 @@
 use log::{debug, error, info};
-use prost::Message;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -10,6 +9,7 @@ use super::command_processor::{CommandProcessor, ResponseSender};
 use super::frame::{self, FRAME_HEADER_SIZE, FRAME_MAX_PAYLOAD};
 use super::net::{Conn, FrameReader, NetError};
 use super::request;
+use super::response;
 use crate::proto::{ClientRequest, ServerResponse};
 use crate::NormFS;
 
@@ -214,9 +214,20 @@ impl ClientHandler {
                 Some(response) = reads.recv() => response,
                 else => break,
             };
-            let size = response.encoded_len();
-            let header = match frame::encode_header(size as u64) {
-                Ok(header) => header,
+            let mut message =
+                match response::encode_response(&response, FRAME_HEADER_SIZE, FRAME_MAX_PAYLOAD) {
+                    Ok(message) => message,
+                    Err(e) => {
+                        error!(
+                            "Cannot encode response (client_addr: {}, error: {})",
+                            addr, e
+                        );
+                        break;
+                    }
+                };
+            let size = message.len() - FRAME_HEADER_SIZE;
+            match frame::encode_header(size as u64) {
+                Ok(header) => message[..FRAME_HEADER_SIZE].copy_from_slice(&header),
                 Err(e) => {
                     error!(
                         "Cannot frame response (client_addr: {}, error: {})",
@@ -224,12 +235,7 @@ impl ClientHandler {
                     );
                     break;
                 }
-            };
-            let mut message = Vec::with_capacity(FRAME_HEADER_SIZE + size);
-            message.extend_from_slice(&header);
-            response
-                .encode(&mut message)
-                .expect("buffer reserved for the encoded length");
+            }
             // Let go of the payload, and any page it pins, before a slow write.
             drop(response);
 

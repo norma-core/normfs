@@ -11,7 +11,7 @@ set(NORMFS_UINTN_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../../uintn-rs/c/include"
     CACHE PATH "Path to the uintn C include directory")
 
 add_library(normfs_c STATIC src/disk_monitor.c src/disk_monitor_sys.c src/frame.c
-    src/net.c src/net_sys.c src/request.c)
+    src/net.c src/net_sys.c src/request.c src/response.c)
 target_include_directories(normfs_c PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<BUILD_INTERFACE:${NORMFS_UINTN_INCLUDE}>
@@ -19,8 +19,8 @@ target_include_directories(normfs_c PUBLIC
     $<INSTALL_INTERFACE:include>
 )
 
-# The tests cover the syscall shims, which no prover can discharge, and pin
-# the layout bytes the ACSL only sizes.
+# The tests cover the syscall shims, which no prover can discharge, the
+# layout bytes the ACSL only sizes, and gremlin's compiler-builtin varint size.
 enable_testing()
 add_executable(test_disk_monitor tests/test_disk_monitor.c)
 target_link_libraries(test_disk_monitor PRIVATE normfs_c)
@@ -28,6 +28,9 @@ add_test(NAME disk_monitor COMMAND test_disk_monitor)
 add_executable(test_net tests/test_net.c)
 target_link_libraries(test_net PRIVATE normfs_c)
 add_test(NAME net COMMAND test_net)
+add_executable(test_gremlin_varint tests/test_gremlin_varint.c)
+target_link_libraries(test_gremlin_varint PRIVATE normfs_c)
+add_test(NAME gremlin_varint COMMAND test_gremlin_varint)
 
 find_program(FRAMAC frama-c)
 if(FRAMAC)
@@ -209,6 +212,87 @@ if(FRAMAC)
             src/request.c
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
         COMMENT "WP: normfs TCP client request decoder"
+        VERBATIM
+    )
+
+    # src/response.c and the generated code it reaches: _size, _encode_at,
+    # _cached_size and the ghost functions _size calls; gremlin.h is proved by
+    # gremlin.c's verify-runtime.
+    set(NORMFS_RESPONSE_WP_FCTS
+        normfs_Id_tsize_nonneg
+        normfs_SetupResponse_tsize_nonneg
+        normfs_PingRequest_tsize_nonneg
+        normfs_PingResponse_tsize_nonneg
+        normfs_WriteResponse_ids_term_null
+        normfs_WriteResponse_ids_mono
+        normfs_WriteResponse_tsize_nonneg
+        normfs_ReadResponse_tsize_nonneg
+        normfs_ServerResponse_tsize_nonneg
+        normfs_Id_cached_size
+        normfs_Id_size
+        normfs_Id_encode_at
+        normfs_SetupResponse_cached_size
+        normfs_SetupResponse_size
+        normfs_SetupResponse_encode_at
+        normfs_PingRequest_cached_size
+        normfs_PingRequest_size
+        normfs_PingRequest_encode_at
+        normfs_PingResponse_cached_size
+        normfs_PingResponse_size
+        normfs_PingResponse_encode_at
+        normfs_WriteResponse_cached_size
+        normfs_WriteResponse_size
+        normfs_WriteResponse_encode_at
+        normfs_ReadResponse_cached_size
+        normfs_ReadResponse_size
+        normfs_ReadResponse_encode_at
+        normfs_ServerResponse_size
+        normfs_ServerResponse_encode_at
+        normfs_response_size
+        normfs_response_encode)
+    string(REPLACE ";" "," NORMFS_RESPONSE_WP_FCTS_ARG "${NORMFS_RESPONSE_WP_FCTS}")
+
+    add_custom_target(verify-response
+        COMMAND ${FRAMAC}
+            -machdep gcc_x86_64
+            -wp-report-json ${CMAKE_CURRENT_BINARY_DIR}/verify-response.json
+            -wp -wp-rte -wp-timeout 240
+            -wp-split -wp-split-conj
+            -wp-prover alt-ergo,z3
+            -wp-par ${NPROC}
+            -wp-cache none
+            -wp-cache-env
+            -wp-smoke-tests
+            -wp-msg-key shell
+            -kernel-warn-key annot:missing-spec=inactive
+            -wp-warn-key pedantic-assigns=inactive
+            -wp-no-warn-memory-model
+            -cpp-extra-args=-I${CMAKE_CURRENT_SOURCE_DIR}/include\ -I${CMAKE_CURRENT_SOURCE_DIR}/gremlin
+            -wp-fct ${NORMFS_RESPONSE_WP_FCTS_ARG}
+            src/response.c
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "WP: normfs TCP server response encoder"
+        VERBATIM
+    )
+
+    # The generated frame lemmas the _size proofs use; a -wp-fct run leaves
+    # them out. tip runs the induction strategies normfs.pb.h declares.
+    add_custom_target(verify-gremlin-lemmas
+        COMMAND ${FRAMAC}
+            -machdep gcc_x86_64
+            -wp-report-json ${CMAKE_CURRENT_BINARY_DIR}/verify-gremlin-lemmas.json
+            -wp -wp-timeout 240
+            -wp-prover alt-ergo,z3,tip
+            -wp-par ${NPROC}
+            -wp-cache none
+            -wp-cache-env
+            -wp-msg-key shell
+            -wp-no-warn-memory-model
+            -cpp-extra-args=-I${CMAKE_CURRENT_SOURCE_DIR}/include\ -I${CMAKE_CURRENT_SOURCE_DIR}/gremlin
+            -wp-prop=@lemma
+            src/response.c
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "WP: lemmas of the generated normfs.pb.h"
         VERBATIM
     )
 endif()
