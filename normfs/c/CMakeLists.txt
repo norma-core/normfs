@@ -11,10 +11,11 @@ set(NORMFS_UINTN_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../../uintn-rs/c/include"
     CACHE PATH "Path to the uintn C include directory")
 
 add_library(normfs_c STATIC src/disk_monitor.c src/disk_monitor_sys.c src/frame.c
-    src/net.c src/net_sys.c)
+    src/net.c src/net_sys.c src/request.c)
 target_include_directories(normfs_c PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<BUILD_INTERFACE:${NORMFS_UINTN_INCLUDE}>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/gremlin>
     $<INSTALL_INTERFACE:include>
 )
 
@@ -153,6 +154,61 @@ if(FRAMAC)
             src/net.c src/frame.c
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
         COMMENT "WP: normfs TCP socket reads and writes"
+        VERBATIM
+    )
+
+    # Every function with a body in src/request.c and the generated readers it
+    # calls; gremlin.h itself is proved by gremlin.c's verify-runtime.
+    set(NORMFS_REQUEST_WP_FCTS
+        normfs_ClientRequest_reader_init
+        normfs_SetupRequest_reader_init
+        normfs_SetupRequest_reader_get_version
+        normfs_PingRequest_reader_init
+        normfs_PingRequest_reader_get_sequence
+        normfs_PingRequest_reader_get_client_timestamp_ns
+        normfs_WriteRequest_reader_init
+        normfs_WriteRequest_reader_get_write_id
+        normfs_WriteRequest_reader_packets_begin
+        normfs_WriteRequest_reader_packets_next
+        normfs_ReadRequest_reader_init
+        normfs_ReadRequest_reader_get_read_id
+        normfs_ReadRequest_reader_get_step
+        normfs_ReadRequest_reader_get_limit
+        normfs_ReadRequest_reader_accept_encodings_begin
+        normfs_ReadRequest_reader_accept_encodings_next
+        normfs_Offset_reader_init
+        normfs_Offset_reader_get_type
+        normfs_Id_reader_init
+        normfs_request_span
+        normfs_request_decode_setup
+        normfs_request_decode_ping
+        normfs_request_decode_write
+        normfs_request_decode_offset
+        normfs_request_decode_read
+        normfs_request_fill
+        normfs_request_decode)
+    string(REPLACE ";" "," NORMFS_REQUEST_WP_FCTS_ARG "${NORMFS_REQUEST_WP_FCTS}")
+
+    add_custom_target(verify-request
+        COMMAND ${FRAMAC}
+            -machdep gcc_x86_64
+            -wp-report-json ${CMAKE_CURRENT_BINARY_DIR}/verify-request.json
+            -wp -wp-rte -wp-timeout 240
+            -wp-split -wp-split-conj
+            -wp-prover alt-ergo,z3
+            -wp-par ${NPROC}
+            -wp-cache none
+            -wp-cache-env
+            -wp-smoke-tests
+            -wp-msg-key shell
+            -kernel-warn-key annot:missing-spec=inactive
+            -wp-warn-key pedantic-assigns=inactive
+            -wp-no-warn-memory-model
+            -cpp-extra-args=-I${CMAKE_CURRENT_SOURCE_DIR}/include\ -I${CMAKE_CURRENT_SOURCE_DIR}/gremlin
+            -wp-fct ${NORMFS_REQUEST_WP_FCTS_ARG}
+            src/request.c
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "WP: normfs TCP client request decoder"
         VERBATIM
     )
 endif()
