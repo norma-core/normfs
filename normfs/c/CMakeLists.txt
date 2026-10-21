@@ -11,7 +11,7 @@ set(NORMFS_UINTN_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../../uintn-rs/c/include"
     CACHE PATH "Path to the uintn C include directory")
 
 add_library(normfs_c STATIC src/disk_monitor.c src/disk_monitor_sys.c src/frame.c
-    src/net.c src/net_sys.c src/request.c src/response.c)
+    src/conn.c src/net.c src/net_sys.c src/request.c src/response.c)
 target_include_directories(normfs_c PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<BUILD_INTERFACE:${NORMFS_UINTN_INCLUDE}>
@@ -157,6 +157,58 @@ if(FRAMAC)
             src/net.c src/frame.c
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
         COMMENT "WP: normfs TCP socket reads and writes"
+        VERBATIM
+    )
+
+    # Every function with a body in src/conn.c; net.c and frame.c are there for
+    # their contracts, verify-net proves them. -pp-annot expands the invariant
+    # macros in the contracts.
+    set(NORMFS_CONN_WP_FCTS
+        normfs_conn_emit
+        normfs_conn_rx_init
+        normfs_conn_close_read
+        normfs_conn_read
+        normfs_conn_give_buffer
+        normfs_conn_ack
+        normfs_conn_tick
+        normfs_conn_stop
+        normfs_conn_rx_interest
+        normfs_conn_deadline
+        normfs_conn_tx_init
+        normfs_conn_submit
+        normfs_conn_close_write
+        normfs_conn_pop
+        normfs_conn_pick
+        normfs_conn_write
+        normfs_conn_tx_interest
+        normfs_conn_tx_drained
+        normfs_conn_rx_size
+        normfs_conn_tx_size
+        normfs_conn_events_room
+        normfs_conn_pending_max)
+    string(REPLACE ";" "," NORMFS_CONN_WP_FCTS_ARG "${NORMFS_CONN_WP_FCTS}")
+
+    add_custom_target(verify-conn
+        COMMAND ${FRAMAC}
+            -machdep gcc_x86_64
+            -pp-annot
+            -wp-report-json ${CMAKE_CURRENT_BINARY_DIR}/verify-conn.json
+            -wp -wp-rte -wp-timeout 240
+            -wp-split -wp-split-conj
+            -wp-prover alt-ergo,z3
+            -wp-par ${NPROC}
+            -wp-cache none
+            -wp-cache-env
+            -wp-smoke-tests
+            -wp-msg-key shell
+            -kernel-warn-key annot:missing-spec=inactive
+            -wp-warn-key pedantic-assigns=inactive
+            -wp-no-warn-memory-model
+            -cpp-extra-args=-I${CMAKE_CURRENT_SOURCE_DIR}/include\ -I${NORMFS_UINTN_INCLUDE}
+            -wp-fct ${NORMFS_CONN_WP_FCTS_ARG}
+            src/conn.c src/net.c src/frame.c
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "WP: normfs TCP connection state"
         VERBATIM
     )
 
