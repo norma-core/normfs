@@ -45,6 +45,28 @@ normfs_net_sys_would_block(int e)
 /* Failed connections one accept call takes off the queue before Rust gets a turn. */
 #define NORMFS_NET_SYS_ACCEPT_TRIES 64
 
+/* Errors accept(2) on Linux passes on from the pending connection, which it
+ * dequeues. EPERM and EOPNOTSUPP may leave it queued, so a retry would spin. */
+static int
+normfs_net_sys_peer_failed(int e)
+{
+	switch (e) {
+	case ECONNABORTED:
+	case EPROTO:
+	case ENOPROTOOPT:
+	case ENETDOWN:
+	case ENETUNREACH:
+	case EHOSTDOWN:
+	case EHOSTUNREACH:
+#ifdef ENONET
+	case ENONET:
+#endif
+		return 1;
+	default:
+		return 0;
+	}
+}
+
 long
 normfs_net_sys_read(int fd, uint8_t *buf, size_t off, size_t len, int *os_error)
 {
@@ -219,7 +241,7 @@ normfs_net_sys_accept(int fd, struct normfs_net_sys_accepted *out, int *os_error
 			break;
 		if (errno == EINTR)
 			continue;
-		if (errno == ECONNABORTED) {
+		if (normfs_net_sys_peer_failed(errno)) {
 			if (++tries < NORMFS_NET_SYS_ACCEPT_TRIES)
 				continue;
 			return 2;
