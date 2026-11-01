@@ -546,11 +546,17 @@ impl Driver {
             let e = self.sides.events[k];
             match e.kind {
                 EV_NEED_BUFFER => {
+                    // A fresh zeroed buffer can take new pages without writing them;
+                    // resizing writes every new byte before the read does.
                     let mut payload = vec![0u8; e.value as usize];
+                    if let Some(old) = self.buffer.take() {
+                        payload[..old.len()].copy_from_slice(&old);
+                    }
                     let now = self.now();
                     let rx = self.sides.rx();
-                    // SAFETY: payload holds the bytes asked for and stays in self.buffer,
-                    // unmoved, until the REQUEST or READ_CLOSED event gives it back.
+                    // SAFETY: payload holds the bytes asked for, those read so far at its
+                    // start, and stays in self.buffer unmoved until the next NEED_BUFFER,
+                    // REQUEST or READ_CLOSED event.
                     unsafe { normfs_conn_give_buffer(rx, payload.as_mut_ptr(), now) };
                     self.buffer = Some(payload);
                     gave = true;

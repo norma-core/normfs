@@ -14,7 +14,8 @@ enum normfs_net_status {
 	NORMFS_NET_ERR_IO = 3,
 	NORMFS_NET_ERR_TOO_LARGE = 4,
 	NORMFS_NET_ERR_BAD_LENGTH = 5,
-	NORMFS_NET_YIELD = 6
+	NORMFS_NET_YIELD = 6,
+	NORMFS_NET_FULL = 7
 };
 
 /* Syscalls one read or write call makes before it hands control back. */
@@ -70,9 +71,10 @@ struct normfs_net_result
 normfs_net_read_header(struct normfs_net_reader *r, int fd);
 
 /*
- * Reads the payload announced by the last header into buf, whose length must
- * equal it. OK once the whole payload is in, after which the reader expects a
- * header again. YIELD after NORMFS_NET_BATCH reads that left more to come.
+ * Reads the payload announced by the last header into buf, which holds len
+ * bytes, the ones read so far at its start. OK once the whole payload is in,
+ * after which the reader expects a header again; FULL when buf is full and
+ * more is to come. YIELD after NORMFS_NET_BATCH reads that left more to come.
  */
 struct normfs_net_result
 normfs_net_read_payload(struct normfs_net_reader *r, int fd, uint8_t *buf,

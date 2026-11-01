@@ -59,6 +59,7 @@ normfs_conn_rx_init(struct normfs_conn_rx *r, int fd, uint64_t token, int64_t no
 {
 	normfs_net_reader_init(&r->rd);
 	r->payload = (uint8_t *)0;
+	r->cap = 0u;
 	r->token = token;
 	r->deadline_ms = now + NORMFS_CONN_IDLE_MS;
 	r->fd = fd;
@@ -101,8 +102,8 @@ normfs_conn_close_read(struct normfs_conn_rx *r, struct normfs_conn_events *out,
     requires \valid(out) && normfs_conn_rx_events_ok(out, r);
     requires normfs_conn_room(out, NORMFS_CONN_FRAMES);
     requires NORMFS_CONN_NOW_OK(now);
-    assigns r->rd, r->payload, r->deadline_ms, r->pending, r->reading, r->want_buffer,
-            r->payload[0 .. r->rd.payload_len - 1],
+    assigns r->rd, r->payload, r->cap, r->deadline_ms, r->pending, r->reading, r->want_buffer,
+            r->payload[0 .. r->cap - 1],
             out->n, out->ev[0 .. out->cap - 1], normfs_net_sys_world;
     ensures NORMFS_CONN_RX_OK(r);
     ensures \old(out->n) <= out->n <= \old(out->n) + NORMFS_CONN_FRAMES;
@@ -122,14 +123,23 @@ normfs_conn_close_read(struct normfs_conn_rx *r, struct normfs_conn_events *out,
               r->pending == \old(r->pending) + 1 && r->payload == \null &&
               \old(r->payload) != \null && out->ev[\old(out->n)].buf == \old(r->payload) &&
               out->ev[\old(out->n)].value == \old(r->rd.payload_len) &&
-              normfs_net_payload_read(\old(r->payload), \old(r->rd.payload_len), r->fd);
+              \old(r->rd.payload_len) == \old(r->cap);
+    ensures out->n > \old(out->n) && out->ev[\old(out->n)].kind == NORMFS_CONN_EV_REQUEST ==>
+              normfs_net_payload_read(\old(r->payload), \old(r->cap), r->fd);
     ensures !(out->n > \old(out->n) && out->ev[\old(out->n)].kind == NORMFS_CONN_EV_REQUEST) ==>
               r->pending == \old(r->pending);
     ensures \forall integer k; \old(out->n) <= k < out->n ==>
               out->ev[k].kind == NORMFS_CONN_EV_NEED_BUFFER ==>
-                r->want_buffer == 1 && out->ev[k].value == r->rd.payload_len;
+                r->want_buffer == 1 && out->ev[k].value == r->cap;
     ensures \forall integer k; \old(out->n) <= k < out->n ==>
               out->ev[k].kind == NORMFS_CONN_EV_READ_CLOSED ==> r->reading == 0;
+    ensures \old(r->want_buffer) == 0 && r->want_buffer == 1 ==>
+              out->n > \old(out->n) &&
+              out->ev[out->n - 1].kind == NORMFS_CONN_EV_NEED_BUFFER &&
+              out->ev[out->n - 1].value == r->cap;
+    ensures \old(r->want_buffer) == 0 && r->want_buffer == 1 && r->rd.payload_have > 0 ==>
+              r->rd.payload_have == \old(r->cap) && r->rd.payload_have < r->cap &&
+              normfs_net_payload_read(\old(r->payload), r->rd.payload_have, r->fd);
     ensures \result == 0 || \result == 1;
 */
 int
@@ -147,13 +157,15 @@ normfs_conn_read(struct normfs_conn_rx *r, struct normfs_conn_events *out, int64
 	    loop invariant \at(r->reading, Pre) == 0 ==>
 	                     out->n == \at(out->n, Pre) && r->reading == 0;
 	    loop invariant r->payload != \null ==>
-	                     r->payload == \at(r->payload, Pre) &&
-	                     r->rd.payload_len == \at(r->rd.payload_len, Pre);
+	                     r->payload == \at(r->payload, Pre) && r->cap == \at(r->cap, Pre);
+	    loop invariant i == 0 ==> r->want_buffer == \at(r->want_buffer, Pre);
+	    loop invariant i > 0 ==> r->want_buffer == 0;
 	    loop invariant \forall integer g; g != r->fd ==> net_pos(g) == \at(net_pos(g), Pre);
 	    loop invariant out->n <= \at(out->n, Pre) + 1;
 	    loop invariant \forall integer k; \at(out->n, Pre) <= k < out->n ==>
 	                     out->ev[k].kind == NORMFS_CONN_EV_REQUEST && out->ev[k].conn == r->token;
 	    loop invariant i == 0 ==> out->n == \at(out->n, Pre) && r->payload == \at(r->payload, Pre) &&
+	                     r->cap == \at(r->cap, Pre) &&
 	                     r->rd.in_payload == \at(r->rd.in_payload, Pre) &&
 	                     r->rd.payload_len == \at(r->rd.payload_len, Pre) &&
 	                     r->pending == \at(r->pending, Pre);
@@ -164,11 +176,11 @@ normfs_conn_read(struct normfs_conn_rx *r, struct normfs_conn_events *out, int64
 	                     \at(r->payload, Pre) != \null &&
 	                     out->ev[\at(out->n, Pre)].buf == \at(r->payload, Pre) &&
 	                     out->ev[\at(out->n, Pre)].value == \at(r->rd.payload_len, Pre) &&
-	                     normfs_net_payload_read(\at(r->payload, Pre), \at(r->rd.payload_len, Pre),
-	                       r->fd);
-	    loop assigns i, res, r->rd, r->payload, r->deadline_ms, r->pending, r->reading,
-	                 r->want_buffer,
-	                 \at(r->payload, Pre)[0 .. \at(r->rd.payload_len, Pre) - 1],
+	                     \at(r->rd.payload_len, Pre) == \at(r->cap, Pre) &&
+	                     normfs_net_payload_read(\at(r->payload, Pre), \at(r->cap, Pre), r->fd);
+	    loop assigns i, res, r->rd, r->payload, r->cap, r->deadline_ms, r->pending,
+	                 r->reading, r->want_buffer,
+	                 \at(r->payload, Pre)[0 .. \at(r->cap, Pre) - 1],
 	                 out->n, \at(out->ev, Pre)[0 .. \at(out->cap, Pre) - 1], normfs_net_sys_world;
 	    loop variant NORMFS_CONN_FRAMES - i;
 	*/
@@ -187,16 +199,34 @@ normfs_conn_read(struct normfs_conn_rx *r, struct normfs_conn_events *out, int64
 			r->deadline_ms = now + NORMFS_CONN_IDLE_MS;
 			if (res.value == 0u)
 				continue;
+			r->cap = res.value < NORMFS_CONN_FIRST_BUFFER ? res.value :
+			    NORMFS_CONN_FIRST_BUFFER;
 			r->want_buffer = 1;
-			normfs_conn_emit(out, r->token, NORMFS_CONN_EV_NEED_BUFFER, res.value,
+			normfs_conn_emit(out, r->token, NORMFS_CONN_EV_NEED_BUFFER, r->cap,
 			    (uint8_t *)0, 0, 0, 1);
+			/*@ assert r->rd.payload_have == 0; */
+			/*@ assert out->n == \at(out->n, Pre) + 1 &&
+			           out->ev[out->n - 1].value == r->cap; */
 			return 0;
 		}
-		res = normfs_net_read_payload(&r->rd, r->fd, r->payload, r->rd.payload_len);
+		res = normfs_net_read_payload(&r->rd, r->fd, r->payload, (size_t)r->cap);
 		if (res.status == NORMFS_NET_WOULD_BLOCK)
 			return 1;
 		if (res.status == NORMFS_NET_YIELD)
 			return 0;
+		if (res.status == NORMFS_NET_FULL) {
+			/*@ assert r->payload == \at(r->payload, Pre) &&
+			           r->rd.payload_have == \at(r->cap, Pre) &&
+			           normfs_net_payload_read(\at(r->payload, Pre), r->rd.payload_have, r->fd); */
+			r->cap = r->rd.payload_len - r->cap > r->cap ? 2u * r->cap : r->rd.payload_len;
+			r->payload = (uint8_t *)0;
+			r->want_buffer = 1;
+			normfs_conn_emit(out, r->token, NORMFS_CONN_EV_NEED_BUFFER, r->cap,
+			    (uint8_t *)0, 0, 0, 1);
+			/*@ assert out->n == \at(out->n, Pre) + 1 &&
+			           out->ev[out->n - 1].value == r->cap; */
+			return 0;
+		}
 		if (res.status != NORMFS_NET_OK) {
 			normfs_conn_close_read(r, out, res.status, res.os_error, 0u);
 			return 0;
@@ -210,21 +240,26 @@ normfs_conn_read(struct normfs_conn_rx *r, struct normfs_conn_events *out, int64
 	return 0;
 }
 
-/* Hands over the buffer a NEED_BUFFER event asked for, rd.payload_len bytes. */
+/* Hands over the buffer a NEED_BUFFER event asked for, cap bytes. */
 /*@ requires \valid(r) && NORMFS_CONN_RX_OK(r) && r->want_buffer == 1;
-    requires \valid(buf + (0 .. r->rd.payload_len - 1));
-    requires \separated(r, buf + (0 .. r->rd.payload_len - 1));
+    requires \valid(buf + (0 .. r->cap - 1));
+    requires \separated(r, buf + (0 .. r->cap - 1));
+    requires normfs_net_payload_read(buf, r->rd.payload_have, r->fd);
     requires NORMFS_CONN_NOW_OK(now);
     assigns r->payload, r->want_buffer, r->deadline_ms;
     ensures NORMFS_CONN_RX_OK(r);
     ensures r->payload == buf && r->want_buffer == 0;
+    ensures r->rd.payload_have == 0 ==> r->deadline_ms == now + NORMFS_CONN_IDLE_MS;
+    ensures r->rd.payload_have > 0 ==> r->deadline_ms == \old(r->deadline_ms);
 */
 void
 normfs_conn_give_buffer(struct normfs_conn_rx *r, uint8_t *buf, int64_t now)
 {
 	r->payload = buf;
 	r->want_buffer = 0;
-	r->deadline_ms = now + NORMFS_CONN_IDLE_MS;
+	/* A grown buffer keeps the deadline: the whole payload gets one idle period. */
+	if (r->rd.payload_have == 0u)
+		r->deadline_ms = now + NORMFS_CONN_IDLE_MS;
 }
 
 /* Rust took a request; reading resumes if it had paused for it. */

@@ -15,6 +15,10 @@
 /* How long the read side waits for a header, or for the rest of a payload. */
 #define NORMFS_CONN_IDLE_MS 10000
 
+/* A payload buffer starts this big and doubles as bytes arrive, so a header
+ * alone cannot claim the memory it announces. */
+#define NORMFS_CONN_FIRST_BUFFER 65536
+
 /* Frames a call reads before it hands control back, keepalives included.
  * One, so tokio's task budget is spent per frame, as it was per read before. */
 #define NORMFS_CONN_FRAMES 1
@@ -42,8 +46,9 @@ enum normfs_conn_event_kind {
 #define NORMFS_CONN_TIMEOUT 100
 
 /*
- * NEED_BUFFER: value is the payload length; reading, and its deadline, wait
- * for normfs_conn_give_buffer, which Rust calls before anything else.
+ * NEED_BUFFER: value is the size the payload buffer must have, with the bytes
+ * read so far at its start; reading, and its deadline, wait for
+ * normfs_conn_give_buffer, which Rust calls before anything else.
  * REQUEST: buf holds value bytes, Rust's now.
  * READ_CLOSED, WRITE_CLOSED: status and os_error say why, value carries the
  * size of a frame over the limit, buf a payload buffer to free or NULL.
@@ -74,6 +79,7 @@ struct normfs_conn_events {
 struct normfs_conn_rx {
 	struct normfs_net_reader rd;
 	uint8_t *payload;
+	uint64_t cap;
 	uint64_t token;
 	int64_t deadline_ms;
 	int fd;
@@ -124,8 +130,10 @@ struct normfs_conn_tx {
       r->pending <= NORMFS_CONN_PENDING &&
       (r->reading == 0 ==> r->payload == \null && r->want_buffer == 0) &&
       (r->want_buffer == 1 ==>
-         r->payload == \null && r->rd.in_payload == 1 && r->rd.payload_have == 0 &&
-         r->rd.payload_len > 0) &&
+         r->payload == \null && r->rd.in_payload == 1 && r->rd.payload_have < r->cap) &&
+      (r->rd.in_payload == 1 ==>
+         1 <= r->cap && r->rd.payload_have <= r->cap <= r->rd.payload_len &&
+         (r->cap <= NORMFS_CONN_FIRST_BUFFER || r->cap <= 2 * r->rd.payload_have)) &&
       (r->reading == 1 && r->rd.in_payload == 1 ==>
          r->want_buffer == 1 || r->payload != \null);
 
@@ -135,8 +143,8 @@ struct normfs_conn_tx {
     predicate normfs_conn_rx_payload_ok{L}(struct normfs_conn_rx *r) =
       r->payload != \null ==>
         r->rd.in_payload == 1 && r->want_buffer == 0 &&
-        \valid(r->payload + (0 .. r->rd.payload_len - 1)) &&
-        \separated(r, r->payload + (0 .. r->rd.payload_len - 1)) &&
+        \valid(r->payload + (0 .. r->cap - 1)) &&
+        \separated(r, r->payload + (0 .. r->cap - 1)) &&
         normfs_net_payload_read(r->payload, r->rd.payload_have, r->fd);
 
     predicate normfs_conn_rx_active(struct normfs_conn_rx *r) =
@@ -147,7 +155,7 @@ struct normfs_conn_tx {
       out->n <= out->cap && \valid(out->ev + (0 .. out->cap - 1)) &&
       \separated(out, r) && \separated(out->ev + (0 .. out->cap - 1), r, out) &&
       (r->payload != \null ==>
-         \separated(out->ev + (0 .. out->cap - 1), r->payload + (0 .. r->rd.payload_len - 1)));
+         \separated(out->ev + (0 .. out->cap - 1), r->payload + (0 .. r->cap - 1)));
 
     predicate normfs_conn_tx_events_ok{L}(struct normfs_conn_events *out,
                                           struct normfs_conn_tx *t) =
