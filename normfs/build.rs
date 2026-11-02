@@ -39,13 +39,20 @@ fn main() -> Result<()> {
         ),
         manifest_dir.join("c/src/frame.c"),
         manifest_dir.join("c/src/net.c"),
-        manifest_dir.join("c/src/net_sys.c"),
+        manifest_dir.join(
+            if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+                "c/src/net_sys_win.c"
+            } else {
+                "c/src/net_sys.c"
+            },
+        ),
         manifest_dir.join("c/src/request.c"),
         manifest_dir.join("c/src/response.c"),
         manifest_dir.join("c/src/walk.c"),
     ];
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         println!("cargo:rustc-link-lib=ntdll");
+        println!("cargo:rustc-link-lib=ws2_32");
     }
 
     println!("cargo:rerun-if-changed={}", include_dir.display());
