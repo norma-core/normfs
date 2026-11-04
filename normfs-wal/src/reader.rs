@@ -10,7 +10,9 @@ use xxhash_rust::xxh64;
 
 use super::errors::WalError;
 use super::wal_entry::WalEntryHeader;
-use super::wal_entry_v1::{WAL_ENTRY_V1_CRC_SIZE, WAL_ENTRY_V1_MIN_SIZE, WalEntryV1};
+use super::wal_entry_v1::{
+    WAL_ENTRY_V1_CRC_SIZE, WAL_ENTRY_V1_MIN_SIZE, WalEntryV1, scan_whole_entries,
+};
 use super::wal_header::{WalHeader, WalHeaderError};
 use super::wal_header_v1::{
     AnyWalHeader, AnyWalHeaderError, WAL_HEADER_V1_VERSION, WalHeaderV1Error,
@@ -428,34 +430,14 @@ pub fn count_entries(content: &[u8], file_id: &UintN) -> Result<(UintN, UintN), 
     let (any_header, header_size) = AnyWalHeader::from_bytes(content)?;
     let wal_header = WalHeader::from(&any_header);
 
-    // V1: iterate frames from the byte buffer, deriving each id from
-    // num_entries_before + running index; stop at the first corrupt entry.
     if any_header.version() == WAL_HEADER_V1_VERSION {
         let num_entries_before = wal_header
             .num_entries_before
             .to_u64()
             .map_err(|_| WalHeaderV1Error::ValueTooLarge)?;
-        let mut num_entries: u64 = 0;
-        let mut cursor = header_size;
-        let mut index = 0u64;
-        let mut first_entry_id: Option<UintN> = None;
-        let mut last_entry_id: Option<UintN> = None;
-
-        while cursor < content.len() {
-            match WalEntryV1::iter_next(&content[cursor..], num_entries_before, index) {
-                Ok((_, entry_id, consumed)) => {
-                    let id = UintN::from(entry_id);
-                    if first_entry_id.is_none() {
-                        first_entry_id = Some(id.clone());
-                    }
-                    last_entry_id = Some(id);
-                    cursor += consumed;
-                    num_entries += 1;
-                    index += 1;
-                }
-                Err(_) => break,
-            }
-        }
+        let num_entries = scan_whole_entries(content, header_size, num_entries_before);
+        let first_entry_id = (num_entries > 0).then_some(num_entries_before);
+        let last_entry_id = num_entries.checked_sub(1).map(|n| num_entries_before + n);
 
         log::debug!(
             "WAL reader: file {} contains {} valid V1 entries, range: {:?} - {:?}, size: {} bytes",

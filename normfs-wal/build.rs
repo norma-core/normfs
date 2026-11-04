@@ -17,6 +17,7 @@ fn main() {
         manifest_dir.join("c/src/crc32c.c"),
         manifest_dir.join("c/src/wal_entry.c"),
         manifest_dir.join("c/src/wal_page.c"),
+        manifest_dir.join("c/src/wal_scan.c"),
         manifest_dir.join("c/src/wal_pool.c"),
         manifest_dir.join("c/src/wal_ring.c"),
     ];

@@ -79,8 +79,25 @@ struct CIterResult {
     status: c_int,
 }
 
+// Matches struct normfs_wal_scan_count_result.
+#[repr(C)]
+#[derive(Default)]
+struct CScanCount {
+    end: usize,
+    count: u64,
+}
+const _: () = assert!(std::mem::size_of::<CScanCount>() == 16);
+
 unsafe extern "C" {
     fn normfs_wal_entry_v1_size(record_size: u32) -> usize;
+
+    fn normfs_wal_scan_count_v1(
+        buf: *const u8,
+        len: usize,
+        start: usize,
+        num_entries_before: u64,
+        res: *mut CScanCount,
+    );
 
     fn normfs_wal_entry_v1_encode(
         record: *const u8,
@@ -130,6 +147,24 @@ pub fn derive_entry_id(num_entries_before: u64, index: u64) -> Result<u64, WalEn
     let result = unsafe { normfs_wal_entry_v1_id(num_entries_before, index) };
     map_status(result.status)?;
     Ok(result.entry_id)
+}
+
+/// How many whole entries `content` holds from `start`, up to the first that
+/// is cut short, corrupt or would overflow its id.
+pub fn scan_whole_entries(content: &[u8], start: usize, num_entries_before: u64) -> u64 {
+    assert!(start <= content.len());
+    let mut res = CScanCount::default();
+    // SAFETY: content is live for the call and start is inside it.
+    unsafe {
+        normfs_wal_scan_count_v1(
+            content.as_ptr(),
+            content.len(),
+            start,
+            num_entries_before,
+            &mut res,
+        )
+    };
+    res.count
 }
 
 /// Encoded size of a V1 entry holding a record of `record_size` bytes.
