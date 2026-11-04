@@ -2,6 +2,9 @@ mod client_handler;
 pub mod command_processor;
 #[cfg(test)]
 mod command_processor_test;
+mod frame;
+#[cfg(test)]
+mod frame_test;
 
 #[cfg(feature = "websocket")]
 pub mod websocket;
