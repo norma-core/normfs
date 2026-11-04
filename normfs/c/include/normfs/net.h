@@ -21,6 +21,9 @@ enum normfs_net_status {
 /* Syscalls one read or write call makes before it hands control back. */
 #define NORMFS_NET_BATCH 16
 
+/* Failed connections one accept call takes off the queue before Rust gets a turn. */
+#define NORMFS_NET_ACCEPT_TRIES 64
+
 /* os_error is the errno of a failed syscall, 0 otherwise. */
 struct normfs_net_result {
 	uint64_t value;
@@ -84,5 +87,9 @@ normfs_net_read_payload(struct normfs_net_reader *r, int fd, uint8_t *buf,
  * writes is spent (YIELD); *off advances. */
 struct normfs_net_result
 normfs_net_write(int fd, const uint8_t *buf, size_t len, size_t *off);
+
+/* normfs_net_sys_accept, retried while the pending connection failed, at most
+ * NORMFS_NET_ACCEPT_TRIES times; 2 when every try failed and more may wait. */
+int normfs_net_accept(int fd, struct normfs_net_sys_accepted *out, int *os_error);
 
 #endif /* NORMFS_NET_H */

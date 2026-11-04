@@ -114,8 +114,16 @@ int normfs_net_sys_listen(const struct normfs_net_sys_addr *addr, int *os_error)
 /* The address a listening socket is bound to, port 0 resolved. 0 or -1. */
 int normfs_net_sys_local_addr(int fd, struct normfs_net_sys_addr *addr, int *os_error);
 
-/* 1 with a connection, 0 when none is pending, 2 after a run of connections
- * that failed while more may wait, -1 with os_error. */
+/* One accept, EINTR retried: 1 with a connection, 0 when none is pending, 2
+ * when the pending one failed and left the queue, -1 with os_error. */
+/*@ requires \valid(out) && \valid(os_error) && \separated(out, os_error);
+    assigns *out, *os_error, normfs_net_sys_world;
+    ensures -1 <= \result <= 2;
+    ensures \result == -1 ==> *os_error > 0;
+    ensures \result != -1 ==> *os_error == 0;
+    ensures \result == 1 ==> out->fd >= 0;
+    ensures \result != 1 ==> out->fd == -1;
+*/
 int normfs_net_sys_accept(int fd, struct normfs_net_sys_accepted *out, int *os_error);
 
 /* shutdown(SHUT_WR); errors are ignored, the peer may already be gone. */

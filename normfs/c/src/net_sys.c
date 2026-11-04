@@ -42,9 +42,6 @@ normfs_net_sys_would_block(int e)
 	return e == EAGAIN || e == EWOULDBLOCK;
 }
 
-/* Failed connections one accept call takes off the queue before Rust gets a turn. */
-#define NORMFS_NET_SYS_ACCEPT_TRIES 64
-
 /* Errors accept(2) on Linux passes on from the pending connection, which it
  * dequeues. EPERM and EOPNOTSUPP may leave it queued, so a retry would spin. */
 static int
@@ -224,7 +221,6 @@ normfs_net_sys_accept(int fd, struct normfs_net_sys_accepted *out, int *os_error
 	struct sockaddr_storage ss;
 	socklen_t len;
 	int one = 1;
-	int tries = 0;
 	int c;
 
 	*os_error = 0;
@@ -241,11 +237,8 @@ normfs_net_sys_accept(int fd, struct normfs_net_sys_accepted *out, int *os_error
 			break;
 		if (errno == EINTR)
 			continue;
-		if (normfs_net_sys_peer_failed(errno)) {
-			if (++tries < NORMFS_NET_SYS_ACCEPT_TRIES)
-				continue;
+		if (normfs_net_sys_peer_failed(errno))
 			return 2;
-		}
 		if (normfs_net_sys_would_block(errno))
 			return 0;
 		*os_error = normfs_net_sys_errno();
