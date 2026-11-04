@@ -7,9 +7,13 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -Werror -pedantic")
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-add_library(normfs_c STATIC src/disk_monitor.c src/disk_monitor_sys.c)
+set(NORMFS_UINTN_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../../uintn-rs/c/include"
+    CACHE PATH "Path to the uintn C include directory")
+
+add_library(normfs_c STATIC src/disk_monitor.c src/disk_monitor_sys.c src/frame.c)
 target_include_directories(normfs_c PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${NORMFS_UINTN_INCLUDE}>
     $<INSTALL_INTERFACE:include>
 )
 
@@ -79,6 +83,37 @@ if(FRAMAC)
             src/disk_monitor.c
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
         COMMENT "WP: normfs disk monitor"
+        VERBATIM
+    )
+
+    set(NORMFS_FRAME_WP_FCTS
+        normfs_uintn_le64_read
+        normfs_uintn_le64_write
+        normfs_frame_header_encode
+        normfs_frame_header_decode
+        normfs_frame_header_roundtrip_holds)
+    string(REPLACE ";" "," NORMFS_FRAME_WP_FCTS_ARG "${NORMFS_FRAME_WP_FCTS}")
+
+    add_custom_target(verify-frame
+        COMMAND ${FRAMAC}
+            -machdep gcc_x86_64
+            -wp-report-json ${CMAKE_CURRENT_BINARY_DIR}/verify-frame.json
+            -wp -wp-rte -wp-timeout 240
+            -wp-split -wp-split-conj
+            -wp-prover alt-ergo,z3
+            -wp-par ${NPROC}
+            -wp-cache none
+            -wp-cache-env
+            -wp-smoke-tests
+            -wp-msg-key shell
+            -kernel-warn-key annot:missing-spec=inactive
+            -wp-warn-key pedantic-assigns=inactive
+            -wp-no-warn-memory-model
+            -cpp-extra-args=-I${CMAKE_CURRENT_SOURCE_DIR}/include\ -I${NORMFS_UINTN_INCLUDE}
+            -wp-fct ${NORMFS_FRAME_WP_FCTS_ARG}
+            src/frame.c
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "WP: normfs TCP frame header"
         VERBATIM
     )
 endif()
