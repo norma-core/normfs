@@ -9,10 +9,10 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
 use super::command_processor::{CommandProcessor, ResponseSender};
+use super::frame::{self, FrameError, FRAME_HEADER_SIZE, FRAME_MAX_PAYLOAD};
 use crate::proto::{ClientRequest, ServerResponse};
 use crate::NormFS;
 
-const MAX_MESSAGE_SIZE: u64 = 5 * 1024 * 1024 * 1024; // 5GB
 const REQUEST_CHANNEL_BUFFER: usize = 10;
 const RESPONSE_CHANNEL_BUFFER: usize = 10;
 const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -114,8 +114,7 @@ impl ClientHandler {
         debug!("Read loop started (client_addr: {})", addr);
 
         loop {
-            // Read message size (8 bytes)
-            let mut size_bytes = [0u8; 8];
+            let mut size_bytes = [0u8; FRAME_HEADER_SIZE];
             match tokio::time::timeout(IDLE_TIMEOUT, read_half.read_exact(&mut size_bytes)).await {
                 Ok(Ok(_)) => {}
                 Ok(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
@@ -141,15 +140,23 @@ impl ClientHandler {
                 }
             }
 
-            let size = u64::from_le_bytes(size_bytes);
-
-            if size > MAX_MESSAGE_SIZE {
-                error!(
-                    "Message size exceeds maximum (client_addr: {}, message_size: {}, max_size: {})",
-                    addr, size, MAX_MESSAGE_SIZE
-                );
-                break;
-            }
+            let size = match frame::decode_header(&size_bytes) {
+                Ok(size) => size,
+                Err(FrameError::TooLarge(size)) => {
+                    error!(
+                        "Message size exceeds maximum (client_addr: {}, message_size: {}, max_size: {})",
+                        addr, size, FRAME_MAX_PAYLOAD
+                    );
+                    break;
+                }
+                Err(e) => {
+                    error!(
+                        "Invalid message header (client_addr: {}, error: {})",
+                        addr, e
+                    );
+                    break;
+                }
+            };
 
             if size == 0 {
                 continue;
@@ -224,8 +231,18 @@ impl ClientHandler {
                 else => break,
             };
             let size = response.encoded_len();
-            let mut message = Vec::with_capacity(8 + size);
-            message.extend_from_slice(&(size as u64).to_le_bytes());
+            let header = match frame::encode_header(size as u64) {
+                Ok(header) => header,
+                Err(e) => {
+                    error!(
+                        "Cannot frame response (client_addr: {}, error: {})",
+                        addr, e
+                    );
+                    break;
+                }
+            };
+            let mut message = Vec::with_capacity(FRAME_HEADER_SIZE + size);
+            message.extend_from_slice(&header);
             response
                 .encode(&mut message)
                 .expect("buffer reserved for the encoded length");
