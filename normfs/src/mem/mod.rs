@@ -202,26 +202,41 @@ fn follow_callback(
     })
 }
 
+enum GoLive {
+    Live,
+    /// What the callback held does not fit the channel; nothing of it was sent.
+    NoRoom,
+    Closed,
+}
+
 /// Sends what the callback held past `after` and lets it deliver from then on.
 fn go_live(
     handoff: &Mutex<Handoff>,
     after: Option<UintN>,
     step: usize,
     chan: &Sender<ReadEntry>,
-    dropped: &Dropped,
-) -> bool {
+) -> GoLive {
     let mut h = handoff.lock().unwrap();
-    for (id, data) in std::mem::take(&mut h.held) {
-        if after.as_ref().is_some_and(|after| &id <= after) || !id.in_step(&h.from, step) {
-            continue;
-        }
-        if !deliver(chan, &id, &data, dropped) {
-            return false;
+    let held: Vec<(UintN, Bytes)> = std::mem::take(&mut h.held)
+        .into_iter()
+        .filter(|(id, _)| {
+            !after.as_ref().is_some_and(|after| id <= after) && id.in_step(&h.from, step)
+        })
+        .collect();
+    if held.len() > chan.capacity() {
+        return GoLive::NoRoom;
+    }
+    for (id, data) in held {
+        if chan
+            .try_send(ReadEntry::new(id, data, DataSource::Memory))
+            .is_err()
+        {
+            return GoLive::Closed;
         }
     }
     h.after = after;
     h.live = true;
-    true
+    GoLive::Live
 }
 
 impl MemQueue {
@@ -850,9 +865,19 @@ impl MemQueue {
                     }
                     last_sent_id = Some(id);
                 }
-                if !go_live(&handoff, last_id, step, target_chan, &dropped) {
-                    self.unsubscribe(subscription_id);
-                    return MemReadResult::fail();
+                match go_live(&handoff, last_id, step, target_chan) {
+                    GoLive::Live => {}
+                    // The snapshot went out; the next pass starts after it.
+                    GoLive::NoRoom => {
+                        self.unsubscribe(subscription_id);
+                        next = after_next;
+                        tokio::task::yield_now().await;
+                        continue;
+                    }
+                    GoLive::Closed => {
+                        self.unsubscribe(subscription_id);
+                        return MemReadResult::fail();
+                    }
                 }
                 log::debug!(target: "normfs-mem", "Started follow_full with subscription {} from last_sent_id: {:?}",
                     subscription_id, last_sent_id);
@@ -945,9 +970,28 @@ impl MemQueue {
                 .map(|id| id.add(&UintN::from(1u64)))
                 .unwrap_or(UintN::zero());
             handoff.lock().unwrap().from = from_id.clone();
-            if !go_live(&handoff, last_id, step, target_chan, &dropped) {
-                self.unsubscribe(subscription_id);
-                return MemReadResult::fail();
+            match go_live(&handoff, last_id, step, target_chan) {
+                GoLive::Live => {}
+                // Already behind: follow from the next id like any other start.
+                GoLive::NoRoom => {
+                    self.unsubscribe(subscription_id);
+                    let mut result = Box::pin(self.follow_full(
+                        &from_id,
+                        from_id.clone(),
+                        step,
+                        target_chan,
+                        dropped,
+                    ))
+                    .await;
+                    if result.start_id.is_none() {
+                        result.start_id = Some(from_id);
+                    }
+                    return result;
+                }
+                GoLive::Closed => {
+                    self.unsubscribe(subscription_id);
+                    return MemReadResult::fail();
+                }
             }
 
             log::debug!(target: "normfs-mem", "Started follow_full_negative with offset 0 (subscribe only), subscription {}, from_id: {}",
