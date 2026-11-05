@@ -158,6 +158,72 @@ fn deliver(chan: &Sender<ReadEntry>, id: &UintN, data: &Bytes, dropped: &Dropped
     }
 }
 
+/// A follow's callback holds what it is handed until the follow has sent the
+/// entries it read from memory, then delivers past `after`.
+struct Handoff {
+    live: bool,
+    from: UintN,
+    after: Option<UintN>,
+    held: Vec<(UintN, Bytes)>,
+}
+
+impl Handoff {
+    fn new(from: UintN) -> Self {
+        Self {
+            live: false,
+            from,
+            after: None,
+            held: Vec::new(),
+        }
+    }
+}
+
+fn follow_callback(
+    handoff: Arc<Mutex<Handoff>>,
+    step: usize,
+    chan: Sender<ReadEntry>,
+    dropped: Dropped,
+) -> SubscriberCallback {
+    Box::new(move |entries: &[(UintN, Bytes)]| -> bool {
+        let mut h = handoff.lock().unwrap();
+        for (id, data) in entries {
+            if !h.live {
+                h.held.push((id.clone(), data.clone()));
+                continue;
+            }
+            if h.after.as_ref().is_some_and(|after| id <= after) || !id.in_step(&h.from, step) {
+                continue;
+            }
+            if !deliver(&chan, id, data, &dropped) {
+                return false;
+            }
+        }
+        true
+    })
+}
+
+/// Sends what the callback held past `after` and lets it deliver from then on.
+fn go_live(
+    handoff: &Mutex<Handoff>,
+    after: Option<UintN>,
+    step: usize,
+    chan: &Sender<ReadEntry>,
+    dropped: &Dropped,
+) -> bool {
+    let mut h = handoff.lock().unwrap();
+    for (id, data) in std::mem::take(&mut h.held) {
+        if after.as_ref().is_some_and(|after| &id <= after) || !id.in_step(&h.from, step) {
+            continue;
+        }
+        if !deliver(chan, &id, &data, dropped) {
+            return false;
+        }
+    }
+    h.after = after;
+    h.live = true;
+    true
+}
+
 impl MemQueue {
     /// Takes `pages` slots from the shared arena, or the floor if that is all
     /// there is room for.
@@ -756,69 +822,49 @@ impl MemQueue {
         target_chan: &Sender<ReadEntry>,
         dropped: Dropped,
     ) -> MemReadResult {
-        // Entries committed while the backlog is sent reach no subscriber yet, so
-        // send in passes until the rest fits the channel, then register under the lock.
-        // The id is taken before `subscribers`, the order `subscribe` uses.
-        let subscription_id = {
-            let mut next_id = self.next_subscriber_id.lock().unwrap();
-            *next_id += 1;
-            *next_id - 1
-        };
+        // Registered before each snapshot, so an entry committed meanwhile is in
+        // it or held by the callback. inner and subscribers are never nested here:
+        // a callback runs under subscribers and may read inner.
         let mut next = start_id.clone();
         let mut last_sent_id: Option<UintN> = None;
-        let mut subscribers;
         loop {
-            let entries_to_send = {
-                let inner = self.inner.read().unwrap();
-                let backlog = inner.last_id.as_ref().is_some_and(|last| next <= *last);
-                if !backlog {
-                    subscribers = self.subscribers.lock().unwrap();
-                    break;
-                }
-                let ring = match &inner.pool {
-                    Some(ring) if !ring.is_empty() => ring,
-                    // An empty ring holds none of the backlog either: after a
-                    // recovery-style start the ids below `last_id` exist only
-                    // on disk.
-                    _ => return MemReadResult::resume_at(next, &start_id),
-                };
-                let covered = |m: Option<u64>| m.is_some_and(|m| next >= UintN::from(m));
-                if !covered(ring.min_cached_id()) {
-                    return MemReadResult::resume_at(next, &start_id);
-                }
-                let last = inner.last_id.as_ref().map(id_to_u64).unwrap_or(u64::MAX);
-                let mut current_id = next.clone();
-                let mut entries = Vec::new();
-                for (id_u64, data) in ring.pin_range(id_to_u64(&next), last) {
-                    let id = UintN::from(id_u64);
-                    while current_id < id {
-                        current_id = current_id.step_by(step);
-                    }
-                    if current_id == id {
-                        entries.push((id.clone(), data));
-                        current_id = current_id.step_by(step);
-                    }
-                }
-                // The floor can rise between the check and the pin.
-                if !covered(ring.min_cached_id()) {
-                    return MemReadResult::resume_at(next, &start_id);
-                }
-                next = current_id;
-                // Sent without waiting, so registering does not depend on writes stopping.
-                if entries.len() <= target_chan.capacity() {
-                    subscribers = self.subscribers.lock().unwrap();
-                    for (id, data) in entries {
-                        let entry = ReadEntry::new(id.clone(), data, DataSource::Memory);
-                        if target_chan.try_send(entry).is_err() {
-                            return MemReadResult::fail();
-                        }
-                        last_sent_id = Some(id);
-                    }
-                    break;
-                }
-                entries
+            let handoff = Arc::new(Mutex::new(Handoff::new(from_id.clone())));
+            let subscription_id = self.subscribe(follow_callback(
+                Arc::clone(&handoff),
+                step,
+                target_chan.clone(),
+                Arc::clone(&dropped),
+            ));
+            let Some((entries, after_next, last_id)) = self.backlog(&next, step) else {
+                self.unsubscribe(subscription_id);
+                return MemReadResult::resume_at(next, &start_id);
             };
-            for (id, data) in entries_to_send {
+            // What fits goes out without waiting, so going live does not depend
+            // on writes stopping.
+            if entries.len() <= target_chan.capacity() {
+                for (id, data) in entries {
+                    let entry = ReadEntry::new(id.clone(), data, DataSource::Memory);
+                    if target_chan.try_send(entry).is_err() {
+                        self.unsubscribe(subscription_id);
+                        return MemReadResult::fail();
+                    }
+                    last_sent_id = Some(id);
+                }
+                if !go_live(&handoff, last_id, step, target_chan, &dropped) {
+                    self.unsubscribe(subscription_id);
+                    return MemReadResult::fail();
+                }
+                log::debug!(target: "normfs-mem", "Started follow_full with subscription {} from last_sent_id: {:?}",
+                    subscription_id, last_sent_id);
+                return MemReadResult {
+                    success: true,
+                    start_id: None,
+                    subscription_id: Some(subscription_id),
+                };
+            }
+            self.unsubscribe(subscription_id);
+            next = after_next;
+            for (id, data) in entries {
                 if target_chan
                     .send(ReadEntry::new(id.clone(), data, DataSource::Memory))
                     .await
@@ -830,39 +876,49 @@ impl MemQueue {
             }
             tokio::task::yield_now().await;
         }
+    }
 
-        let target_chan_clone = target_chan.clone();
-        let from_id_clone = from_id.clone();
-        let last_sent_id_clone = last_sent_id.clone();
-
-        let callback = Box::new(move |entries: &[(UintN, Bytes)]| -> bool {
-            for (id, data) in entries {
-                if let Some(ref last_id) = last_sent_id_clone {
-                    if id <= last_id {
-                        continue;
-                    }
-                }
-
-                if id.in_step(&from_id_clone, step)
-                    && !deliver(&target_chan_clone, id, data, &dropped)
-                {
-                    return false;
-                }
-            }
-            true
-        });
-
-        subscribers.insert(subscription_id, callback);
-        drop(subscribers);
-
-        log::debug!(target: "normfs-mem", "Started follow_full with subscription {} from last_sent_id: {:?}",
-            subscription_id, last_sent_id);
-
-        MemReadResult {
-            success: true,
-            start_id: None,
-            subscription_id: Some(subscription_id),
+    /// The entries from `next` on in memory, the id after them, and the last id;
+    /// `None` when memory no longer reaches down to `next`.
+    #[allow(clippy::type_complexity)]
+    fn backlog(
+        &self,
+        next: &UintN,
+        step: usize,
+    ) -> Option<(Vec<(UintN, Bytes)>, UintN, Option<UintN>)> {
+        let inner = self.inner.read().unwrap();
+        let last_id = inner.last_id.clone();
+        if !last_id.as_ref().is_some_and(|last| next <= last) {
+            return Some((Vec::new(), next.clone(), last_id));
         }
+        // An empty ring holds none of the backlog either: after a recovery-style
+        // start the ids below `last_id` exist only on disk.
+        let ring = match &inner.pool {
+            Some(ring) if !ring.is_empty() => ring,
+            _ => return None,
+        };
+        let covered = |m: Option<u64>| m.is_some_and(|m| *next >= UintN::from(m));
+        if !covered(ring.min_cached_id()) {
+            return None;
+        }
+        let last = last_id.as_ref().map(id_to_u64).unwrap_or(u64::MAX);
+        let mut current_id = next.clone();
+        let mut entries = Vec::new();
+        for (id_u64, data) in ring.pin_range(id_to_u64(next), last) {
+            let id = UintN::from(id_u64);
+            while current_id < id {
+                current_id = current_id.step_by(step);
+            }
+            if current_id == id {
+                entries.push((id.clone(), data));
+                current_id = current_id.step_by(step);
+            }
+        }
+        // The floor can rise between the check and the pin.
+        if !covered(ring.min_cached_id()) {
+            return None;
+        }
+        Some((entries, current_id, last_id))
     }
 
     pub async fn follow_full_negative(
@@ -874,45 +930,25 @@ impl MemQueue {
     ) -> MemReadResult {
         // Special case: offset 0 means just subscribe from now on, no existing entries
         if offset == UintN::zero() {
-            let subscription_id = {
-                let mut next_id = self.next_subscriber_id.lock().unwrap();
-                *next_id += 1;
-                *next_id - 1
-            };
-            // Read and registered under the lock commit takes, so nothing
-            // committed between the two is missed.
-            let inner = self.inner.read().unwrap();
-            let last_id = inner.last_id.clone();
+            // Registered before the last id is read, so nothing committed between
+            // the two is missed; see follow_full for why they are not nested.
+            let handoff = Arc::new(Mutex::new(Handoff::new(UintN::zero())));
+            let subscription_id = self.subscribe(follow_callback(
+                Arc::clone(&handoff),
+                step,
+                target_chan.clone(),
+                Arc::clone(&dropped),
+            ));
+            let last_id = self.inner.read().unwrap().last_id.clone();
             let from_id = last_id
                 .as_ref()
                 .map(|id| id.add(&UintN::from(1u64)))
                 .unwrap_or(UintN::zero());
-            let mut subscribers = self.subscribers.lock().unwrap();
-            drop(inner);
-
-            let target_chan_clone = target_chan.clone();
-            let last_id_clone = last_id.clone();
-            let from_id_clone = from_id.clone();
-
-            let callback = Box::new(move |entries: &[(UintN, Bytes)]| -> bool {
-                for (id, data) in entries {
-                    if let Some(ref last) = last_id_clone {
-                        if id <= last {
-                            continue;
-                        }
-                    }
-
-                    if id.in_step(&from_id_clone, step)
-                        && !deliver(&target_chan_clone, id, data, &dropped)
-                    {
-                        return false;
-                    }
-                }
-                true
-            });
-
-            subscribers.insert(subscription_id, callback);
-            drop(subscribers);
+            handoff.lock().unwrap().from = from_id.clone();
+            if !go_live(&handoff, last_id, step, target_chan, &dropped) {
+                self.unsubscribe(subscription_id);
+                return MemReadResult::fail();
+            }
 
             log::debug!(target: "normfs-mem", "Started follow_full_negative with offset 0 (subscribe only), subscription {}, from_id: {}",
                 subscription_id, from_id);
