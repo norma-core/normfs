@@ -97,6 +97,9 @@ const ENCODE_AHEAD: usize = 16;
 /// Smaller entries go raw: zstd's frame costs more than it saves on them.
 const MIN_WIRE_SIZE: usize = 1024;
 const WIRE_LEVEL: i32 = 3;
+/// Below this an entry compresses on the sending task: a trip to the
+/// blocking pool costs more than zstd does on a record this small.
+const INLINE_WIRE_SIZE: usize = 64 * 1024;
 
 const REPORT_RAW_EVERY: Duration = Duration::from_secs(30);
 
@@ -157,8 +160,9 @@ pub(crate) fn encoded_with(
     tokio::spawn(async move {
         while let Some(mut entry) = rx.recv().await {
             let data = std::mem::take(&mut entry.data);
+            let inline = (MIN_WIRE_SIZE..INLINE_WIRE_SIZE).contains(&data.len());
             // Waiting for a slot would stall the drain until the follower is dropped.
-            let permit = (data.len() >= MIN_WIRE_SIZE)
+            let permit = (data.len() >= INLINE_WIRE_SIZE)
                 .then(|| slots.clone().try_acquire_owned().ok())
                 .flatten();
             let job = permit.map(|permit| {
@@ -171,7 +175,7 @@ pub(crate) fn encoded_with(
             if pending_tx.capacity() == 0 {
                 drain_stalled.notify_one();
             }
-            if pending_tx.send((entry, data, job)).await.is_err() {
+            if pending_tx.send((entry, data, job, inline)).await.is_err() {
                 return;
             }
         }
@@ -186,9 +190,9 @@ pub(crate) fn encoded_with(
                 bytes,
             })
         };
-        while let Some((entry, data, job)) = pending_rx.recv().await {
+        while let Some((entry, data, job, inline)) = pending_rx.recv().await {
             let len = data.len();
-            let mut skipped = len >= MIN_WIRE_SIZE && job.is_none();
+            let mut skipped = len >= MIN_WIRE_SIZE && job.is_none() && !inline;
             // A compression still running once the drain backs up is left
             // behind, as waiting for it would stall the drain too.
             let packed = match job {
@@ -200,6 +204,7 @@ pub(crate) fn encoded_with(
                         None
                     }
                 },
+                None if inline => compress_counted(&data).ok(),
                 None => None,
             };
             if skipped {
