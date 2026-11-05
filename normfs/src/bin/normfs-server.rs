@@ -82,6 +82,10 @@ struct Args {
     #[arg(long, conflicts_with = "max_queue_disk_size")]
     unlimited_disk: bool,
 
+    /// Store and cloud files a read may hold decoded at once [default: CPU count, at least 2]
+    #[arg(long)]
+    cold_read_files: Option<usize>,
+
     /// S3 bucket name for cloud offloading (optional)
     #[arg(long)]
     s3_bucket: Option<String>,
@@ -152,6 +156,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(args.max_queue_disk_size)
         },
         queue_settings: QueueSettings::all_active().with_default_persist(persist),
+        // Two is the library's default for small devices; a server reads many
+        // queues at once, each wanting its file and the next.
+        cold_read_files: args.cold_read_files.unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(2)
+                .max(2)
+        }),
         ..NormFsSettings::default()
     };
 
