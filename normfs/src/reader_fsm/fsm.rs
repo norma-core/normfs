@@ -1,4 +1,5 @@
 use super::cold::{Cold, ColdFiles};
+use super::walk::{walk_step, WalkStep};
 use super::{DataSource, Fetched, Prefetch, PrefetchHandle, ReadContext, ReadEntry, ReaderState};
 use crate::{mem::MemStore, Error};
 use normfs_store::{Layer, PersistStore, StoreError};
@@ -358,7 +359,7 @@ impl ReaderFSM {
         step: u64,
         sender: mpsc::Sender<ReadEntry>,
     ) -> Result<ReaderState, Error> {
-        let start_id = offset;
+        let mut start_id = offset;
 
         // Check if sender is still open
         if sender.is_closed() {
@@ -407,6 +408,9 @@ impl ReaderFSM {
 
             if result.success && result.subscription_id.is_some() {
                 return Ok(ReaderState::Subscribed);
+            }
+            if let Some(next) = result.start_id {
+                start_id = next;
             }
         }
 
@@ -624,6 +628,16 @@ impl ReaderFSM {
         // Read straight from the file: only the entries sent are ever in memory.
         let result = match wal.get_entries_before(&ctx.queue, &ctx.file_id).await {
             Ok(before) => {
+                if walk_step(
+                    &ctx.file_id,
+                    &before,
+                    &ctx.next_id,
+                    ctx.cut_short.as_ref(),
+                    ctx.went_back.as_ref(),
+                ) == WalkStep::Back
+                {
+                    return Ok(Self::back_one_file(ctx));
+                }
                 self.warn_gap(&ctx, &before);
                 wal.read_wal_range(
                     &ctx.queue,
@@ -734,6 +748,16 @@ impl ReaderFSM {
         }
     }
 
+    fn back_one_file(ctx: ReadContext) -> ReaderState {
+        let previous = ctx.cut_short.clone().unwrap_or_else(|| ctx.file_id.clone());
+        log::info!(target: "normfs-reader-fsm",
+            "Queue '{}' - file {} begins past owed entry {}: reading file {} again",
+            ctx.queue.short(), ctx.file_id, ctx.next_id, previous);
+        let mut ctx = ctx.with_file_id(previous);
+        ctx.went_back = Some(ctx.next_id.clone());
+        ReaderState::ReadFile { ctx }
+    }
+
     /// A queue that was cloud-direct may skip reserved ids after an offline
     /// restart; other gaps indicate a failed flush.
     fn warn_gap(&self, ctx: &ReadContext, num_entries_before: &UintN) {
@@ -793,6 +817,20 @@ impl ReaderFSM {
             "Parsing WAL bytes: queue={}, file_id={}, bytes={}, source={:?}",
             ctx.queue.short(), ctx.file_id, wal_bytes.len(), data_source);
 
+        if let Ok(header) = normfs_wal::get_wal_header(&wal_bytes) {
+            if walk_step(
+                &ctx.file_id,
+                &header.num_entries_before,
+                &ctx.next_id,
+                ctx.cut_short.as_ref(),
+                ctx.went_back.as_ref(),
+            ) == WalkStep::Back
+            {
+                return Ok(Self::back_one_file(ctx));
+            }
+            self.warn_gap(&ctx, &header.num_entries_before);
+        }
+
         // Prefetch the next file only for a sequential read that goes past
         // this one; a prefetch that finds no free slot is skipped.
         let prefetch_handle = if ctx.step == 1 && self.reads_past(&ctx, data_source).await {
@@ -805,10 +843,6 @@ impl ReaderFSM {
         } else {
             None
         };
-
-        if let Ok(header) = normfs_wal::get_wal_header(&wal_bytes) {
-            self.warn_gap(&ctx, &header.num_entries_before);
-        }
 
         // A send never waits here: a stalled consumer would keep the file,
         // and its slot, for as long as it stalls.
@@ -880,9 +914,11 @@ impl ReaderFSM {
                 };
 
                 // Move to next file
+                let mut ctx = ctx.with_next_id(new_next_id);
+                ctx.cut_short = Some(ctx.file_id.clone());
                 ReaderState::ReadNextFile {
                     current_file: ctx.file_id.clone(),
-                    ctx: ctx.with_next_id(new_next_id),
+                    ctx,
                     prefetch_handle,
                 }
             }
@@ -910,7 +946,7 @@ impl ReaderFSM {
     async fn handle_read_next_file(
         &self,
         current_file: UintN,
-        ctx: ReadContext,
+        mut ctx: ReadContext,
         prefetch_handle: PrefetchHandle,
     ) -> Result<ReaderState, Error> {
         if ctx.sender.is_closed() {
@@ -982,6 +1018,9 @@ impl ReaderFSM {
                         ctx.queue.short(), _sub_id);
                     return Ok(ReaderState::Subscribed);
                 }
+            }
+            if let Some(next) = result.start_id {
+                ctx = ctx.with_next_id(next);
             }
         }
 
@@ -1055,3 +1094,7 @@ impl ReaderFSM {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "fsm_walk_test.rs"]
+mod walk_test;

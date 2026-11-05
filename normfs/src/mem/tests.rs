@@ -1205,3 +1205,146 @@ async fn a_close_waits_for_a_parked_append_and_records_its_id() {
          follow ends one record early forever"
     );
 }
+
+// Appends land after the backlog snapshot, before the follow subscribes.
+#[tokio::test]
+async fn test_follow_handoff_keeps_appends_during_history_drain() {
+    for tail_relative in [false, true] {
+        let mem = Arc::new(mem_store(1024 * 1024 * 1024));
+        let queue = QueueIdResolver::new(TEST_INSTANCE_ID).resolve("handoff");
+        setup_queue_with_data(&mem, &queue, 3).await;
+        let (tx, mut rx) = mpsc::channel(1);
+        let from = UintN::zero();
+        let follow = async {
+            if tail_relative {
+                mem.follow_full_negative(&queue, UintN::from(2u64), 1, &tx)
+                    .await
+            } else {
+                mem.follow_full(&queue, &from, from.clone(), 1, &tx).await
+            }
+        };
+        tokio::pin!(follow);
+        // The first poll snapshots IDs 0..2 and then blocks sending ID 1.
+        tokio::select! {
+            biased;
+            _ = &mut follow => panic!("history send should be blocked"),
+            _ = std::future::ready(()) => {}
+        }
+        // IDs 3..5, in the old blind window.
+        for d in create_test_data(3) {
+            mem.enqueue_awaiting(&queue, d)
+                .await
+                .expect("queue is open");
+        }
+        let mut received = Vec::new();
+        let result = loop {
+            tokio::select! {
+                biased;
+                result = &mut follow => break result,
+                entry = rx.recv() => received.push(entry.unwrap().id),
+            }
+        };
+        while let Ok(entry) = rx.try_recv() {
+            received.push(entry.id);
+        }
+        assert!(result.success);
+        assert_eq!(
+            received,
+            (0..6u64).map(UintN::from).collect::<Vec<_>>(),
+            "tail_relative={tail_relative}"
+        );
+        mem.unsubscribe(&queue, result.subscription_id.unwrap());
+    }
+}
+
+// A callback reads inner under subscribers while an ack waits for the write lock.
+#[test]
+fn reading_subscriber_does_not_deadlock_with_follow_and_ack() {
+    use std::sync::{mpsc as sync_mpsc, Barrier};
+    use std::time::{Duration, Instant};
+
+    let mem = Arc::new(mem_store(1024 * 1024));
+    let queue = QueueIdResolver::new(TEST_INSTANCE_ID).resolve("review-locks");
+    mem.start_queue(&queue, None, false, PoolKind::Active);
+    let q = mem.queues.read().unwrap().get(&queue).unwrap().clone();
+
+    let resume_callback = Arc::new(Barrier::new(2));
+    let (entered_tx, entered_rx) = sync_mpsc::channel();
+
+    let callback_mem = mem.clone();
+    let callback_queue = queue.clone();
+    let callback_resume = resume_callback.clone();
+
+    mem.subscribe(
+        &queue,
+        Box::new(move |_| {
+            entered_tx.send(()).unwrap();
+            callback_resume.wait();
+            assert!(callback_mem.get_last_id(&callback_queue).unwrap().is_some());
+            true
+        }),
+    )
+    .unwrap();
+
+    let (done_tx, done_rx) = sync_mpsc::channel();
+
+    let writer_mem = mem.clone();
+    let writer_queue = queue.clone();
+    let writer_done = done_tx.clone();
+    std::thread::spawn(move || {
+        writer_mem
+            .try_enqueue(&writer_queue, Bytes::from_static(b"record"), None)
+            .unwrap();
+        writer_done.send("writer").unwrap();
+    });
+
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+    let follow_mem = mem.clone();
+    let follow_queue = queue.clone();
+    let follow_done = done_tx.clone();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let (tx, _rx) = mpsc::channel(16);
+            let from = UintN::zero();
+            let result = follow_mem
+                .follow_full(&follow_queue, &from, from.clone(), 1, &tx)
+                .await;
+            assert!(result.success);
+        });
+
+        follow_done.send("follow").unwrap();
+    });
+
+    let wait_until = Instant::now() + Duration::from_millis(200);
+    while Instant::now() < wait_until && q.inner.try_write().is_ok() {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    let ack_mem = mem.clone();
+    let ack_queue = queue.clone();
+    let ack_done = done_tx.clone();
+    std::thread::spawn(move || {
+        ack_mem.ack(&ack_queue, &UintN::zero());
+        ack_done.send("ack").unwrap();
+    });
+
+    let wait_until = Instant::now() + Duration::from_millis(200);
+    while Instant::now() < wait_until && q.inner.try_read().is_ok() {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    resume_callback.wait();
+
+    for _ in 0..3 {
+        done_rx.recv_timeout(Duration::from_secs(2)).expect(
+            "follow holds inner while waiting for the callback's subscribers lock; \
+             callback and ack cannot acquire inner",
+        );
+    }
+}
