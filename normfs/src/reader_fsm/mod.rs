@@ -1,5 +1,6 @@
 mod cold;
 mod fsm;
+mod walk;
 
 #[cfg(test)]
 mod cold_test;

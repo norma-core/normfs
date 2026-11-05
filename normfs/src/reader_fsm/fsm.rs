@@ -1,4 +1,5 @@
 use super::cold::{Cold, ColdFiles};
+use super::walk::{walk_step, WalkStep};
 use super::{DataSource, Fetched, Prefetch, PrefetchHandle, ReadContext, ReadEntry, ReaderState};
 use crate::{mem::MemStore, Error};
 use normfs_store::{Layer, PersistStore, StoreError};
@@ -624,7 +625,9 @@ impl ReaderFSM {
         // Read straight from the file: only the entries sent are ever in memory.
         let result = match wal.get_entries_before(&ctx.queue, &ctx.file_id).await {
             Ok(before) => {
-                if self.owed_by_previous(&ctx, &before) {
+                if walk_step(&ctx.file_id, &before, &ctx.next_id, ctx.went_back.as_ref())
+                    == WalkStep::Back
+                {
                     return Ok(Self::back_one_file(ctx));
                 }
                 self.warn_gap(&ctx, &before);
@@ -737,14 +740,6 @@ impl ReaderFSM {
         }
     }
 
-    /// The previous file was read while still being written; once per owed id,
-    /// so a real hole is still walked past.
-    fn owed_by_previous(&self, ctx: &ReadContext, begins_at: &UintN) -> bool {
-        begins_at > &ctx.next_id
-            && !ctx.file_id.is_zero()
-            && ctx.went_back.as_ref() != Some(&ctx.next_id)
-    }
-
     fn back_one_file(ctx: ReadContext) -> ReaderState {
         let previous = ctx.file_id.sub(&UintN::from(1u64)).unwrap_or(UintN::zero());
         log::info!(target: "normfs-reader-fsm",
@@ -828,7 +823,13 @@ impl ReaderFSM {
         };
 
         if let Ok(header) = normfs_wal::get_wal_header(&wal_bytes) {
-            if self.owed_by_previous(&ctx, &header.num_entries_before) {
+            if walk_step(
+                &ctx.file_id,
+                &header.num_entries_before,
+                &ctx.next_id,
+                ctx.went_back.as_ref(),
+            ) == WalkStep::Back
+            {
                 return Ok(Self::back_one_file(ctx));
             }
             self.warn_gap(&ctx, &header.num_entries_before);
