@@ -35,6 +35,7 @@ fn main() -> Result<()> {
         manifest_dir.join("c/src/net_sys.c"),
         manifest_dir.join("c/src/request.c"),
         manifest_dir.join("c/src/response.c"),
+        manifest_dir.join("c/src/walk.c"),
     ];
 
     println!("cargo:rerun-if-changed={}", include_dir.display());
