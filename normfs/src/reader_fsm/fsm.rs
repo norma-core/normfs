@@ -624,6 +624,9 @@ impl ReaderFSM {
         // Read straight from the file: only the entries sent are ever in memory.
         let result = match wal.get_entries_before(&ctx.queue, &ctx.file_id).await {
             Ok(before) => {
+                if self.owed_by_previous(&ctx, &before) {
+                    return Ok(Self::back_one_file(ctx));
+                }
                 self.warn_gap(&ctx, &before);
                 wal.read_wal_range(
                     &ctx.queue,
@@ -734,6 +737,24 @@ impl ReaderFSM {
         }
     }
 
+    /// The previous file was read while still being written; once per owed id,
+    /// so a real hole is still walked past.
+    fn owed_by_previous(&self, ctx: &ReadContext, begins_at: &UintN) -> bool {
+        begins_at > &ctx.next_id
+            && !ctx.file_id.is_zero()
+            && ctx.went_back.as_ref() != Some(&ctx.next_id)
+    }
+
+    fn back_one_file(ctx: ReadContext) -> ReaderState {
+        let previous = ctx.file_id.sub(&UintN::from(1u64)).unwrap_or(UintN::zero());
+        log::info!(target: "normfs-reader-fsm",
+            "Queue '{}' - file {} begins past owed entry {}: reading file {} again",
+            ctx.queue.short(), ctx.file_id, ctx.next_id, previous);
+        let mut ctx = ctx.with_file_id(previous);
+        ctx.went_back = Some(ctx.next_id.clone());
+        ReaderState::ReadFile { ctx }
+    }
+
     /// A queue that was cloud-direct may skip reserved ids after an offline
     /// restart; other gaps indicate a failed flush.
     fn warn_gap(&self, ctx: &ReadContext, num_entries_before: &UintN) {
@@ -807,6 +828,9 @@ impl ReaderFSM {
         };
 
         if let Ok(header) = normfs_wal::get_wal_header(&wal_bytes) {
+            if self.owed_by_previous(&ctx, &header.num_entries_before) {
+                return Ok(Self::back_one_file(ctx));
+            }
             self.warn_gap(&ctx, &header.num_entries_before);
         }
 
@@ -1055,3 +1079,7 @@ impl ReaderFSM {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "fsm_walk_test.rs"]
+mod walk_test;
