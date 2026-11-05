@@ -757,7 +757,13 @@ impl MemQueue {
         dropped: Dropped,
     ) -> MemReadResult {
         // Entries committed while the backlog is sent reach no subscriber yet, so
-        // send until a pass finds nothing new and register under that pass's lock.
+        // send in passes until the rest fits the channel, then register under the lock.
+        // The id is taken before `subscribers`, the order `subscribe` uses.
+        let subscription_id = {
+            let mut next_id = self.next_subscriber_id.lock().unwrap();
+            *next_id += 1;
+            *next_id - 1
+        };
         let mut next = start_id.clone();
         let mut last_sent_id: Option<UintN> = None;
         let mut subscribers;
@@ -798,8 +804,16 @@ impl MemQueue {
                     return MemReadResult::resume_at(next, &start_id);
                 }
                 next = current_id;
-                if entries.is_empty() {
+                // Sent without waiting, so registering does not depend on writes stopping.
+                if entries.len() <= target_chan.capacity() {
                     subscribers = self.subscribers.lock().unwrap();
+                    for (id, data) in entries {
+                        let entry = ReadEntry::new(id.clone(), data, DataSource::Memory);
+                        if target_chan.try_send(entry).is_err() {
+                            return MemReadResult::fail();
+                        }
+                        last_sent_id = Some(id);
+                    }
                     break;
                 }
                 entries
@@ -814,16 +828,12 @@ impl MemQueue {
                 }
                 last_sent_id = Some(id);
             }
+            tokio::task::yield_now().await;
         }
 
         let target_chan_clone = target_chan.clone();
         let from_id_clone = from_id.clone();
         let last_sent_id_clone = last_sent_id.clone();
-
-        let mut next_id = self.next_subscriber_id.lock().unwrap();
-        let subscription_id = *next_id;
-        *next_id += 1;
-        drop(next_id);
 
         let callback = Box::new(move |entries: &[(UintN, Bytes)]| -> bool {
             for (id, data) in entries {
@@ -864,6 +874,11 @@ impl MemQueue {
     ) -> MemReadResult {
         // Special case: offset 0 means just subscribe from now on, no existing entries
         if offset == UintN::zero() {
+            let subscription_id = {
+                let mut next_id = self.next_subscriber_id.lock().unwrap();
+                *next_id += 1;
+                *next_id - 1
+            };
             // Read and registered under the lock commit takes, so nothing
             // committed between the two is missed.
             let inner = self.inner.read().unwrap();
@@ -878,11 +893,6 @@ impl MemQueue {
             let target_chan_clone = target_chan.clone();
             let last_id_clone = last_id.clone();
             let from_id_clone = from_id.clone();
-
-            let mut next_id = self.next_subscriber_id.lock().unwrap();
-            let subscription_id = *next_id;
-            *next_id += 1;
-            drop(next_id);
 
             let callback = Box::new(move |entries: &[(UintN, Bytes)]| -> bool {
                 for (id, data) in entries {
