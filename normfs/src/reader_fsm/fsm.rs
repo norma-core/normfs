@@ -358,7 +358,7 @@ impl ReaderFSM {
         step: u64,
         sender: mpsc::Sender<ReadEntry>,
     ) -> Result<ReaderState, Error> {
-        let start_id = offset;
+        let mut start_id = offset;
 
         // Check if sender is still open
         if sender.is_closed() {
@@ -407,6 +407,9 @@ impl ReaderFSM {
 
             if result.success && result.subscription_id.is_some() {
                 return Ok(ReaderState::Subscribed);
+            }
+            if let Some(next) = result.start_id {
+                start_id = next;
             }
         }
 
@@ -910,7 +913,7 @@ impl ReaderFSM {
     async fn handle_read_next_file(
         &self,
         current_file: UintN,
-        ctx: ReadContext,
+        mut ctx: ReadContext,
         prefetch_handle: PrefetchHandle,
     ) -> Result<ReaderState, Error> {
         if ctx.sender.is_closed() {
@@ -982,6 +985,9 @@ impl ReaderFSM {
                         ctx.queue.short(), _sub_id);
                     return Ok(ReaderState::Subscribed);
                 }
+            }
+            if let Some(next) = result.start_id {
+                ctx = ctx.with_next_id(next);
             }
         }
 
