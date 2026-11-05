@@ -12,8 +12,10 @@ enum normfs_walk_step {
 	NORMFS_WALK_GAP = 2
 };
 
-/* went_back is the owed id the read already went back for, when has_went_back. */
+/* cut_short is the file the read just left with a partial read, when has_cut_short;
+ * went_back is the owed id it already went back for, when has_went_back. */
 int normfs_walk_step(uint64_t file_id, uint64_t begins_at, uint64_t next_id,
+		     int has_cut_short, uint64_t cut_short,
 		     int has_went_back, uint64_t went_back);
 
 #endif /* NORMFS_WALK_H */

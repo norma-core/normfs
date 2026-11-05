@@ -48,6 +48,8 @@ pub struct ReadContext {
     pub sender: mpsc::Sender<ReadEntry>,
     /// Where a read of this file stopped for a full channel.
     pub resume: Option<normfs_wal::WalBytesPause>,
+    /// The file the walk just left after a partial read of it.
+    pub cut_short: Option<UintN>,
     /// The owed id the walk already went back one file for.
     pub went_back: Option<UintN>,
 }
@@ -69,6 +71,7 @@ impl ReadContext {
             last_id,
             sender,
             resume: None,
+            cut_short: None,
             went_back: None,
         }
     }

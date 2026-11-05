@@ -52,7 +52,8 @@ async fn next_file_past_next_id_goes_back_to_the_current_file() {
     assert!(owed < next, "file 1 holds the owed id");
 
     let (tx, mut rx) = mpsc::channel(4096);
-    let ctx = ReadContext::new(queue.clone(), UintN::from(1u64), owed.clone(), 1, None, tx);
+    let mut ctx = ReadContext::new(queue.clone(), UintN::from(1u64), owed.clone(), 1, None, tx);
+    ctx.cut_short = Some(UintN::from(1u64));
     let mut state = ReaderState::ReadNextFile {
         current_file: UintN::from(1u64),
         ctx,
@@ -61,8 +62,16 @@ async fn next_file_past_next_id_goes_back_to_the_current_file() {
     while !state.is_terminal() {
         state = fsm.transition(state, 1).await.unwrap();
     }
-    let first = rx.recv().await.unwrap();
-    assert_eq!(first.id, owed, "the walk skipped {}..{}", owed, first.id);
+    assert!(
+        !matches!(state, ReaderState::Failed(_)),
+        "the walk failed: {state:?}"
+    );
+    let mut want = owed.clone();
+    while want < next {
+        let got = rx.recv().await.unwrap();
+        assert_eq!(got.id, want, "the walk skipped {}..{}", want, got.id);
+        want = want.increment();
+    }
     drop(rx);
     fs.close().await.unwrap();
 }
