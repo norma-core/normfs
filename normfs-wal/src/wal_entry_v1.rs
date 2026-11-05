@@ -154,7 +154,8 @@ pub fn derive_entry_id(num_entries_before: u64, index: u64) -> Result<u64, WalEn
 pub fn scan_whole_entries(content: &[u8], start: usize, num_entries_before: u64) -> u64 {
     assert!(start <= content.len());
     let mut res = CScanCount::default();
-    // SAFETY: content is live for the call and start is inside it.
+    // SAFETY: content is live for the call, start is inside it, and res is a
+    // local that cannot alias it.
     unsafe {
         normfs_wal_scan_count_v1(
             content.as_ptr(),
