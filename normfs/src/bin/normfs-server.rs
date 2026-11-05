@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use normfs::{CloudSettings, NormFS, NormFsSettings, Persist, QueueSettings};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -41,6 +41,17 @@ fn setup_ulimits() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// How records reach the local disk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum PersistMode {
+    /// Every record goes to the WAL; full WAL files are archived to the store.
+    WalStore,
+    /// Each full memory page is sealed straight into a store file, with no
+    /// WAL: records in the open page are lost on a crash. A page is a file, so
+    /// give it a few MiB with --mem-page-size.
+    Store,
+}
+
 /// NormFS TCP Server - A standalone TCP server for NormFS
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None,
@@ -81,6 +92,10 @@ struct Args {
     /// Disable disk retention limits and size-triggered deletion
     #[arg(long, conflicts_with = "max_queue_disk_size")]
     unlimited_disk: bool,
+
+    /// How records reach the local disk
+    #[arg(long, value_enum, default_value_t = PersistMode::WalStore)]
+    persist: PersistMode,
 
     /// S3 bucket name for cloud offloading (optional)
     #[arg(long)]
@@ -139,8 +154,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // record at a passive page with no recourse from the command line.
     let persist = Persist {
         cloud: args.s3_bucket.is_some(),
-        ..Persist::WAL_STORE
+        ..match args.persist {
+            PersistMode::WalStore => Persist::WAL_STORE,
+            PersistMode::Store => Persist::STORE,
+        }
     };
+    log::info!("Persist: {:?}", args.persist);
     let mut settings = NormFsSettings {
         max_memory_usage: args.max_memory_usage,
         mem_page_size: args.mem_page_size,
