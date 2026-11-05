@@ -1205,3 +1205,54 @@ async fn a_close_waits_for_a_parked_append_and_records_its_id() {
          follow ends one record early forever"
     );
 }
+
+// Appends land after the backlog snapshot, before the follow subscribes.
+#[tokio::test]
+async fn test_follow_handoff_keeps_appends_during_history_drain() {
+    for tail_relative in [false, true] {
+        let mem = Arc::new(mem_store(1024 * 1024 * 1024));
+        let queue = QueueIdResolver::new(TEST_INSTANCE_ID).resolve("handoff");
+        setup_queue_with_data(&mem, &queue, 3).await;
+        let (tx, mut rx) = mpsc::channel(1);
+        let from = UintN::zero();
+        let follow = async {
+            if tail_relative {
+                mem.follow_full_negative(&queue, UintN::from(2u64), 1, &tx)
+                    .await
+            } else {
+                mem.follow_full(&queue, &from, from.clone(), 1, &tx).await
+            }
+        };
+        tokio::pin!(follow);
+        // The first poll snapshots IDs 0..2 and then blocks sending ID 1.
+        tokio::select! {
+            biased;
+            _ = &mut follow => panic!("history send should be blocked"),
+            _ = std::future::ready(()) => {}
+        }
+        // IDs 3..5, in the old blind window.
+        for d in create_test_data(3) {
+            mem.enqueue_awaiting(&queue, d)
+                .await
+                .expect("queue is open");
+        }
+        let mut received = Vec::new();
+        let result = loop {
+            tokio::select! {
+                biased;
+                result = &mut follow => break result,
+                entry = rx.recv() => received.push(entry.unwrap().id),
+            }
+        };
+        while let Ok(entry) = rx.try_recv() {
+            received.push(entry.id);
+        }
+        assert!(result.success);
+        assert_eq!(
+            received,
+            (0..6u64).map(UintN::from).collect::<Vec<_>>(),
+            "tail_relative={tail_relative}"
+        );
+        mem.unsubscribe(&queue, result.subscription_id.unwrap());
+    }
+}
