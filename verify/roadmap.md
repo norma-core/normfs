@@ -18,6 +18,7 @@ certified libraries.
 | `verify-seed` | seed file path and its load or create protocol over assumed syscalls |
 | `verify-fs-plan` | publish and append durability protocols, crash states, directory barriers |
 | `verify-disk-monitor` | eviction: removed files are gone, `to_free` and the byte total move by the file size |
+| `verify-walk` | a read at a file boundary goes on, goes back to the file before (read while still being written), or walks past a hole, each exactly when its condition holds |
 
 ## Not covered
 
