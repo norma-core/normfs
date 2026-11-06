@@ -41,7 +41,19 @@ pub fn zstd_compress_at(data: &[u8], level: i32) -> Result<Vec<u8>, std::io::Err
 
     #[cfg(all(feature = "c-libs", not(feature = "pure-rust")))]
     {
-        zstd::bulk::compress(data, level)
+        // A context per call costs more than compressing a small record.
+        thread_local! {
+            static WIRE: std::cell::RefCell<Option<(i32, zstd::bulk::Compressor<'static>)>> =
+                const { std::cell::RefCell::new(None) };
+        }
+        WIRE.with(|wire| {
+            let mut wire = wire.borrow_mut();
+            if wire.as_ref().is_none_or(|(at, _)| *at != level) {
+                *wire = Some((level, zstd::bulk::Compressor::new(level)?));
+            }
+            let (_, compressor) = wire.as_mut().expect("set above");
+            compressor.compress(data)
+        })
     }
 
     #[cfg(not(any(feature = "c-libs", feature = "pure-rust")))]
