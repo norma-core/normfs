@@ -47,8 +47,9 @@ struct normfs_request {
  * Decodes a ClientRequest. packets and encodings receive WriteRequest.packets
  * and ReadRequest.accept_encodings; when either has more entries than its
  * capacity the status is NO_SPACE and req still carries the full counts.
- * A setup, ping, write or read given twice is REPEATED: protobuf merges
- * the two, the readers keep only the last.
+ * A message field given twice (setup, ping, write, read, a read's offset or
+ * an offset's id) is REPEATED: protobuf merges the two, the readers keep only
+ * the last.
  */
 int normfs_request_decode(const uint8_t *buf, size_t len,
     struct normfs_request *req,
