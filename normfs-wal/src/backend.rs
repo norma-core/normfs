@@ -5,7 +5,6 @@ use normfs_types::{DataSource, QueueId};
 use std::fs::File;
 use std::future::Future;
 use std::io;
-use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -685,7 +684,7 @@ impl Backend for Local {
                 .run_blocking(move || std::fs::OpenOptions::new().write(true).open(&open))
                 .await?;
             let file = Arc::new(file);
-            let inode = self.fs.metadata(file.clone()).await?.ino();
+            let inode = self.fs.inode(file.clone()).await?;
             let target: Arc<dyn AppendTarget> =
                 Arc::new(LocalAppend::new(self.fs.clone(), file, inode, path));
             Ok(target)
@@ -725,7 +724,7 @@ impl Backend for Local {
                         return Ok((slot, Fill::TooLarge(len)));
                     }
                     let len = len as usize;
-                    file.read_exact_at(&mut slot.buf()[..len], 0)?;
+                    normfs_fs::read_exact_at(&file, &mut slot.buf()[..len], 0)?;
                     Ok((slot, Fill::Read(len)))
                 })
                 .await?)

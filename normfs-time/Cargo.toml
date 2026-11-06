@@ -9,5 +9,8 @@ repository.workspace = true
 homepage.workspace = true
 description = "The monotonic, wall-clock and process-start stamps NormFS and station records carry"
 
-[dependencies]
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_WindowsProgramming"] }

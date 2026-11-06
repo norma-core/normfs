@@ -1555,6 +1555,7 @@ dependencies = [
  "tokio",
  "uintn",
  "walkdir",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1584,6 +1585,7 @@ name = "normfs-time"
 version = "0.4.7"
 dependencies = [
  "libc",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
