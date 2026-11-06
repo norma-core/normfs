@@ -82,7 +82,7 @@ struct Args {
     #[arg(long, conflicts_with = "max_queue_disk_size")]
     unlimited_disk: bool,
 
-    /// Store and cloud files reads may hold decoded at once [default: CPU count, 2 to 4]
+    /// Store and cloud files reads may hold decoded at once [default: CPU count, 2 to 8]
     #[arg(long)]
     cold_read_files: Option<usize>,
 
@@ -162,7 +162,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::thread::available_parallelism()
                 .map(|n| n.get())
                 .unwrap_or(2)
-                .clamp(2, 4)
+                .clamp(2, 8)
         }),
         ..NormFsSettings::default()
     };
