@@ -204,7 +204,9 @@ pub(crate) fn encoded_with(
                         None
                     }
                 },
-                None if inline && pending_rx.len() < ENCODE_AHEAD => compress_counted(&data).ok(),
+                None if inline && pending_rx.len() < ENCODE_AHEAD / 2 => {
+                    normfs_store::zstd_compress_at(&data, WIRE_LEVEL).ok()
+                }
                 None if inline => {
                     skipped = true;
                     None

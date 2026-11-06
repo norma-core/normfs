@@ -877,7 +877,8 @@ impl ReaderFSM {
                         ctx,
                         wal_bytes,
                         data_source,
-                        prefetch_handle,
+                        // A read that came to wait meanwhile gets the next file's slot.
+                        prefetch_handle: prefetch_handle.filter(|_| !self.cold.contended()),
                     },
                     Some(false) => {
                         drop(wal_bytes);
