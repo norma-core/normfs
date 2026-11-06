@@ -185,3 +185,23 @@ async fn a_read_takes_over_the_load_a_cancelled_read_started() {
     assert_eq!(loads.started.load(Ordering::SeqCst), 1);
     assert_eq!(cold.loading(), 0);
 }
+
+#[tokio::test]
+async fn a_read_waiting_for_a_slot_is_seen_until_it_gives_up() {
+    let cold = Arc::new(ColdFiles::new(1));
+    let loads = Arc::new(Loads::default());
+    let held = found(cold.get(key(1), true, || loads.load()).await);
+    assert!(!cold.contended());
+    let waiter = {
+        let (cold, loads) = (cold.clone(), loads.clone());
+        tokio::spawn(async move {
+            let _ = cold.get(key(2), true, || loads.load()).await;
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(cold.contended());
+    waiter.abort();
+    let _ = waiter.await;
+    assert!(!cold.contended());
+    drop(held);
+}
