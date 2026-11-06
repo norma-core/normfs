@@ -208,6 +208,73 @@ async fn a_bad_request_closes_the_connection_a_follow_holds() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_bad_request_drops_replies_a_stalled_client_never_read() {
+    const RECORD: usize = 1024 * 1024;
+    const RECORDS: u64 = 32;
+    let dir = TempDir::new().unwrap();
+    let settings = NormFsSettings {
+        mem_page_size: 4 * 1024 * 1024,
+        max_memory_usage: 256 * 1024 * 1024,
+        queue_settings: QueueSettings::all_active().with_default_persist(normfs::Persist::MEMORY),
+        ..NormFsSettings::default()
+    };
+    let fs = Arc::new(
+        NormFS::new(dir.path().to_path_buf(), settings)
+            .await
+            .unwrap(),
+    );
+    let server = Server::new("127.0.0.1:0".parse().unwrap(), fs)
+        .await
+        .unwrap();
+    let addr = server.local_addr().unwrap();
+    tokio::spawn(async move { server.run().await });
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.set_recv_buffer_size(32 * 1024).unwrap();
+    let mut stream = socket.connect(addr).await.unwrap();
+    for i in 0..RECORDS {
+        stream
+            .write_all(&message(&write_request(i, "big", vec![7; RECORD])))
+            .await
+            .unwrap();
+        assert_eq!(read_response(&mut stream).await.write.unwrap().result, 0);
+    }
+    let read = ClientRequest {
+        read: Some(ReadRequest {
+            read_id: 1,
+            queue_id: "big".into(),
+            step: 1,
+            offset: None,
+            limit: RECORDS,
+            accept_encodings: Vec::new(),
+        }),
+        ..Default::default()
+    };
+    stream.write_all(&message(&read)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    stream
+        .write_all(&[2, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // A drain would deliver every queued reply; an abort leaves only what the
+    // kernels already held.
+    let mut got = 0;
+    let mut buf = vec![0; 64 * 1024];
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Ok(n @ 1..) = stream.read(&mut buf).await {
+            got += n;
+        }
+    })
+    .await
+    .expect("the connection stayed open");
+    assert!(
+        got < 1024 * 1024,
+        "{got} bytes reached a client that stopped reading"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn replies_go_out_while_the_client_keeps_sending() {
     let dir = TempDir::new().unwrap();
     let fs = Arc::new(
