@@ -170,6 +170,46 @@ fn test_repeated_write_is_refused() {
 }
 
 #[test]
+fn test_repeated_offset_or_id_is_refused() {
+    let offset = |raw: u8| Offset {
+        id: Some(Id {
+            raw: Bytes::from(vec![raw]),
+        }),
+        r#type: 0,
+    };
+    let in_read = |inner: Vec<u8>| {
+        let mut buf = vec![0x5a, inner.len() as u8];
+        buf.extend(inner);
+        buf
+    };
+
+    let mut two_offsets = read(1, "q", 0, None).encode_to_vec();
+    for raw in [1, 2] {
+        two_offsets.extend(
+            ReadRequest {
+                offset: Some(offset(raw)),
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        );
+    }
+    assert_eq!(
+        decode_request(&in_read(two_offsets)),
+        Err(RequestError::Repeated)
+    );
+
+    let mut two_ids = offset(1).encode_to_vec();
+    two_ids.extend(offset(2).encode_to_vec());
+    let mut with_offset = read(1, "q", 0, None).encode_to_vec();
+    with_offset.extend([0x52, two_ids.len() as u8]);
+    with_offset.extend(two_ids);
+    assert_eq!(
+        decode_request(&in_read(with_offset)),
+        Err(RequestError::Repeated)
+    );
+}
+
+#[test]
 fn test_differs_from_prost() {
     // setup { version: 1 } then an empty setup: prost merges, the readers would keep the last
     let twice = [0x0a, 0x02, 0x08, 0x01, 0x0a, 0x00];

@@ -55,7 +55,8 @@ struct normfs_request_read {
       s == NORMFS_REQUEST_ERR_TRUNCATED ||
       s == NORMFS_REQUEST_ERR_OVERFLOW ||
       s == NORMFS_REQUEST_ERR_BAD_WIRE_TYPE ||
-      s == NORMFS_REQUEST_ERR_BAD_FIELD_NUM;
+      s == NORMFS_REQUEST_ERR_BAD_FIELD_NUM ||
+      s == NORMFS_REQUEST_ERR_REPEATED;
 */
 
 /*@ requires b.len == 0 || gremlin_span_in(b, (uint8_t *)buf, len);
@@ -72,6 +73,41 @@ normfs_request_span(const uint8_t *buf, size_t len, struct gremlin_bytes b)
 	s.off = (size_t)(b.data - buf);
 	s.len = b.len;
 	return s;
+}
+
+/* protobuf merges a message field that comes twice; the readers keep only
+ * the last, so a second tag is refused. */
+/*@ requires n == 0 || \valid_read(p + (0 .. n - 1));
+    assigns \nothing;
+    ensures \result == 0 || \result == 1;
+*/
+static int
+normfs_request_repeats(const uint8_t *p, size_t n, uint32_t tag)
+{
+	int seen = 0;
+	size_t offset = 0u;
+	/*@ loop invariant 0 <= offset <= n;
+	    loop invariant seen == 0 || seen == 1;
+	    loop assigns offset, seen;
+	    loop variant n - offset;
+	*/
+	while (offset < n) {
+		struct gremlin_varint32_decode_result t =
+			gremlin_varint32_decode(p + offset, n - offset);
+		if (t.error != GREMLIN_OK) return 0;
+		offset += t.consumed;
+		if (t.value == tag) {
+			if (seen) return 1;
+			seen = 1;
+		}
+		unsigned wt = (unsigned)(t.value % 8u);
+		if (wt == 6u || wt == 7u) return 0;
+		struct gremlin_skip_result sk =
+			gremlin_skip_data(p + offset, n - offset, (enum gremlin_wire_type)wt);
+		if (sk.error != GREMLIN_OK) return 0;
+		offset += sk.consumed;
+	}
+	return 0;
 }
 
 /*@ requires len == 0 || \valid_read(buf + (0 .. len - 1));
@@ -187,6 +223,7 @@ normfs_request_decode_offset(const uint8_t *buf, size_t len, struct gremlin_byte
 	rd->has_offset_id = 0;
 	err = normfs_Offset_reader_init(&o, m.data, m.len);
 	if (err != GREMLIN_OK) return (int)err;
+	if (normfs_request_repeats(m.data, m.len, 10u)) return NORMFS_REQUEST_ERR_REPEATED;
 	rd->offset_type = (int64_t)normfs_Offset_reader_get_type(&o);
 	if (!o._has.id) return NORMFS_REQUEST_OK;
 	err = normfs_Id_reader_init(&id, o.id.data, o.id.len);
@@ -232,6 +269,7 @@ normfs_request_decode_read(const uint8_t *buf, size_t len, struct gremlin_bytes 
 	rd->has_offset_id = 0;
 	err = normfs_ReadRequest_reader_init(&r, m.data, m.len);
 	if (err != GREMLIN_OK) return (int)err;
+	if (normfs_request_repeats(m.data, m.len, 82u)) return NORMFS_REQUEST_ERR_REPEATED;
 	rd->id = normfs_ReadRequest_reader_get_read_id(&r);
 	rd->step = normfs_ReadRequest_reader_get_step(&r);
 	rd->limit = normfs_ReadRequest_reader_get_limit(&r);
@@ -302,46 +340,13 @@ normfs_request_fill(struct normfs_request *req, size_t len,
 }
 
 /*@ requires len == 0 || \valid_read(buf + (0 .. len - 1));
-    assigns \nothing;
-    ensures \result == 0 || \result == 1;
-*/
-static int
-normfs_request_repeats(const uint8_t *buf, size_t len)
-{
-	unsigned seen = 0u;
-	size_t offset = 0u;
-	/*@ loop invariant 0 <= offset <= len;
-	    loop assigns offset, seen;
-	    loop variant len - offset;
-	*/
-	while (offset < len) {
-		struct gremlin_varint32_decode_result t =
-			gremlin_varint32_decode(buf + offset, len - offset);
-		if (t.error != GREMLIN_OK) return 0;
-		offset += t.consumed;
-		unsigned bit = t.value == 10u ? 1u : t.value == 18u ? 2u :
-		    t.value == 82u ? 4u : t.value == 90u ? 8u : 0u;
-		if ((seen & bit) != 0u) return 1;
-		seen |= bit;
-		unsigned wt = (unsigned)(t.value % 8u);
-		if (wt == 6u || wt == 7u) return 0;
-		struct gremlin_skip_result sk =
-			gremlin_skip_data(buf + offset, len - offset, (enum gremlin_wire_type)wt);
-		if (sk.error != GREMLIN_OK) return 0;
-		offset += sk.consumed;
-	}
-	return 0;
-}
-
-/*@ requires len == 0 || \valid_read(buf + (0 .. len - 1));
     requires \valid(req);
     requires packets_cap == 0 || \valid(packets + (0 .. packets_cap - 1));
     requires encodings_cap == 0 || \valid(encodings + (0 .. encodings_cap - 1));
     requires \separated(req, packets + (0 .. packets_cap - 1),
                         encodings + (0 .. encodings_cap - 1));
     assigns *req, packets[0 .. packets_cap - 1], encodings[0 .. encodings_cap - 1];
-    ensures normfs_request_status(\result) || \result == NORMFS_REQUEST_ERR_NO_SPACE ||
-            \result == NORMFS_REQUEST_ERR_REPEATED;
+    ensures normfs_request_status(\result) || \result == NORMFS_REQUEST_ERR_NO_SPACE;
     ensures \result == NORMFS_REQUEST_OK || \result == NORMFS_REQUEST_ERR_NO_SPACE ==>
               (req->has_read_offset_id != 0 ==> req->has_read_offset != 0) &&
               (req->has_read_offset != 0 ==> req->has_read != 0);
@@ -372,7 +377,9 @@ normfs_request_decode(const uint8_t *buf, size_t len,
 
 	err = normfs_ClientRequest_reader_init(&r, buf, len);
 	if (err != GREMLIN_OK) return (int)err;
-	if (normfs_request_repeats(buf, len)) return NORMFS_REQUEST_ERR_REPEATED;
+	if (normfs_request_repeats(buf, len, 10u) || normfs_request_repeats(buf, len, 18u) ||
+	    normfs_request_repeats(buf, len, 82u) || normfs_request_repeats(buf, len, 90u))
+		return NORMFS_REQUEST_ERR_REPEATED;
 	has_setup = r._has.setup;
 	has_ping = r._has.ping;
 	has_write = r._has.write;
