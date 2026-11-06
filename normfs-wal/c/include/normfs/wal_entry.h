@@ -78,6 +78,19 @@ struct normfs_wal_entry_iter_result {
 
       logic integer normfs_le32{L}(uint8_t *p) =
         p[0] + 256 * p[1] + 65536 * p[2] + 16777216 * p[3];
+
+      // The record size varint and the record, before the CRC.
+      logic integer normfs_wal_entry_v1_body{L}(uint8_t *p) =
+        normfs_uintn_varint32_len(p) + normfs_uintn_varint32_value(p);
+
+      // len bytes at p start with a whole entry: a canonical size, the
+      // record and a CRC that matches them.
+      predicate normfs_wal_entry_v1_whole{L}(uint8_t *p, integer len) =
+        normfs_uintn_varint32_len(p) <= len &&
+        normfs_uintn_varint32_canonical(p) &&
+        normfs_wal_entry_v1_body(p) + NORMFS_WAL_ENTRY_V1_CRC_SIZE <= len &&
+        normfs_le32(p + normfs_wal_entry_v1_body(p)) ==
+          normfs_crc32c_logic(0, p, normfs_wal_entry_v1_body(p));
     }
 */
 

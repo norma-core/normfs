@@ -141,6 +141,11 @@ normfs_wal_entry_v1_encode(const uint8_t *record, uint32_t record_size,
                   \result.record_offset + \result.record_size) &&
               \result.crc == normfs_le32(buf + \result.consumed -
                   NORMFS_WAL_ENTRY_V1_CRC_SIZE);
+    ensures \result.status == NORMFS_WAL_ENTRY_OK <==>
+              normfs_wal_entry_v1_whole(buf, len);
+    ensures \result.status == NORMFS_WAL_ENTRY_OK ==>
+              \result.consumed == normfs_wal_entry_v1_body(buf) +
+                NORMFS_WAL_ENTRY_V1_CRC_SIZE;
     ensures \result.status != NORMFS_WAL_ENTRY_OK ==>
               \result.record_offset == 0 && \result.record_size == 0 &&
               \result.consumed == 0 && \result.crc == 0;
@@ -244,6 +249,12 @@ normfs_wal_entry_v1_id(uint64_t num_entries_before, uint64_t index)
     ensures \result.status == NORMFS_WAL_ENTRY_OK ==>
               \result.entry_id == num_entries_before + index &&
               num_entries_before + index <= 0xFFFFFFFFFFFFFFFF;
+    ensures \result.status == NORMFS_WAL_ENTRY_OK <==>
+              normfs_wal_entry_v1_whole(buf, len) &&
+              num_entries_before + index <= 0xFFFFFFFFFFFFFFFF;
+    ensures \result.status == NORMFS_WAL_ENTRY_OK ==>
+              \result.consumed == normfs_wal_entry_v1_body(buf) +
+                NORMFS_WAL_ENTRY_V1_CRC_SIZE;
     ensures \result.status != NORMFS_WAL_ENTRY_OK ==>
               \result.record_offset == 0 && \result.record_size == 0 &&
               \result.consumed == 0 && \result.crc == 0 &&

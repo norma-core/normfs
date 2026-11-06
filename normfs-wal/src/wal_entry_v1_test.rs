@@ -1,7 +1,7 @@
 use super::wal_entry::WalEntryHeader;
 use super::wal_entry_v1::{
     WAL_ENTRY_V1_CRC_SIZE, WAL_ENTRY_V1_MIN_SIZE, WalEntryV1, WalEntryV1Error, crc32c,
-    derive_entry_id, encoded_len,
+    derive_entry_id, encoded_len, scan_whole_entries,
 };
 use super::wal_header::WalHeader;
 use super::wal_header_v1::WalHeaderV1;
@@ -272,6 +272,25 @@ fn test_wal_entry_v1_iter_next_reports_id_overflow() {
         WalEntryV1::iter_next(&buffer, u64::MAX, 1),
         Err(WalEntryV1Error::IdOverflow)
     );
+}
+
+#[test]
+fn test_wal_entry_v1_scan_whole_entries() {
+    let mut buffer = BytesMut::from(&[0xAAu8; 3][..]);
+    for size in [0usize, 130, 17] {
+        WalEntryV1::new(&pseudo_random(size))
+            .write_to_bytes(&mut buffer)
+            .unwrap();
+    }
+    let whole = buffer.len();
+
+    assert_eq!(scan_whole_entries(&buffer, 3, 0), 3);
+    assert_eq!(scan_whole_entries(&buffer, whole, 0), 0);
+    assert_eq!(scan_whole_entries(&buffer[..whole - 1], 3, 0), 2);
+    assert_eq!(scan_whole_entries(&buffer, 3, u64::MAX), 1);
+
+    buffer[3 + encoded_len(0) + 2] ^= 0x01;
+    assert_eq!(scan_whole_entries(&buffer, 3, 0), 1);
 }
 
 #[test]
