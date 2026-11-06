@@ -1,7 +1,6 @@
 use std::ffi::CString;
 use std::io;
 use std::os::raw::{c_char, c_int};
-use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 /// Must agree with NORMFS_SEED_SIZE in `c/include/normfs/seed.h`; the C layer
@@ -115,7 +114,17 @@ fn map_status(r: CSeedResult) -> Result<(), SeedError> {
 }
 
 fn c_dir(data_dir: &Path) -> Result<CString, SeedError> {
-    CString::new(data_dir.as_os_str().as_bytes()).map_err(|_| {
+    #[cfg(unix)]
+    let bytes = std::os::unix::ffi::OsStrExt::as_bytes(data_dir.as_os_str());
+    // The Windows C layer takes UTF-8 and widens it for the wide-char calls.
+    #[cfg(windows)]
+    let bytes = data_dir.to_str().map(str::as_bytes).ok_or_else(|| {
+        SeedError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "data directory path is not valid UTF-8",
+        ))
+    })?;
+    CString::new(bytes).map_err(|_| {
         SeedError::Io(io::Error::new(
             io::ErrorKind::InvalidInput,
             "data directory path contains an interior NUL",
@@ -279,6 +288,7 @@ mod tests {
         assert_eq!(bytes1, bytes2);
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_seed_file_permissions() {
         let temp_dir = tempfile::tempdir().unwrap();
