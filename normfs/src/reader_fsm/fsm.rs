@@ -867,10 +867,10 @@ impl ReaderFSM {
                 let ctx = ctx.paused(pause);
                 // Reloading the file costs more than a consumer that drains in
                 // time, unless another read waits for the slot it holds.
-                let room = if self.cold.contended() {
-                    Some(false)
-                } else {
-                    Self::room_within(&ctx, HOLD_FILE).await
+                let room = tokio::select! {
+                    biased;
+                    () = self.cold.contention() => Some(false),
+                    room = Self::room_within(&ctx, HOLD_FILE) => room,
                 };
                 return Ok(match room {
                     Some(true) => ReaderState::ParseWalBytes {
@@ -1137,3 +1137,7 @@ impl ReaderFSM {
 #[cfg(test)]
 #[path = "fsm_walk_test.rs"]
 mod walk_test;
+
+#[cfg(test)]
+#[path = "fsm_hold_test.rs"]
+mod hold_test;
