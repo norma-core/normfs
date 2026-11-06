@@ -19,3 +19,4 @@ target/
 # Proof build directories
 build-verify/
 .wpcache/
+.frama-c/
