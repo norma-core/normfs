@@ -1,4 +1,5 @@
 use super::cold::{Cold, ColdFiles};
+use super::walk::{walk_step, WalkStep};
 use super::{DataSource, Fetched, Prefetch, PrefetchHandle, ReadContext, ReadEntry, ReaderState};
 use crate::{mem::MemStore, Error};
 use normfs_store::{Layer, PersistStore, StoreError};
@@ -7,6 +8,9 @@ use normfs_wal::{PausableRead, ReadRangeResult, WalError, WalStore};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use uintn::UintN;
+
+/// How long a paused read keeps its file for a consumer to make room.
+const HOLD_FILE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// A file id that was never written answers "not there" however often it is
 /// asked; a file being archived answers that only until the rename lands. The
@@ -358,7 +362,7 @@ impl ReaderFSM {
         step: u64,
         sender: mpsc::Sender<ReadEntry>,
     ) -> Result<ReaderState, Error> {
-        let start_id = offset;
+        let mut start_id = offset;
 
         // Check if sender is still open
         if sender.is_closed() {
@@ -407,6 +411,9 @@ impl ReaderFSM {
 
             if result.success && result.subscription_id.is_some() {
                 return Ok(ReaderState::Subscribed);
+            }
+            if let Some(next) = result.start_id {
+                start_id = next;
             }
         }
 
@@ -624,6 +631,16 @@ impl ReaderFSM {
         // Read straight from the file: only the entries sent are ever in memory.
         let result = match wal.get_entries_before(&ctx.queue, &ctx.file_id).await {
             Ok(before) => {
+                if walk_step(
+                    &ctx.file_id,
+                    &before,
+                    &ctx.next_id,
+                    ctx.cut_short.as_ref(),
+                    ctx.went_back.as_ref(),
+                ) == WalkStep::Back
+                {
+                    return Ok(Self::back_one_file(ctx));
+                }
                 self.warn_gap(&ctx, &before);
                 wal.read_wal_range(
                     &ctx.queue,
@@ -734,6 +751,16 @@ impl ReaderFSM {
         }
     }
 
+    fn back_one_file(ctx: ReadContext) -> ReaderState {
+        let previous = ctx.cut_short.clone().unwrap_or_else(|| ctx.file_id.clone());
+        log::info!(target: "normfs-reader-fsm",
+            "Queue '{}' - file {} begins past owed entry {}: reading file {} again",
+            ctx.queue.short(), ctx.file_id, ctx.next_id, previous);
+        let mut ctx = ctx.with_file_id(previous);
+        ctx.went_back = Some(ctx.next_id.clone());
+        ReaderState::ReadFile { ctx }
+    }
+
     /// A queue that was cloud-direct may skip reserved ids after an offline
     /// restart; other gaps indicate a failed flush.
     fn warn_gap(&self, ctx: &ReadContext, num_entries_before: &UintN) {
@@ -782,7 +809,7 @@ impl ReaderFSM {
         ctx: ReadContext,
         wal_bytes: bytes::Bytes,
         data_source: DataSource,
-        _prefetch_handle: PrefetchHandle,
+        prefetch_handle: PrefetchHandle,
     ) -> Result<ReaderState, Error> {
         // Check if sender is still open
         if ctx.sender.is_closed() {
@@ -793,9 +820,25 @@ impl ReaderFSM {
             "Parsing WAL bytes: queue={}, file_id={}, bytes={}, source={:?}",
             ctx.queue.short(), ctx.file_id, wal_bytes.len(), data_source);
 
+        if let Ok(header) = normfs_wal::get_wal_header(&wal_bytes) {
+            if walk_step(
+                &ctx.file_id,
+                &header.num_entries_before,
+                &ctx.next_id,
+                ctx.cut_short.as_ref(),
+                ctx.went_back.as_ref(),
+            ) == WalkStep::Back
+            {
+                return Ok(Self::back_one_file(ctx));
+            }
+            self.warn_gap(&ctx, &header.num_entries_before);
+        }
+
         // Prefetch the next file only for a sequential read that goes past
         // this one; a prefetch that finds no free slot is skipped.
-        let prefetch_handle = if ctx.step == 1 && self.reads_past(&ctx, data_source).await {
+        let prefetch_handle = if prefetch_handle.is_some() {
+            prefetch_handle
+        } else if ctx.step == 1 && self.reads_past(&ctx, data_source).await {
             let next_file_id = ctx.file_id.increment();
             Some(Prefetch(tokio::spawn({
                 let fsm = self.clone();
@@ -805,10 +848,6 @@ impl ReaderFSM {
         } else {
             None
         };
-
-        if let Ok(header) = normfs_wal::get_wal_header(&wal_bytes) {
-            self.warn_gap(&ctx, &header.num_entries_before);
-        }
 
         // A send never waits here: a stalled consumer would keep the file,
         // and its slot, for as long as it stalls.
@@ -825,13 +864,47 @@ impl ReaderFSM {
         let result = match result {
             Ok(PausableRead::Done(result)) => Ok(result),
             Ok(PausableRead::Paused(pause)) => {
-                drop(wal_bytes);
-                drop(prefetch_handle);
-                return Ok(self.wait_for_room(ctx.paused(pause)).await);
+                let ctx = ctx.paused(pause);
+                // Reloading the file costs more than a consumer that drains in
+                // time, unless another read waits for the slot it holds.
+                let room = tokio::select! {
+                    biased;
+                    () = self.cold.contention() => Some(false),
+                    room = Self::room_within(&ctx, HOLD_FILE) => room,
+                };
+                return Ok(match room {
+                    Some(true) => ReaderState::ParseWalBytes {
+                        ctx,
+                        wal_bytes,
+                        data_source,
+                        // A read that came to wait meanwhile gets the next file's slot.
+                        prefetch_handle: prefetch_handle.filter(|_| !self.cold.contended()),
+                    },
+                    Some(false) => {
+                        drop(wal_bytes);
+                        drop(prefetch_handle);
+                        self.wait_for_room(ctx).await
+                    }
+                    None => ReaderState::Failed(Error::ClientDisconnected),
+                });
             }
             Err(e) => Err(e),
         };
         Ok(self.after_range(ctx, result, data_source, prefetch_handle))
+    }
+
+    /// Whether the consumer took half its channel within `limit`; `None` when
+    /// it is gone.
+    async fn room_within(ctx: &ReadContext, limit: std::time::Duration) -> Option<bool> {
+        let room = (ctx.sender.max_capacity() / 2).max(1);
+        match tokio::time::timeout(limit, ctx.sender.reserve_many(room)).await {
+            Ok(Ok(permits)) => {
+                drop(permits);
+                Some(true)
+            }
+            Ok(Err(_)) => None,
+            Err(_) => Some(false),
+        }
     }
 
     /// Waits for the consumer to take half its channel, then comes back to
@@ -880,9 +953,11 @@ impl ReaderFSM {
                 };
 
                 // Move to next file
+                let mut ctx = ctx.with_next_id(new_next_id);
+                ctx.cut_short = Some(ctx.file_id.clone());
                 ReaderState::ReadNextFile {
                     current_file: ctx.file_id.clone(),
-                    ctx: ctx.with_next_id(new_next_id),
+                    ctx,
                     prefetch_handle,
                 }
             }
@@ -910,7 +985,7 @@ impl ReaderFSM {
     async fn handle_read_next_file(
         &self,
         current_file: UintN,
-        ctx: ReadContext,
+        mut ctx: ReadContext,
         prefetch_handle: PrefetchHandle,
     ) -> Result<ReaderState, Error> {
         if ctx.sender.is_closed() {
@@ -982,6 +1057,9 @@ impl ReaderFSM {
                         ctx.queue.short(), _sub_id);
                     return Ok(ReaderState::Subscribed);
                 }
+            }
+            if let Some(next) = result.start_id {
+                ctx = ctx.with_next_id(next);
             }
         }
 
@@ -1055,3 +1133,11 @@ impl ReaderFSM {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "fsm_walk_test.rs"]
+mod walk_test;
+
+#[cfg(test)]
+#[path = "fsm_hold_test.rs"]
+mod hold_test;
