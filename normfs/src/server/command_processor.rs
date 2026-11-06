@@ -831,6 +831,7 @@ impl CommandProcessor {
                     | Error::RecordTooLarge(_)
                     | Error::QueueClosed
                     | Error::ReservedQueue
+                    | Error::Closing
                     | Error::WouldBlock
                     | Error::NotInFile
                     | Error::MemoryBelowFloor { .. }

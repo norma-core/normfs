@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use normfs::{CloudSettings, NormFS, NormFsSettings, Persist, QueueSettings};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -41,6 +41,17 @@ fn setup_ulimits() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// How records reach the local disk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum PersistMode {
+    /// Every record goes to the WAL; full WAL files are archived to the store.
+    WalStore,
+    /// Each full memory page is sealed straight into a store file, with no
+    /// WAL: records in the open page are lost on a crash. A page is a file, so
+    /// give it a few MiB with --mem-page-size.
+    Store,
+}
+
 /// NormFS TCP Server - A standalone TCP server for NormFS
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None,
@@ -81,6 +92,10 @@ struct Args {
     /// Disable disk retention limits and size-triggered deletion
     #[arg(long, conflicts_with = "max_queue_disk_size")]
     unlimited_disk: bool,
+
+    /// How records reach the local disk
+    #[arg(long, value_enum, default_value_t = PersistMode::WalStore)]
+    persist: PersistMode,
 
     /// Store and cloud files reads may hold decoded at once [default: CPU count, 2 to 8]
     #[arg(long)]
@@ -143,8 +158,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // record at a passive page with no recourse from the command line.
     let persist = Persist {
         cloud: args.s3_bucket.is_some(),
-        ..Persist::WAL_STORE
+        ..match args.persist {
+            PersistMode::WalStore => Persist::WAL_STORE,
+            PersistMode::Store => Persist::STORE,
+        }
     };
+    log::info!("Persist: {:?}", args.persist);
     let mut settings = NormFsSettings {
         max_memory_usage: args.max_memory_usage,
         mem_page_size: args.mem_page_size,
@@ -210,13 +229,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server = normfs::server::Server::new(tcp_addr, normfs.clone()).await?;
     log::info!("NormFS TCP server listening on {}", tcp_addr);
 
-    // Handle Ctrl+C for graceful shutdown
     let normfs_for_shutdown = normfs.clone();
     tokio::spawn(async move {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("Failed to listen for Ctrl+C");
-        log::info!("Received Ctrl+C, shutting down...");
+        stop_signal().await;
+        log::info!("Received a stop signal, shutting down...");
         log::info!("Closing NormFS (writing WAL)...");
         if let Err(e) = normfs_for_shutdown.close().await {
             log::error!("Error during NormFS close: {}", e);
@@ -228,4 +244,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     server.run().await?;
 
     Ok(())
+}
+
+/// Ctrl+C, or SIGTERM from a service manager: without a close, a store-only
+/// queue loses its open page.
+async fn stop_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut term = signal(SignalKind::terminate()).expect("Failed to listen for SIGTERM");
+        tokio::select! {
+            r = tokio::signal::ctrl_c() => r.expect("Failed to listen for Ctrl+C"),
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c()
+        .await
+        .expect("Failed to listen for Ctrl+C");
 }
