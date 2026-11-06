@@ -663,3 +663,24 @@ async fn a_close_waits_for_a_file_whose_flush_failed() {
         }
     }
 }
+
+#[tokio::test]
+async fn writes_after_close_has_begun_are_refused() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let fs = NormFS::new(temp.path().to_path_buf(), NormFsSettings::all_active())
+        .await
+        .unwrap();
+    let queue = fs.resolve("open");
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    write_records(&fs, &queue, 3).await;
+
+    fs.close().await.unwrap();
+
+    let late = fs.resolve("late");
+    let refused = fs.ensure_queue_exists_for_write(&late).await;
+    assert!(matches!(refused, Err(Error::Closing)), "got {refused:?}");
+    let refused = fs.enqueue(&queue, Bytes::from_static(b"late")).await;
+    assert!(matches!(refused, Err(Error::Closing)), "got {refused:?}");
+    let refused = fs.try_enqueue(&queue, Bytes::from_static(b"late"));
+    assert!(matches!(refused, Err(Error::Closing)), "got {refused:?}");
+}
