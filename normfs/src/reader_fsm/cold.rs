@@ -157,6 +157,11 @@ impl ColdFiles {
         Some(permit.expect("the semaphore is never closed"))
     }
 
+    /// Whether a read is waiting for a slot.
+    pub(crate) fn contended(&self) -> bool {
+        self.waiting.load(Ordering::SeqCst) > 0
+    }
+
     #[cfg(test)]
     pub(crate) fn loading(&self) -> usize {
         self.loading.lock().unwrap().len()

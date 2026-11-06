@@ -99,7 +99,7 @@ const MIN_WIRE_SIZE: usize = 1024;
 const WIRE_LEVEL: i32 = 3;
 /// Below this an entry compresses on the sending task: a trip to the
 /// blocking pool costs more than zstd does on a record this small.
-const INLINE_WIRE_SIZE: usize = 64 * 1024;
+const INLINE_WIRE_SIZE: usize = 16 * 1024;
 
 const REPORT_RAW_EVERY: Duration = Duration::from_secs(30);
 
@@ -118,9 +118,9 @@ fn wire_slots() -> Arc<Semaphore> {
 
 /// The reader's entries in order, each with the data to send. With `compress`
 /// a task drains the reader's channel, so a follow drains as fast as without
-/// compression (a full channel drops a follower). An entry compresses on the
-/// blocking pool when `slots` has one free, and goes raw when it has none or
-/// its compression is still running once the drain backs up.
+/// compression (a full channel drops a follower). A small entry compresses on
+/// the drain unless the drain is behind; a larger one on the blocking pool
+/// when `slots` has one free. Either goes raw rather than stall the drain.
 fn encoded(
     rx: mpsc::Receiver<ReadEntry>,
     compress: bool,
@@ -204,7 +204,11 @@ pub(crate) fn encoded_with(
                         None
                     }
                 },
-                None if inline => compress_counted(&data).ok(),
+                None if inline && pending_rx.len() < ENCODE_AHEAD => compress_counted(&data).ok(),
+                None if inline => {
+                    skipped = true;
+                    None
+                }
                 None => None,
             };
             if skipped {

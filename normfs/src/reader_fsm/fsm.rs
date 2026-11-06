@@ -866,8 +866,13 @@ impl ReaderFSM {
             Ok(PausableRead::Paused(pause)) => {
                 let ctx = ctx.paused(pause);
                 // Reloading the file costs more than a consumer that drains in
-                // time; only one that does not lets go of the file and its slot.
-                return Ok(match Self::room_within(&ctx, HOLD_FILE).await {
+                // time, unless another read waits for the slot it holds.
+                let room = if self.cold.contended() {
+                    Some(false)
+                } else {
+                    Self::room_within(&ctx, HOLD_FILE).await
+                };
+                return Ok(match room {
                     Some(true) => ReaderState::ParseWalBytes {
                         ctx,
                         wal_bytes,
