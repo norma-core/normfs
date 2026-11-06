@@ -57,9 +57,9 @@ impl Server {
             }
 
             let handler = ClientHandler::new(self.normfs.clone(), addr);
-            let stream = accepted.stream;
+            let conn = accepted.conn;
             tokio::spawn(async move {
-                handler.handle_connection(stream).await;
+                handler.handle_connection(conn).await;
             });
         }
     }

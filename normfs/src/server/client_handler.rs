@@ -4,12 +4,11 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
 use super::command_processor::{CommandProcessor, ResponseSender};
-use super::frame::{self, FrameError, FRAME_HEADER_SIZE, FRAME_MAX_PAYLOAD};
+use super::frame::{self, FRAME_HEADER_SIZE, FRAME_MAX_PAYLOAD};
+use super::net::{Conn, FrameReader, NetError};
 use crate::proto::{ClientRequest, ServerResponse};
 use crate::NormFS;
 
@@ -68,7 +67,7 @@ impl ClientHandler {
         ClientHandler { normfs, addr }
     }
 
-    pub async fn handle_connection(self, conn: TcpStream) {
+    pub async fn handle_connection(self, conn: Conn) {
         debug!("Starting handler (client_addr: {})", self.addr);
 
         let (incoming_requests_tx, mut incoming_requests) = mpsc::channel(REQUEST_CHANNEL_BUFFER);
@@ -76,21 +75,22 @@ impl ClientHandler {
         let (reads, reads_rx) = mpsc::channel(RESPONSE_CHANNEL_BUFFER);
         let (done_tx, mut done) = mpsc::channel::<()>(1);
 
-        let (read_half, write_half) = conn.into_split();
+        let conn = Arc::new(conn);
+        let read_conn = conn.clone();
 
         // Spawn read loop
         let incoming_tx = incoming_requests_tx.clone();
         let done_tx_read = done_tx.clone();
         let addr = self.addr;
         let read_handle = tokio::spawn(async move {
-            Self::read_loop(read_half, incoming_tx, done_tx_read, addr).await;
+            Self::read_loop(read_conn, incoming_tx, done_tx_read, addr).await;
         });
 
         // Spawn write loop
         let done_tx_write = done_tx.clone();
         let addr = self.addr;
         let write_handle = tokio::spawn(async move {
-            Self::write_loop(write_half, replies_rx, reads_rx, done_tx_write, addr).await;
+            Self::write_loop(conn, replies_rx, reads_rx, done_tx_write, addr).await;
         });
 
         // Process loop runs in current task
@@ -106,19 +106,26 @@ impl ClientHandler {
     }
 
     async fn read_loop(
-        mut read_half: tokio::net::tcp::OwnedReadHalf,
+        conn: Arc<Conn>,
         incoming_tx: mpsc::Sender<ClientRequest>,
         done_tx: mpsc::Sender<()>,
         addr: SocketAddr,
     ) {
         debug!("Read loop started (client_addr: {})", addr);
 
+        let mut reader = FrameReader::new();
         loop {
-            let mut size_bytes = [0u8; FRAME_HEADER_SIZE];
-            match tokio::time::timeout(IDLE_TIMEOUT, read_half.read_exact(&mut size_bytes)).await {
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+            let size = match tokio::time::timeout(IDLE_TIMEOUT, reader.read_header(&conn)).await {
+                Ok(Ok(size)) => size,
+                Ok(Err(NetError::Eof)) => {
                     debug!("Client disconnected (EOF) (client_addr: {})", addr);
+                    break;
+                }
+                Ok(Err(NetError::TooLarge(size))) => {
+                    error!(
+                        "Message size exceeds maximum (client_addr: {}, message_size: {}, max_size: {})",
+                        addr, size, FRAME_MAX_PAYLOAD
+                    );
                     break;
                 }
                 Ok(Err(e)) => {
@@ -132,35 +139,17 @@ impl ClientHandler {
                     info!("Client idle timeout (client_addr: {})", addr);
                     break;
                 }
-            }
-
-            let size = match frame::decode_header(&size_bytes) {
-                Ok(size) => size,
-                Err(FrameError::TooLarge(size)) => {
-                    error!(
-                        "Message size exceeds maximum (client_addr: {}, message_size: {}, max_size: {})",
-                        addr, size, FRAME_MAX_PAYLOAD
-                    );
-                    break;
-                }
-                Err(e) => {
-                    error!(
-                        "Invalid message header (client_addr: {}, error: {})",
-                        addr, e
-                    );
-                    break;
-                }
             };
 
             if size == 0 {
                 continue;
             }
 
-            // Read message payload
             let mut payload = vec![0u8; size as usize];
-            match tokio::time::timeout(IDLE_TIMEOUT, read_half.read_exact(&mut payload)).await {
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+            match tokio::time::timeout(IDLE_TIMEOUT, reader.read_payload(&conn, &mut payload)).await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(NetError::Eof)) => {
                     debug!(
                         "Client disconnected (EOF in payload) (client_addr: {})",
                         addr
@@ -209,7 +198,7 @@ impl ClientHandler {
     }
 
     async fn write_loop(
-        mut write_half: tokio::net::tcp::OwnedWriteHalf,
+        conn: Arc<Conn>,
         mut replies: mpsc::Receiver<ServerResponse>,
         mut reads: mpsc::Receiver<ServerResponse>,
         done_tx: mpsc::Sender<()>,
@@ -243,7 +232,7 @@ impl ClientHandler {
             // Let go of the payload, and any page it pins, before a slow write.
             drop(response);
 
-            if let Err(e) = write_half.write_all(&message).await {
+            if let Err(e) = conn.write_all(&message).await {
                 error!(
                     "Error writing response (client_addr: {}, error: {})",
                     addr, e
@@ -252,6 +241,8 @@ impl ClientHandler {
             }
         }
 
+        // The read loop still holds the socket, so nothing else would end the stream.
+        conn.shutdown_write();
         let _ = done_tx.send(()).await;
         debug!("Write loop ended (client_addr: {})", addr);
     }
