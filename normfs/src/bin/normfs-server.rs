@@ -101,6 +101,10 @@ struct Args {
     #[arg(long)]
     cold_read_files: Option<usize>,
 
+    /// Files sealed for the store at once [default: CPU count / 4, at least 4]
+    #[arg(long)]
+    store_workers: Option<usize>,
+
     /// S3 bucket name for cloud offloading (optional)
     #[arg(long)]
     s3_bucket: Option<String>,
@@ -186,6 +190,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..NormFsSettings::default()
     };
     log::info!("Cold read files: {}", settings.cold_read_files);
+    // Sealing a page is zstd and AES on the CPU; the library's four slots kept
+    // a 192-core host sealing on four cores while its pages ran out.
+    settings.store_cfg.num_workers = args.store_workers.unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map(|n| n.get() / 4)
+            .unwrap_or(0)
+            .max(4)
+    });
+    log::info!("Store workers: {}", settings.store_cfg.num_workers);
 
     // Configure S3 cloud offloading if provided
     if let Some(bucket) = &args.s3_bucket {
