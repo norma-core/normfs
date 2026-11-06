@@ -119,8 +119,8 @@ fn wire_slots() -> Arc<Semaphore> {
 /// The reader's entries in order, each with the data to send. With `compress`
 /// a task drains the reader's channel, so a follow drains as fast as without
 /// compression (a full channel drops a follower). A small entry compresses on
-/// the drain unless the drain is behind; a larger one on the blocking pool
-/// when `slots` has one free. Either goes raw rather than stall the drain.
+/// the drain unless a follow is falling behind; a larger one on the blocking
+/// pool when `slots` has one free. Either goes raw rather than stall the drain.
 fn encoded(
     rx: mpsc::Receiver<ReadEntry>,
     compress: bool,
@@ -161,6 +161,10 @@ pub(crate) fn encoded_with(
         while let Some(mut entry) = rx.recv().await {
             let data = std::mem::take(&mut entry.data);
             let inline = (MIN_WIRE_SIZE..INLINE_WIRE_SIZE).contains(&data.len());
+            // Only a live follow is dropped for a full channel; a read from
+            // disk pauses instead, so only the follow gives up compression.
+            let hurried =
+                inline && entry.source == DataSource::Memory && rx.len() > rx.max_capacity() / 2;
             // Waiting for a slot would stall the drain until the follower is dropped.
             let permit = (data.len() >= INLINE_WIRE_SIZE)
                 .then(|| slots.clone().try_acquire_owned().ok())
@@ -175,7 +179,11 @@ pub(crate) fn encoded_with(
             if pending_tx.capacity() == 0 {
                 drain_stalled.notify_one();
             }
-            if pending_tx.send((entry, data, job, inline)).await.is_err() {
+            if pending_tx
+                .send((entry, data, job, inline, hurried))
+                .await
+                .is_err()
+            {
                 return;
             }
         }
@@ -190,9 +198,9 @@ pub(crate) fn encoded_with(
                 bytes,
             })
         };
-        while let Some((entry, data, job, inline)) = pending_rx.recv().await {
+        while let Some((entry, data, job, inline, hurried)) = pending_rx.recv().await {
             let len = data.len();
-            let mut skipped = len >= MIN_WIRE_SIZE && job.is_none() && !inline;
+            let mut skipped = len >= MIN_WIRE_SIZE && job.is_none() && (!inline || hurried);
             // A compression still running once the drain backs up is left
             // behind, as waiting for it would stall the drain too.
             let packed = match job {
@@ -204,12 +212,8 @@ pub(crate) fn encoded_with(
                         None
                     }
                 },
-                None if inline && pending_rx.len() < ENCODE_AHEAD / 2 => {
+                None if inline && !hurried => {
                     normfs_store::zstd_compress_at(&data, WIRE_LEVEL).ok()
-                }
-                None if inline => {
-                    skipped = true;
-                    None
                 }
                 None => None,
             };

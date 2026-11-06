@@ -158,26 +158,30 @@ async fn a_small_entry_compresses_without_a_slot() {
     assert_eq!(normfs_store::zstd_decompress(&packed).unwrap(), data);
 }
 
-#[tokio::test]
-async fn small_entries_go_raw_while_the_drain_is_behind() {
+async fn raw_entries(source: DataSource) -> usize {
     const ENTRIES: u64 = 64;
     let (tx, rx) = mpsc::channel(ENTRIES as usize);
     let mut out = encoded_with(rx, true, Arc::new(Semaphore::new(0)), quiet());
     let data = Bytes::from(vec![7u8; 2048]);
     for i in 0..ENTRIES {
-        tx.send(ReadEntry::new(
-            UintN::from(i),
-            data.clone(),
-            DataSource::Memory,
-        ))
-        .await
-        .unwrap();
+        tx.send(ReadEntry::new(UintN::from(i), data.clone(), source))
+            .await
+            .unwrap();
     }
     drop(tx);
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     let mut raw = 0;
     while let Some((_, (_, encoding))) = out.recv().await {
         raw += usize::from(encoding == Encoding::EncNone);
     }
-    assert!(raw > 0, "every entry compressed with the drain behind");
+    raw
+}
+
+#[tokio::test]
+async fn a_follow_falling_behind_sends_small_entries_raw() {
+    assert!(raw_entries(DataSource::Memory).await > 0);
+}
+
+#[tokio::test]
+async fn a_read_from_disk_compresses_every_small_entry() {
+    assert_eq!(raw_entries(DataSource::DiskStore).await, 0);
 }
