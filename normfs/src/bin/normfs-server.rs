@@ -216,13 +216,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server = normfs::server::Server::new(tcp_addr, normfs.clone()).await?;
     log::info!("NormFS TCP server listening on {}", tcp_addr);
 
-    // Handle Ctrl+C for graceful shutdown
     let normfs_for_shutdown = normfs.clone();
     tokio::spawn(async move {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("Failed to listen for Ctrl+C");
-        log::info!("Received Ctrl+C, shutting down...");
+        stop_signal().await;
+        log::info!("Received a stop signal, shutting down...");
         log::info!("Closing NormFS (writing WAL)...");
         if let Err(e) = normfs_for_shutdown.close().await {
             log::error!("Error during NormFS close: {}", e);
@@ -234,4 +231,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     server.run().await?;
 
     Ok(())
+}
+
+/// Ctrl+C, or SIGTERM from a service manager: without a close, a store-only
+/// queue loses its open page.
+async fn stop_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut term = signal(SignalKind::terminate()).expect("Failed to listen for SIGTERM");
+        tokio::select! {
+            r = tokio::signal::ctrl_c() => r.expect("Failed to listen for Ctrl+C"),
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c()
+        .await
+        .expect("Failed to listen for Ctrl+C");
 }
