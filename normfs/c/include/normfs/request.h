@@ -11,7 +11,8 @@ enum normfs_request_status {
 	NORMFS_REQUEST_ERR_OVERFLOW = 2,
 	NORMFS_REQUEST_ERR_BAD_WIRE_TYPE = 3,
 	NORMFS_REQUEST_ERR_BAD_FIELD_NUM = 4,
-	NORMFS_REQUEST_ERR_NO_SPACE = 5
+	NORMFS_REQUEST_ERR_NO_SPACE = 5,
+	NORMFS_REQUEST_ERR_REPEATED = 6
 };
 
 struct normfs_request_span {
@@ -46,6 +47,8 @@ struct normfs_request {
  * Decodes a ClientRequest. packets and encodings receive WriteRequest.packets
  * and ReadRequest.accept_encodings; when either has more entries than its
  * capacity the status is NO_SPACE and req still carries the full counts.
+ * A setup, ping, write or read given twice is REPEATED: protobuf merges
+ * the two, the readers keep only the last.
  */
 int normfs_request_decode(const uint8_t *buf, size_t len,
     struct normfs_request *req,
