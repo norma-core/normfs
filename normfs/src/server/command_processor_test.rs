@@ -90,12 +90,10 @@ async fn a_follow_keeps_draining_while_every_slot_is_taken() {
         }
         raw
     });
+    // Large enough to need a slot; smaller ones compress on the sending task.
+    let data = Bytes::from(vec![7u8; 64 * 1024]);
     for i in 0..ENTRIES {
-        let entry = ReadEntry::new(
-            UintN::from(i),
-            Bytes::from(vec![7u8; 2048]),
-            DataSource::Memory,
-        );
+        let entry = ReadEntry::new(UintN::from(i), data.clone(), DataSource::Memory);
         tx.try_send(entry)
             .unwrap_or_else(|_| panic!("the follow's channel filled at entry {i}"));
         tokio::task::yield_now().await;
@@ -103,7 +101,7 @@ async fn a_follow_keeps_draining_while_every_slot_is_taken() {
     drop(tx);
     assert_eq!(reader.await.unwrap(), ENTRIES);
     let (events, entries, bytes) = *raw.0.lock().unwrap();
-    assert_eq!((entries, bytes), (ENTRIES, ENTRIES * 2048));
+    assert_eq!((entries, bytes), (ENTRIES, ENTRIES * 64 * 1024));
     assert!(events <= 2, "{events} events for one read under 30 seconds");
 }
 
@@ -140,4 +138,50 @@ fn a_follow_keeps_draining_past_a_stuck_compression() {
         assert_eq!(raw.0.lock().unwrap().1, ENTRIES);
     });
     release.send(()).unwrap();
+}
+
+#[tokio::test]
+async fn a_small_entry_compresses_without_a_slot() {
+    let (tx, rx) = mpsc::channel(4);
+    let mut out = encoded_with(rx, true, Arc::new(Semaphore::new(0)), quiet());
+    let data = Bytes::from(vec![7u8; 2048]);
+    tx.send(ReadEntry::new(
+        UintN::from(0u64),
+        data.clone(),
+        DataSource::Memory,
+    ))
+    .await
+    .unwrap();
+    drop(tx);
+    let (_, (packed, encoding)) = out.recv().await.unwrap();
+    assert_eq!(encoding, Encoding::EncZstd);
+    assert_eq!(normfs_store::zstd_decompress(&packed).unwrap(), data);
+}
+
+async fn raw_entries(source: DataSource) -> usize {
+    const ENTRIES: u64 = 64;
+    let (tx, rx) = mpsc::channel(ENTRIES as usize);
+    let mut out = encoded_with(rx, true, Arc::new(Semaphore::new(0)), quiet());
+    let data = Bytes::from(vec![7u8; 2048]);
+    for i in 0..ENTRIES {
+        tx.send(ReadEntry::new(UintN::from(i), data.clone(), source))
+            .await
+            .unwrap();
+    }
+    drop(tx);
+    let mut raw = 0;
+    while let Some((_, (_, encoding))) = out.recv().await {
+        raw += usize::from(encoding == Encoding::EncNone);
+    }
+    raw
+}
+
+#[tokio::test]
+async fn a_follow_falling_behind_sends_small_entries_raw() {
+    assert!(raw_entries(DataSource::Memory).await > 0);
+}
+
+#[tokio::test]
+async fn a_read_from_disk_compresses_every_small_entry() {
+    assert_eq!(raw_entries(DataSource::DiskStore).await, 0);
 }
