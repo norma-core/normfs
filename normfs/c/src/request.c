@@ -302,13 +302,46 @@ normfs_request_fill(struct normfs_request *req, size_t len,
 }
 
 /*@ requires len == 0 || \valid_read(buf + (0 .. len - 1));
+    assigns \nothing;
+    ensures \result == 0 || \result == 1;
+*/
+static int
+normfs_request_repeats(const uint8_t *buf, size_t len)
+{
+	unsigned seen = 0u;
+	size_t offset = 0u;
+	/*@ loop invariant 0 <= offset <= len;
+	    loop assigns offset, seen;
+	    loop variant len - offset;
+	*/
+	while (offset < len) {
+		struct gremlin_varint32_decode_result t =
+			gremlin_varint32_decode(buf + offset, len - offset);
+		if (t.error != GREMLIN_OK) return 0;
+		offset += t.consumed;
+		unsigned bit = t.value == 10u ? 1u : t.value == 18u ? 2u :
+		    t.value == 82u ? 4u : t.value == 90u ? 8u : 0u;
+		if ((seen & bit) != 0u) return 1;
+		seen |= bit;
+		unsigned wt = (unsigned)(t.value % 8u);
+		if (wt == 6u || wt == 7u) return 0;
+		struct gremlin_skip_result sk =
+			gremlin_skip_data(buf + offset, len - offset, (enum gremlin_wire_type)wt);
+		if (sk.error != GREMLIN_OK) return 0;
+		offset += sk.consumed;
+	}
+	return 0;
+}
+
+/*@ requires len == 0 || \valid_read(buf + (0 .. len - 1));
     requires \valid(req);
     requires packets_cap == 0 || \valid(packets + (0 .. packets_cap - 1));
     requires encodings_cap == 0 || \valid(encodings + (0 .. encodings_cap - 1));
     requires \separated(req, packets + (0 .. packets_cap - 1),
                         encodings + (0 .. encodings_cap - 1));
     assigns *req, packets[0 .. packets_cap - 1], encodings[0 .. encodings_cap - 1];
-    ensures normfs_request_status(\result) || \result == NORMFS_REQUEST_ERR_NO_SPACE;
+    ensures normfs_request_status(\result) || \result == NORMFS_REQUEST_ERR_NO_SPACE ||
+            \result == NORMFS_REQUEST_ERR_REPEATED;
     ensures \result == NORMFS_REQUEST_OK || \result == NORMFS_REQUEST_ERR_NO_SPACE ==>
               (req->has_read_offset_id != 0 ==> req->has_read_offset != 0) &&
               (req->has_read_offset != 0 ==> req->has_read != 0);
@@ -339,6 +372,7 @@ normfs_request_decode(const uint8_t *buf, size_t len,
 
 	err = normfs_ClientRequest_reader_init(&r, buf, len);
 	if (err != GREMLIN_OK) return (int)err;
+	if (normfs_request_repeats(buf, len)) return NORMFS_REQUEST_ERR_REPEATED;
 	has_setup = r._has.setup;
 	has_ping = r._has.ping;
 	has_write = r._has.write;
