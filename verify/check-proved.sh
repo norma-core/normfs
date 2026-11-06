@@ -38,9 +38,11 @@ if [ "$failed" -ne 0 ]; then
 	exit 1
 fi
 
-# Without smoke tests a vacuous precondition reports green.
+# Without smoke tests a vacuous precondition reports green. A report of lemmas
+# alone, goals tied to no function, has no code to be vacuous about.
 smoke=$(jq '[.[] | select(.smoke == true)] | length' "$report")
-if [ "$smoke" -eq 0 ]; then
+lemmas=$(jq '[.[] | select((has("function") | not) and (.goal | test("^typed_lemma_")))] | length' "$report")
+if [ "$smoke" -eq 0 ] && [ "$lemmas" -ne "$total" ]; then
 	echo "check-proved: no smoke tests in $report; run with -wp-smoke-tests" >&2
 	exit 1
 fi
