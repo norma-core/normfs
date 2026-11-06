@@ -224,7 +224,6 @@ if(FRAMAC)
         normfs_SetupResponse_tsize_nonneg
         normfs_PingRequest_tsize_nonneg
         normfs_PingResponse_tsize_nonneg
-        normfs_WriteResponse_ids_term_null
         normfs_WriteResponse_ids_mono
         normfs_WriteResponse_tsize_nonneg
         normfs_ReadResponse_tsize_nonneg
