@@ -180,6 +180,7 @@ if(FRAMAC)
         normfs_Offset_reader_get_type
         normfs_Id_reader_init
         normfs_request_span
+        normfs_request_repeats
         normfs_request_decode_setup
         normfs_request_decode_ping
         normfs_request_decode_write

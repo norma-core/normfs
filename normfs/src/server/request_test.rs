@@ -146,8 +146,32 @@ fn test_rejects_what_prost_rejects() {
 }
 
 #[test]
+fn test_repeated_write_is_refused() {
+    let first = ClientRequest {
+        write: Some(write(7, "q", 1)),
+        ..Default::default()
+    };
+    let second = ClientRequest {
+        write: Some(write(7, "q", 2)),
+        ..Default::default()
+    };
+    let mut buf = first.encode_to_vec();
+    buf.extend(second.encode_to_vec());
+    assert_eq!(
+        ClientRequest::decode(&buf[..])
+            .unwrap()
+            .write
+            .unwrap()
+            .packets
+            .len(),
+        3
+    );
+    assert_eq!(decode_request(&buf), Err(RequestError::Repeated));
+}
+
+#[test]
 fn test_differs_from_prost() {
-    // setup { version: 1 } then an empty setup: prost merges, gremlin keeps the last one
+    // setup { version: 1 } then an empty setup: prost merges, the readers would keep the last
     let twice = [0x0a, 0x02, 0x08, 0x01, 0x0a, 0x00];
     assert_eq!(
         ClientRequest::decode(&twice[..])
@@ -157,7 +181,7 @@ fn test_differs_from_prost() {
             .version,
         1
     );
-    assert_eq!(decode_request(&twice).unwrap().setup.unwrap().version, 0);
+    assert_eq!(decode_request(&twice), Err(RequestError::Repeated));
 
     // ping sent as a varint is skipped as an unknown field
     let ping = [0x10, 0x01];
