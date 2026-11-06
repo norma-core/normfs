@@ -285,23 +285,45 @@ if(FRAMAC)
         normfs_Id_cached_size
         normfs_Id_size
         normfs_Id_encode_at
+        normfs_Id_encode_raw_at
         normfs_SetupResponse_cached_size
         normfs_SetupResponse_size
         normfs_SetupResponse_encode_at
+        normfs_SetupResponse_encode_instance_id_at
+        normfs_SetupResponse_encode_instance_id_bytes_at
+        normfs_SetupResponse_encode_version_at
         normfs_PingRequest_cached_size
         normfs_PingRequest_size
         normfs_PingRequest_encode_at
+        normfs_PingRequest_encode_client_timestamp_ns_at
+        normfs_PingRequest_encode_sequence_at
         normfs_PingResponse_cached_size
         normfs_PingResponse_size
         normfs_PingResponse_encode_at
+        normfs_PingResponse_encode_local_stamp_ns_at
+        normfs_PingResponse_encode_monotonic_stamp_ns_at
+        normfs_PingResponse_encode_request_at
         normfs_WriteResponse_cached_size
         normfs_WriteResponse_size
         normfs_WriteResponse_encode_at
+        normfs_WriteResponse_encode_ids_at
+        normfs_WriteResponse_encode_result_at
+        normfs_WriteResponse_encode_write_id_at
         normfs_ReadResponse_cached_size
         normfs_ReadResponse_size
         normfs_ReadResponse_encode_at
+        normfs_ReadResponse_encode_data_at
+        normfs_ReadResponse_encode_data_source_at
+        normfs_ReadResponse_encode_encoding_at
+        normfs_ReadResponse_encode_id_at
+        normfs_ReadResponse_encode_read_id_at
+        normfs_ReadResponse_encode_result_at
         normfs_ServerResponse_size
         normfs_ServerResponse_encode_at
+        normfs_ServerResponse_encode_ping_at
+        normfs_ServerResponse_encode_read_at
+        normfs_ServerResponse_encode_setup_at
+        normfs_ServerResponse_encode_write_at
         normfs_response_size
         normfs_response_encode)
     string(REPLACE ";" "," NORMFS_RESPONSE_WP_FCTS_ARG "${NORMFS_RESPONSE_WP_FCTS}")
