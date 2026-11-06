@@ -51,7 +51,7 @@ normfs_SetupRequest_cached_size(const normfs_SetupRequest *m)
 	return m->_size;
 }
 
-/*@
+/*@ axiomatic normfs_SetupRequest_tsize_ax {
     logic integer normfs_SetupRequest_version_size{L}(normfs_SetupRequest *m) =
       m->version != 0 ? 1 + varint_size(m->version) : 0;
 
@@ -93,15 +93,18 @@ normfs_SetupRequest_cached_size(const normfs_SetupRequest *m)
 
     lemma normfs_SetupRequest_bufsep_sub{L}: \forall normfs_SetupRequest *m, uint8_t *b, integer lo, hi, lo2, hi2;
       lo <= lo2 ==> hi2 <= hi ==> normfs_SetupRequest_bufsep(m, b, lo, hi) ==> normfs_SetupRequest_bufsep(m, b, lo2, hi2);
+  }
 */
 
 /*@ ghost
   /@ requires normfs_SetupRequest_valid(m);
      assigns \nothing;
+     ensures normfs_SetupRequest_version_size(m) >= 0;
      ensures normfs_SetupRequest_tsize(m) >= 0;
   @/
   void normfs_SetupRequest_tsize_nonneg(normfs_SetupRequest *m)
   {
+    /@ assert normfs_SetupRequest_version_size(m) >= 0; @/
   }
 */
 
@@ -118,21 +121,42 @@ normfs_SetupRequest_size(const normfs_SetupRequest *m)
 	size_t s = 0;
 	/*@ ghost normfs_SetupRequest_tsize_nonneg((normfs_SetupRequest *)m); */
 	/*@ ghost _A0: ; */
+	/*@ assert s + \at(normfs_SetupRequest_version_size(m), Pre) <= \at(normfs_SetupRequest_tsize(m), Pre); */
 	if (m->version != 0) {
 		s += 1
 		   + gremlin_varint_size(m->version);
 	}
 	/*@ assert s == \at(s, _A0) + \at(normfs_SetupRequest_version_size(m), Pre); */
-	/*@ ghost _A1: ; */
 	/*@ assert s == \at(normfs_SetupRequest_tsize(m), Pre); */
 	/*@ assert normfs_SetupRequest_dsame{Pre,Here}(m); */
 	/*@ ghost _Aw: ; */
 	((normfs_SetupRequest *)m)->_size = s;
-	/*@ assert normfs_SetupRequest_own{_Aw,Here}(m); */
+	/*@ assert \at(m->version, _Aw) == m->version; */
+	/*@ assert normfs_SetupRequest_nown{_Aw,Here}((normfs_SetupRequest *)m); */
+	/*@ assert normfs_SetupRequest_own{_Aw,Here}((normfs_SetupRequest *)m); */
 	/*@ assert normfs_SetupRequest_dsame{_Aw,Here}(m); */
 	/*@ assert normfs_SetupRequest_dsame{Pre,Here}(m); */
 	/*@ assert normfs_SetupRequest_tsize(m) == \at(normfs_SetupRequest_tsize(m), Pre); */
 	return s;
+}
+
+/*@ requires normfs_SetupRequest_valid(m) && normfs_SetupRequest_sized(m);
+    requires _off + normfs_SetupRequest_version_size(m) <= 0x7fffffffffffffff;
+    requires normfs_SetupRequest_version_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_SetupRequest_version_size(m) - 1));
+    requires normfs_SetupRequest_bufsep(m, _buf, _off, _off + normfs_SetupRequest_version_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_SetupRequest_version_size(m) - 1];
+    ensures \result == \old(_off + normfs_SetupRequest_version_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_SetupRequest_encode_version_at(const normfs_SetupRequest *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_SetupRequest_tsize_nonneg((normfs_SetupRequest *)m); */
+	/*@ ghost _A0: ; */
+	if (m->version != 0) {
+		_off = gremlin_varint32_encode_at(_buf, _off, 8u);
+		_off = gremlin_varint_encode_at(_buf, _off, m->version);
+	}
+	return _off;
 }
 
 /*@ requires normfs_SetupRequest_valid(m) && normfs_SetupRequest_sized(m);
@@ -147,12 +171,9 @@ normfs_SetupRequest_encode_at(const normfs_SetupRequest *m, uint8_t * __restrict
 {
 	/*@ ghost normfs_SetupRequest_tsize_nonneg((normfs_SetupRequest *)m); */
 	/*@ ghost _A0: ; */
-	if (m->version != 0) {
-		_off = gremlin_varint32_encode_at(_buf, _off, 8u);
-		_off = gremlin_varint_encode_at(_buf, _off, m->version);
-	}
+	/*@ assert _off + \at(normfs_SetupRequest_version_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
+	_off = normfs_SetupRequest_encode_version_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A0) + \at(normfs_SetupRequest_version_size(m), Pre); */
-	/*@ ghost _A1: ; */
 	/*@ assert _off == \at(_off, Pre) + \at(normfs_SetupRequest_tsize(m), Pre); */
 	return _off;
 }
@@ -201,9 +222,8 @@ normfs_SetupRequest_reader_init(normfs_SetupRequest_reader *r, const uint8_t *sr
 {
 	*r = (normfs_SetupRequest_reader){ .src = src, .src_len = len };
 	size_t offset = 0;
-	/*@ loop invariant 0 <= offset <= len;
-	    loop invariant r->src == src && r->src_len == len;
-	    loop invariant normfs_SetupRequest_reader_ok(r, offset);
+	/*@ loop invariant offset_in: 0 <= offset <= len;
+	    loop invariant src_kept: r->src == src && r->src_len == len;
 	    loop assigns offset, *r;
 	    loop variant len - offset;
 	*/
@@ -236,6 +256,7 @@ normfs_SetupRequest_reader_init(normfs_SetupRequest_reader *r, const uint8_t *sr
 /*@ requires r == \null || \valid_read(r);
     assigns \nothing;
     ensures r != \null && r->_has.version ==> \result == r->version;
+    ensures !(r != \null && r->_has.version) ==> \result == 0;
 */
 static inline uint64_t
 normfs_SetupRequest_reader_get_version(const normfs_SetupRequest_reader *r)
@@ -260,15 +281,19 @@ normfs_PingRequest_cached_size(const normfs_PingRequest *m)
 	return m->_size;
 }
 
-/*@ predicate normfs_PingRequest_avoid_normfs_SetupRequest{L}(normfs_PingRequest *m, normfs_SetupRequest *p) =
+/*@ axiomatic normfs_PingRequest_avoid_normfs_SetupRequest_ax {
+    predicate normfs_PingRequest_avoid_normfs_SetupRequest{L}(normfs_PingRequest *m, normfs_SetupRequest *p) =
       \separated(p, m);
+  }
 */
 
-/*@ predicate normfs_SetupRequest_navoid_normfs_PingRequest{L}(normfs_SetupRequest *m, normfs_PingRequest *t) =
+/*@ axiomatic normfs_SetupRequest_navoid_normfs_PingRequest_ax {
+    predicate normfs_SetupRequest_navoid_normfs_PingRequest{L}(normfs_SetupRequest *m, normfs_PingRequest *t) =
       normfs_PingRequest_avoid_normfs_SetupRequest(t, m);
+  }
 */
 
-/*@
+/*@ axiomatic normfs_PingRequest_tsize_ax {
     logic integer normfs_PingRequest_sequence_size{L}(normfs_PingRequest *m) =
       m->sequence != 0 ? 1 + varint_size(m->sequence) : 0;
 
@@ -319,15 +344,20 @@ normfs_PingRequest_cached_size(const normfs_PingRequest *m)
 
     lemma normfs_PingRequest_bufsep_sub{L}: \forall normfs_PingRequest *m, uint8_t *b, integer lo, hi, lo2, hi2;
       lo <= lo2 ==> hi2 <= hi ==> normfs_PingRequest_bufsep(m, b, lo, hi) ==> normfs_PingRequest_bufsep(m, b, lo2, hi2);
+  }
 */
 
 /*@ ghost
   /@ requires normfs_PingRequest_valid(m);
      assigns \nothing;
+     ensures normfs_PingRequest_sequence_size(m) >= 0;
+     ensures normfs_PingRequest_client_timestamp_ns_size(m) >= 0;
      ensures normfs_PingRequest_tsize(m) >= 0;
   @/
   void normfs_PingRequest_tsize_nonneg(normfs_PingRequest *m)
   {
+    /@ assert normfs_PingRequest_sequence_size(m) >= 0; @/
+    /@ assert normfs_PingRequest_client_timestamp_ns_size(m) >= 0; @/
   }
 */
 
@@ -344,27 +374,69 @@ normfs_PingRequest_size(const normfs_PingRequest *m)
 	size_t s = 0;
 	/*@ ghost normfs_PingRequest_tsize_nonneg((normfs_PingRequest *)m); */
 	/*@ ghost _A0: ; */
+	/*@ assert s + \at(normfs_PingRequest_sequence_size(m), Pre) <= \at(normfs_PingRequest_tsize(m), Pre); */
 	if (m->sequence != 0) {
 		s += 1
 		   + gremlin_varint_size(m->sequence);
 	}
 	/*@ assert s == \at(s, _A0) + \at(normfs_PingRequest_sequence_size(m), Pre); */
 	/*@ ghost _A1: ; */
+	/*@ assert s + \at(normfs_PingRequest_client_timestamp_ns_size(m), Pre) <= \at(normfs_PingRequest_tsize(m), Pre); */
 	if (m->client_timestamp_ns != 0) {
 		s += 1
 		   + gremlin_varint_size(m->client_timestamp_ns);
 	}
 	/*@ assert s == \at(s, _A1) + \at(normfs_PingRequest_client_timestamp_ns_size(m), Pre); */
-	/*@ ghost _A2: ; */
 	/*@ assert s == \at(normfs_PingRequest_tsize(m), Pre); */
 	/*@ assert normfs_PingRequest_dsame{Pre,Here}(m); */
 	/*@ ghost _Aw: ; */
 	((normfs_PingRequest *)m)->_size = s;
-	/*@ assert normfs_PingRequest_own{_Aw,Here}(m); */
+	/*@ assert \at(m->sequence, _Aw) == m->sequence; */
+	/*@ assert \at(m->client_timestamp_ns, _Aw) == m->client_timestamp_ns; */
+	/*@ assert normfs_PingRequest_nown{_Aw,Here}((normfs_PingRequest *)m); */
+	/*@ assert normfs_PingRequest_own{_Aw,Here}((normfs_PingRequest *)m); */
 	/*@ assert normfs_PingRequest_dsame{_Aw,Here}(m); */
 	/*@ assert normfs_PingRequest_dsame{Pre,Here}(m); */
 	/*@ assert normfs_PingRequest_tsize(m) == \at(normfs_PingRequest_tsize(m), Pre); */
 	return s;
+}
+
+/*@ requires normfs_PingRequest_valid(m) && normfs_PingRequest_sized(m);
+    requires _off + normfs_PingRequest_sequence_size(m) <= 0x7fffffffffffffff;
+    requires normfs_PingRequest_sequence_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_PingRequest_sequence_size(m) - 1));
+    requires normfs_PingRequest_bufsep(m, _buf, _off, _off + normfs_PingRequest_sequence_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_PingRequest_sequence_size(m) - 1];
+    ensures \result == \old(_off + normfs_PingRequest_sequence_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_PingRequest_encode_sequence_at(const normfs_PingRequest *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_PingRequest_tsize_nonneg((normfs_PingRequest *)m); */
+	/*@ ghost _A0: ; */
+	if (m->sequence != 0) {
+		_off = gremlin_varint32_encode_at(_buf, _off, 8u);
+		_off = gremlin_varint_encode_at(_buf, _off, m->sequence);
+	}
+	return _off;
+}
+
+/*@ requires normfs_PingRequest_valid(m) && normfs_PingRequest_sized(m);
+    requires _off + normfs_PingRequest_client_timestamp_ns_size(m) <= 0x7fffffffffffffff;
+    requires normfs_PingRequest_client_timestamp_ns_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_PingRequest_client_timestamp_ns_size(m) - 1));
+    requires normfs_PingRequest_bufsep(m, _buf, _off, _off + normfs_PingRequest_client_timestamp_ns_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_PingRequest_client_timestamp_ns_size(m) - 1];
+    ensures \result == \old(_off + normfs_PingRequest_client_timestamp_ns_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_PingRequest_encode_client_timestamp_ns_at(const normfs_PingRequest *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_PingRequest_tsize_nonneg((normfs_PingRequest *)m); */
+	/*@ ghost _A1: ; */
+	if (m->client_timestamp_ns != 0) {
+		_off = gremlin_varint32_encode_at(_buf, _off, 16u);
+		_off = gremlin_varint_encode_at(_buf, _off, m->client_timestamp_ns);
+	}
+	return _off;
 }
 
 /*@ requires normfs_PingRequest_valid(m) && normfs_PingRequest_sized(m);
@@ -379,18 +451,14 @@ normfs_PingRequest_encode_at(const normfs_PingRequest *m, uint8_t * __restrict__
 {
 	/*@ ghost normfs_PingRequest_tsize_nonneg((normfs_PingRequest *)m); */
 	/*@ ghost _A0: ; */
-	if (m->sequence != 0) {
-		_off = gremlin_varint32_encode_at(_buf, _off, 8u);
-		_off = gremlin_varint_encode_at(_buf, _off, m->sequence);
-	}
+	/*@ assert _off + \at(normfs_PingRequest_sequence_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
+	_off = normfs_PingRequest_encode_sequence_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A0) + \at(normfs_PingRequest_sequence_size(m), Pre); */
 	/*@ ghost _A1: ; */
-	if (m->client_timestamp_ns != 0) {
-		_off = gremlin_varint32_encode_at(_buf, _off, 16u);
-		_off = gremlin_varint_encode_at(_buf, _off, m->client_timestamp_ns);
-	}
+	/*@ assert normfs_PingRequest_own{Pre,Here}(m); */
+	/*@ assert _off + \at(normfs_PingRequest_client_timestamp_ns_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
+	_off = normfs_PingRequest_encode_client_timestamp_ns_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A1) + \at(normfs_PingRequest_client_timestamp_ns_size(m), Pre); */
-	/*@ ghost _A2: ; */
 	/*@ assert _off == \at(_off, Pre) + \at(normfs_PingRequest_tsize(m), Pre); */
 	return _off;
 }
@@ -441,9 +509,8 @@ normfs_PingRequest_reader_init(normfs_PingRequest_reader *r, const uint8_t *src,
 {
 	*r = (normfs_PingRequest_reader){ .src = src, .src_len = len };
 	size_t offset = 0;
-	/*@ loop invariant 0 <= offset <= len;
-	    loop invariant r->src == src && r->src_len == len;
-	    loop invariant normfs_PingRequest_reader_ok(r, offset);
+	/*@ loop invariant offset_in: 0 <= offset <= len;
+	    loop invariant src_kept: r->src == src && r->src_len == len;
 	    loop assigns offset, *r;
 	    loop variant len - offset;
 	*/
@@ -485,6 +552,7 @@ normfs_PingRequest_reader_init(normfs_PingRequest_reader *r, const uint8_t *src,
 /*@ requires r == \null || \valid_read(r);
     assigns \nothing;
     ensures r != \null && r->_has.sequence ==> \result == r->sequence;
+    ensures !(r != \null && r->_has.sequence) ==> \result == 0;
 */
 static inline uint64_t
 normfs_PingRequest_reader_get_sequence(const normfs_PingRequest_reader *r)
@@ -496,6 +564,7 @@ normfs_PingRequest_reader_get_sequence(const normfs_PingRequest_reader *r)
 /*@ requires r == \null || \valid_read(r);
     assigns \nothing;
     ensures r != \null && r->_has.client_timestamp_ns ==> \result == r->client_timestamp_ns;
+    ensures !(r != \null && r->_has.client_timestamp_ns) ==> \result == 0;
 */
 static inline uint64_t
 normfs_PingRequest_reader_get_client_timestamp_ns(const normfs_PingRequest_reader *r)
@@ -522,25 +591,34 @@ normfs_WriteRequest_cached_size(const normfs_WriteRequest *m)
 	return m->_size;
 }
 
-/*@ predicate normfs_WriteRequest_avoid_normfs_SetupRequest{L}(normfs_WriteRequest *m, normfs_SetupRequest *p) =
+/*@ axiomatic normfs_WriteRequest_avoid_normfs_SetupRequest_ax {
+    predicate normfs_WriteRequest_avoid_normfs_SetupRequest{L}(normfs_WriteRequest *m, normfs_SetupRequest *p) =
       \separated(p, m) &&
       (m->packets_count == 0 || \separated(p, m->packets + (0 .. m->packets_count - 1)));
+  }
 */
 
-/*@ predicate normfs_WriteRequest_avoid_normfs_PingRequest{L}(normfs_WriteRequest *m, normfs_PingRequest *p) =
+/*@ axiomatic normfs_WriteRequest_avoid_normfs_PingRequest_ax {
+    predicate normfs_WriteRequest_avoid_normfs_PingRequest{L}(normfs_WriteRequest *m, normfs_PingRequest *p) =
       \separated(p, m) &&
       (m->packets_count == 0 || \separated(p, m->packets + (0 .. m->packets_count - 1)));
+  }
 */
 
-/*@ predicate normfs_SetupRequest_navoid_normfs_WriteRequest{L}(normfs_SetupRequest *m, normfs_WriteRequest *t) =
+/*@ axiomatic normfs_SetupRequest_navoid_normfs_WriteRequest_ax {
+    predicate normfs_SetupRequest_navoid_normfs_WriteRequest{L}(normfs_SetupRequest *m, normfs_WriteRequest *t) =
       normfs_WriteRequest_avoid_normfs_SetupRequest(t, m);
+  }
 */
 
-/*@ predicate normfs_PingRequest_navoid_normfs_WriteRequest{L}(normfs_PingRequest *m, normfs_WriteRequest *t) =
+/*@ axiomatic normfs_PingRequest_navoid_normfs_WriteRequest_ax {
+    predicate normfs_PingRequest_navoid_normfs_WriteRequest{L}(normfs_PingRequest *m, normfs_WriteRequest *t) =
       normfs_WriteRequest_avoid_normfs_PingRequest(t, m);
+  }
 */
 
-/*@ logic integer normfs_WriteRequest_packets_sum{L}(normfs_WriteRequest *m, integer n) =
+/*@ axiomatic normfs_WriteRequest_packets_sum_ax {
+    logic integer normfs_WriteRequest_packets_sum{L}(normfs_WriteRequest *m, integer n) =
       n <= 0 ? 0 :
       normfs_WriteRequest_packets_sum(m, n - 1) + 1 + varint_size(m->packets[n - 1].len) + m->packets[n - 1].len;
 
@@ -548,11 +626,12 @@ normfs_WriteRequest_cached_size(const normfs_WriteRequest *m)
       \at(m->packets, L1) == \at(m->packets, L2) ==>
       (\forall integer k; 0 <= k < n ==> \at(m->packets[k].len, L1) == \at(m->packets[k].len, L2)) ==>
       \at(normfs_WriteRequest_packets_sum(m, n), L1) == \at(normfs_WriteRequest_packets_sum(m, n), L2);
+  }
 */
 /*@ \wp::strategy normfs_WriteRequest_packets_sum_ind: \tactic("Wp.induction", \pattern(0 <= n), \select(n)); */
 /*@ \wp::proof normfs_WriteRequest_packets_sum_ind: normfs_WriteRequest_packets_sum_frame; */
 
-/*@
+/*@ axiomatic normfs_WriteRequest_tsize_ax {
     logic integer normfs_WriteRequest_write_id_size{L}(normfs_WriteRequest *m) =
       m->write_id != 0 ? 1 + varint_size(m->write_id) : 0;
 
@@ -600,7 +679,10 @@ normfs_WriteRequest_cached_size(const normfs_WriteRequest *m)
 
     predicate normfs_WriteRequest_bufsep{L}(normfs_WriteRequest *m, uint8_t *b, integer lo, integer hi) =
       hi < lo || (\separated(b + (lo .. hi), m) &&
-      (m->packets_count == 0 || \separated(b + (lo .. hi), m->packets + (0 .. m->packets_count - 1))));
+      (m->queue_id.len == 0 || \separated(b + (lo .. hi), m->queue_id.data + (0 .. m->queue_id.len - 1))) &&
+      (m->packets_count == 0 || \separated(b + (lo .. hi), m->packets + (0 .. m->packets_count - 1))) &&
+      (\forall integer i; 0 <= i < m->packets_count ==> m->packets[i].len == 0 ||
+         \separated(b + (lo .. hi), m->packets[i].data + (0 .. m->packets[i].len - 1))));
 
     lemma normfs_WriteRequest_write_id_size_frame{L1,L2}: \forall normfs_WriteRequest *m;
       normfs_WriteRequest_dsame{L1,L2}(m) ==> \at(normfs_WriteRequest_write_id_size(m), L1) == \at(normfs_WriteRequest_write_id_size(m), L2);
@@ -622,6 +704,7 @@ normfs_WriteRequest_cached_size(const normfs_WriteRequest *m)
 
     lemma normfs_WriteRequest_bufsep_sub{L}: \forall normfs_WriteRequest *m, uint8_t *b, integer lo, hi, lo2, hi2;
       lo <= lo2 ==> hi2 <= hi ==> normfs_WriteRequest_bufsep(m, b, lo, hi) ==> normfs_WriteRequest_bufsep(m, b, lo2, hi2);
+  }
 */
 
 /*@ ghost
@@ -647,6 +730,9 @@ normfs_WriteRequest_cached_size(const normfs_WriteRequest *m)
 /*@ ghost
   /@ requires normfs_WriteRequest_valid(m);
      assigns \nothing;
+     ensures normfs_WriteRequest_write_id_size(m) >= 0;
+     ensures normfs_WriteRequest_queue_id_size(m) >= 0;
+     ensures normfs_WriteRequest_packets_size(m) >= 0;
      ensures \forall integer j; 0 <= j <= m->packets_count ==>
                0 <= normfs_WriteRequest_packets_sum(m, j) <= normfs_WriteRequest_packets_sum(m, m->packets_count);
      ensures normfs_WriteRequest_tsize(m) >= 0;
@@ -654,6 +740,9 @@ normfs_WriteRequest_cached_size(const normfs_WriteRequest *m)
   void normfs_WriteRequest_tsize_nonneg(normfs_WriteRequest *m)
   {
     normfs_WriteRequest_packets_mono(m);
+    /@ assert normfs_WriteRequest_write_id_size(m) >= 0; @/
+    /@ assert normfs_WriteRequest_queue_id_size(m) >= 0; @/
+    /@ assert normfs_WriteRequest_packets_size(m) >= 0; @/
   }
 */
 
@@ -670,12 +759,14 @@ normfs_WriteRequest_size(const normfs_WriteRequest *m)
 	size_t s = 0;
 	/*@ ghost normfs_WriteRequest_tsize_nonneg((normfs_WriteRequest *)m); */
 	/*@ ghost _A0: ; */
+	/*@ assert s + \at(normfs_WriteRequest_write_id_size(m), Pre) <= \at(normfs_WriteRequest_tsize(m), Pre); */
 	if (m->write_id != 0) {
 		s += 1
 		   + gremlin_varint_size(m->write_id);
 	}
 	/*@ assert s == \at(s, _A0) + \at(normfs_WriteRequest_write_id_size(m), Pre); */
 	/*@ ghost _A1: ; */
+	/*@ assert s + \at(normfs_WriteRequest_queue_id_size(m), Pre) <= \at(normfs_WriteRequest_tsize(m), Pre); */
 	if (m->queue_id.len > 0) {
 		s += 1
 		   + gremlin_varint_size(m->queue_id.len)
@@ -683,6 +774,7 @@ normfs_WriteRequest_size(const normfs_WriteRequest *m)
 	}
 	/*@ assert s == \at(s, _A1) + \at(normfs_WriteRequest_queue_id_size(m), Pre); */
 	/*@ ghost _A2: ; */
+	/*@ assert s + \at(normfs_WriteRequest_packets_size(m), Pre) <= \at(normfs_WriteRequest_tsize(m), Pre); */
 	/*@ loop invariant 0 <= _i <= m->packets_count;
 	    loop invariant \forall integer k; k == _i ==> s == \at(s, _A2) + \at(normfs_WriteRequest_packets_sum(m, k), Pre);
 	    loop assigns _i, s;
@@ -699,16 +791,91 @@ normfs_WriteRequest_size(const normfs_WriteRequest *m)
 		   + m->packets[_i].len;
 	}
 	/*@ assert s == \at(s, _A2) + \at(normfs_WriteRequest_packets_size(m), Pre); */
-	/*@ ghost _A3: ; */
 	/*@ assert s == \at(normfs_WriteRequest_tsize(m), Pre); */
 	/*@ assert normfs_WriteRequest_dsame{Pre,Here}(m); */
+	/*@ assert \forall integer q; 0 <= q < m->packets_count ==> &m->_size != &m->packets[q].len; */
 	/*@ ghost _Aw: ; */
 	((normfs_WriteRequest *)m)->_size = s;
-	/*@ assert normfs_WriteRequest_own{_Aw,Here}(m); */
+	/*@ assert \at(m->write_id, _Aw) == m->write_id; */
+	/*@ assert \at(m->queue_id.len, _Aw) == m->queue_id.len; */
+	/*@ assert \at(m->packets_count, _Aw) == m->packets_count; */
+	/*@ assert normfs_WriteRequest_nown{_Aw,Here}((normfs_WriteRequest *)m); */
+	/*@ assert \forall integer q; 0 <= q < \at(m->packets_count, _Aw) ==>
+	      \at(m->packets[q].len, _Aw) == m->packets[q].len && \at(m->packets[q].data, _Aw) == m->packets[q].data; */
+	/*@ assert normfs_WriteRequest_own{_Aw,Here}((normfs_WriteRequest *)m); */
 	/*@ assert normfs_WriteRequest_dsame{_Aw,Here}(m); */
 	/*@ assert normfs_WriteRequest_dsame{Pre,Here}(m); */
 	/*@ assert normfs_WriteRequest_tsize(m) == \at(normfs_WriteRequest_tsize(m), Pre); */
 	return s;
+}
+
+/*@ requires normfs_WriteRequest_valid(m) && normfs_WriteRequest_sized(m);
+    requires _off + normfs_WriteRequest_write_id_size(m) <= 0x7fffffffffffffff;
+    requires normfs_WriteRequest_write_id_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_WriteRequest_write_id_size(m) - 1));
+    requires normfs_WriteRequest_bufsep(m, _buf, _off, _off + normfs_WriteRequest_write_id_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_WriteRequest_write_id_size(m) - 1];
+    ensures \result == \old(_off + normfs_WriteRequest_write_id_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_WriteRequest_encode_write_id_at(const normfs_WriteRequest *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_WriteRequest_tsize_nonneg((normfs_WriteRequest *)m); */
+	/*@ ghost _A0: ; */
+	if (m->write_id != 0) {
+		_off = gremlin_varint32_encode_at(_buf, _off, 8u);
+		_off = gremlin_varint_encode_at(_buf, _off, m->write_id);
+	}
+	return _off;
+}
+
+/*@ requires normfs_WriteRequest_valid(m) && normfs_WriteRequest_sized(m);
+    requires _off + normfs_WriteRequest_queue_id_size(m) <= 0x7fffffffffffffff;
+    requires normfs_WriteRequest_queue_id_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_WriteRequest_queue_id_size(m) - 1));
+    requires normfs_WriteRequest_bufsep(m, _buf, _off, _off + normfs_WriteRequest_queue_id_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_WriteRequest_queue_id_size(m) - 1];
+    ensures \result == \old(_off + normfs_WriteRequest_queue_id_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_WriteRequest_encode_queue_id_at(const normfs_WriteRequest *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_WriteRequest_tsize_nonneg((normfs_WriteRequest *)m); */
+	/*@ ghost _A1: ; */
+	if (m->queue_id.len > 0) {
+		_off = gremlin_varint32_encode_at(_buf, _off, 18u);
+		_off = gremlin_varint_encode_at(_buf, _off, m->queue_id.len);
+		_off = gremlin_write_bytes_at(_buf, _off, m->queue_id.data, m->queue_id.len);
+	}
+	return _off;
+}
+
+/*@ requires normfs_WriteRequest_valid(m) && normfs_WriteRequest_sized(m);
+    requires _off + normfs_WriteRequest_packets_size(m) <= 0x7fffffffffffffff;
+    requires normfs_WriteRequest_packets_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_WriteRequest_packets_size(m) - 1));
+    requires normfs_WriteRequest_bufsep(m, _buf, _off, _off + normfs_WriteRequest_packets_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_WriteRequest_packets_size(m) - 1];
+    ensures \result == \old(_off + normfs_WriteRequest_packets_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_WriteRequest_encode_packets_at(const normfs_WriteRequest *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_WriteRequest_tsize_nonneg((normfs_WriteRequest *)m); */
+	/*@ ghost _A2: ; */
+	/*@ loop invariant 0 <= _i <= m->packets_count;
+	    loop invariant \forall integer k; k == _i ==> _off == \at(_off, _A2) + \at(normfs_WriteRequest_packets_sum(m, k), Pre);
+	    loop assigns _i, _off, _buf[\at(_off, _A2) .. \at(_off, _A2) + \at(normfs_WriteRequest_packets_size(m), Pre) - 1];
+	    loop variant m->packets_count - _i;
+	*/
+	for (size_t _i = 0; _i < m->packets_count; _i++) {
+		/*@ assert \forall integer k; k == _i ==>
+		      m->packets[k].len == \at(m->packets[k].len, Pre) &&
+		      \at(normfs_WriteRequest_packets_sum(m, k + 1), Pre) == \at(normfs_WriteRequest_packets_sum(m, k), Pre) + 1 +
+		        varint_size(\at(m->packets[k].len, Pre)) + \at(m->packets[k].len, Pre) &&
+		      \at(normfs_WriteRequest_packets_sum(m, k + 1), Pre) <= \at(normfs_WriteRequest_packets_sum(m, m->packets_count), Pre); */
+		_off = gremlin_varint32_encode_at(_buf, _off, 82u);
+		_off = gremlin_varint_encode_at(_buf, _off, m->packets[_i].len);
+		_off = gremlin_write_bytes_at(_buf, _off, m->packets[_i].data, m->packets[_i].len);
+	}
+	return _off;
 }
 
 /*@ requires normfs_WriteRequest_valid(m) && normfs_WriteRequest_sized(m);
@@ -723,36 +890,19 @@ normfs_WriteRequest_encode_at(const normfs_WriteRequest *m, uint8_t * __restrict
 {
 	/*@ ghost normfs_WriteRequest_tsize_nonneg((normfs_WriteRequest *)m); */
 	/*@ ghost _A0: ; */
-	if (m->write_id != 0) {
-		_off = gremlin_varint32_encode_at(_buf, _off, 8u);
-		_off = gremlin_varint_encode_at(_buf, _off, m->write_id);
-	}
+	/*@ assert _off + \at(normfs_WriteRequest_write_id_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
+	_off = normfs_WriteRequest_encode_write_id_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A0) + \at(normfs_WriteRequest_write_id_size(m), Pre); */
 	/*@ ghost _A1: ; */
-	if (m->queue_id.len > 0) {
-		_off = gremlin_varint32_encode_at(_buf, _off, 18u);
-		_off = gremlin_varint_encode_at(_buf, _off, m->queue_id.len);
-		_off = gremlin_write_bytes_at(_buf, _off, m->queue_id.data, m->queue_id.len);
-	}
+	/*@ assert normfs_WriteRequest_own{Pre,Here}(m); */
+	/*@ assert _off + \at(normfs_WriteRequest_queue_id_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
+	_off = normfs_WriteRequest_encode_queue_id_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A1) + \at(normfs_WriteRequest_queue_id_size(m), Pre); */
 	/*@ ghost _A2: ; */
-	/*@ loop invariant 0 <= _i <= m->packets_count;
-	    loop invariant \forall integer k; k == _i ==> _off == \at(_off, _A2) + \at(normfs_WriteRequest_packets_sum(m, k), Pre);
-	    loop assigns _i, _off, _buf[\at(_off, Pre) .. \at(_off, Pre) + \at(m->_size, Pre) - 1];
-	    loop variant m->packets_count - _i;
-	*/
-	for (size_t _i = 0; _i < m->packets_count; _i++) {
-		/*@ assert \forall integer k; k == _i ==>
-		      m->packets[k].len == \at(m->packets[k].len, Pre) &&
-		      \at(normfs_WriteRequest_packets_sum(m, k + 1), Pre) == \at(normfs_WriteRequest_packets_sum(m, k), Pre) + 1 +
-		        varint_size(\at(m->packets[k].len, Pre)) + \at(m->packets[k].len, Pre) &&
-		      \at(normfs_WriteRequest_packets_sum(m, k + 1), Pre) <= \at(normfs_WriteRequest_packets_sum(m, m->packets_count), Pre); */
-		_off = gremlin_varint32_encode_at(_buf, _off, 82u);
-		_off = gremlin_varint_encode_at(_buf, _off, m->packets[_i].len);
-		_off = gremlin_write_bytes_at(_buf, _off, m->packets[_i].data, m->packets[_i].len);
-	}
+	/*@ assert normfs_WriteRequest_own{Pre,Here}(m); */
+	/*@ assert _off + \at(normfs_WriteRequest_packets_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
+	_off = normfs_WriteRequest_encode_packets_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A2) + \at(normfs_WriteRequest_packets_size(m), Pre); */
-	/*@ ghost _A3: ; */
 	/*@ assert _off == \at(_off, Pre) + \at(normfs_WriteRequest_tsize(m), Pre); */
 	return _off;
 }
@@ -786,9 +936,13 @@ typedef struct normfs_WriteRequest_reader {
 	size_t	packets_first_offset;
 } normfs_WriteRequest_reader;
 
+/*@ predicate normfs_WriteRequest_reader_spans{L}(normfs_WriteRequest_reader *r, uint8_t *s, integer n) =
+      (r->_has.queue_id ==> gremlin_span_at((uint8_t *)r->queue_id.data, r->queue_id.len, s, n));
+*/
+
 /*@ predicate normfs_WriteRequest_reader_ok{L}(normfs_WriteRequest_reader *r, integer n) =
       r->src_len >= n &&
-      (r->_has.queue_id ==> gremlin_span_in(r->queue_id, (uint8_t *)r->src, n)) &&
+      normfs_WriteRequest_reader_spans(r, (uint8_t *)r->src, n) &&
       r->packets_count <= n &&
       (r->packets_count > 0 ==> r->packets_first_offset < n);
 */
@@ -809,9 +963,10 @@ normfs_WriteRequest_reader_init(normfs_WriteRequest_reader *r, const uint8_t *sr
 {
 	*r = (normfs_WriteRequest_reader){ .src = src, .src_len = len };
 	size_t offset = 0;
-	/*@ loop invariant 0 <= offset <= len;
-	    loop invariant r->src == src && r->src_len == len;
-	    loop invariant normfs_WriteRequest_reader_ok(r, offset);
+	/*@ loop invariant offset_in: 0 <= offset <= len;
+	    loop invariant src_kept: r->src == src && r->src_len == len;
+	    loop invariant normfs_WriteRequest_reader_spans: normfs_WriteRequest_reader_spans(r, (uint8_t *)src, len);
+	    loop invariant count_packets: r->packets_count <= offset && (r->packets_count > 0 ==> r->packets_first_offset < offset);
 	    loop assigns offset, *r;
 	    loop variant len - offset;
 	*/
@@ -831,10 +986,12 @@ normfs_WriteRequest_reader_init(normfs_WriteRequest_reader *r, const uint8_t *sr
 		}
 		if (t.value == 18u /* field 2, GREMLIN_WIRE_LEN_PREFIX */) {
 			struct gremlin_bytes_decode_result d =
-				gremlin_bytes_decode(src + offset, len - offset);
+				gremlin_bytes_decode_at(src, offset, len);
 			if (d.error != GREMLIN_OK) return d.error;
 			offset += d.consumed;
-			r->queue_id = d.bytes;
+			r->queue_id.data = d.bytes.data;
+			r->queue_id.len = d.bytes.len;
+			/*@ assert gremlin_span_at((uint8_t *)r->queue_id.data, r->queue_id.len, (uint8_t *)src, len); */
 			r->_has.queue_id = 1;
 			continue;
 		}
@@ -865,6 +1022,7 @@ normfs_WriteRequest_reader_init(normfs_WriteRequest_reader *r, const uint8_t *sr
 /*@ requires r == \null || \valid_read(r);
     assigns \nothing;
     ensures r != \null && r->_has.write_id ==> \result == r->write_id;
+    ensures !(r != \null && r->_has.write_id) ==> \result == 0;
 */
 static inline uint64_t
 normfs_WriteRequest_reader_get_write_id(const normfs_WriteRequest_reader *r)
@@ -900,6 +1058,7 @@ typedef struct normfs_WriteRequest_reader_packets_iter {
 /*@ requires r == \null || \valid_read(r);
     assigns \nothing;
     ensures r != \null ==> \result == r->packets_count;
+    ensures r == \null ==> \result == 0;
 */
 static inline size_t
 normfs_WriteRequest_reader_packets_count(const normfs_WriteRequest_reader *r)
@@ -937,6 +1096,8 @@ normfs_WriteRequest_reader_packets_begin(const normfs_WriteRequest_reader *r)
     assigns *it, *out;
     ensures normfs_WriteRequest_reader_packets_iter_ok(*it);
     ensures it->src == \old(it->src) && it->src_len == \old(it->src_len);
+    ensures \old(it->count_remaining) > 0 && \result == GREMLIN_OK ==>
+              it->count_remaining == \old(it->count_remaining) - 1;
     ensures \result == GREMLIN_OK ==>
               out->len == 0 || gremlin_span_in(*out, (uint8_t *)it->src, it->src_len);
     ensures \result == GREMLIN_OK || \result == GREMLIN_ERROR_TRUNCATED ||
@@ -993,35 +1154,49 @@ normfs_Id_cached_size(const normfs_Id *m)
 	return m->_size;
 }
 
-/*@ predicate normfs_Id_avoid_normfs_Encoding{L}(normfs_Id *m, normfs_Encoding *p, integer n) =
+/*@ axiomatic normfs_Id_avoid_normfs_Encoding_ax {
+    predicate normfs_Id_avoid_normfs_Encoding{L}(normfs_Id *m, normfs_Encoding *p, integer n) =
       n <= 0 || (\separated(p + (0 .. n - 1), m));
+  }
 */
 
-/*@ predicate normfs_Id_avoid_normfs_Id{L}(normfs_Id *m, normfs_Id *p) =
+/*@ axiomatic normfs_Id_avoid_normfs_Id_ax {
+    predicate normfs_Id_avoid_normfs_Id{L}(normfs_Id *m, normfs_Id *p) =
       \separated(p, m);
+  }
 */
 
-/*@ predicate normfs_Id_avoid_normfs_PingRequest{L}(normfs_Id *m, normfs_PingRequest *p) =
+/*@ axiomatic normfs_Id_avoid_normfs_PingRequest_ax {
+    predicate normfs_Id_avoid_normfs_PingRequest{L}(normfs_Id *m, normfs_PingRequest *p) =
       \separated(p, m);
+  }
 */
 
-/*@ predicate normfs_Id_avoid_normfs_SetupRequest{L}(normfs_Id *m, normfs_SetupRequest *p) =
+/*@ axiomatic normfs_Id_avoid_normfs_SetupRequest_ax {
+    predicate normfs_Id_avoid_normfs_SetupRequest{L}(normfs_Id *m, normfs_SetupRequest *p) =
       \separated(p, m);
+  }
 */
 
-/*@ predicate normfs_Id_avoid_normfs_WriteRequest{L}(normfs_Id *m, normfs_WriteRequest *p) =
+/*@ axiomatic normfs_Id_avoid_normfs_WriteRequest_ax {
+    predicate normfs_Id_avoid_normfs_WriteRequest{L}(normfs_Id *m, normfs_WriteRequest *p) =
       \separated(p, m);
+  }
 */
 
-/*@ predicate normfs_Id_avoid_bytes{L}(normfs_Id *m, struct gremlin_bytes *p, integer n) =
+/*@ axiomatic normfs_Id_avoid_bytes_ax {
+    predicate normfs_Id_avoid_bytes{L}(normfs_Id *m, struct gremlin_bytes *p, integer n) =
       n <= 0 || (\separated(p + (0 .. n - 1), m));
+  }
 */
 
-/*@ predicate normfs_Id_navoid_normfs_Id{L}(normfs_Id *m, normfs_Id *t) =
+/*@ axiomatic normfs_Id_navoid_normfs_Id_ax {
+    predicate normfs_Id_navoid_normfs_Id{L}(normfs_Id *m, normfs_Id *t) =
       normfs_Id_avoid_normfs_Id(t, m);
+  }
 */
 
-/*@
+/*@ axiomatic normfs_Id_tsize_ax {
     logic integer normfs_Id_raw_size{L}(normfs_Id *m) =
       m->raw.len > 0 ? 1 + varint_size(m->raw.len) + m->raw.len : 0;
 
@@ -1050,7 +1225,8 @@ normfs_Id_cached_size(const normfs_Id *m)
       (m->raw.len == 0 || \valid_read(m->raw.data + (0 .. m->raw.len - 1)));
 
     predicate normfs_Id_bufsep{L}(normfs_Id *m, uint8_t *b, integer lo, integer hi) =
-      hi < lo || (\separated(b + (lo .. hi), m));
+      hi < lo || (\separated(b + (lo .. hi), m) &&
+      (m->raw.len == 0 || \separated(b + (lo .. hi), m->raw.data + (0 .. m->raw.len - 1))));
 
     lemma normfs_Id_raw_size_frame{L1,L2}: \forall normfs_Id *m;
       normfs_Id_dsame{L1,L2}(m) ==> \at(normfs_Id_raw_size(m), L1) == \at(normfs_Id_raw_size(m), L2);
@@ -1066,6 +1242,19 @@ normfs_Id_cached_size(const normfs_Id *m)
 
     lemma normfs_Id_bufsep_sub{L}: \forall normfs_Id *m, uint8_t *b, integer lo, hi, lo2, hi2;
       lo <= lo2 ==> hi2 <= hi ==> normfs_Id_bufsep(m, b, lo, hi) ==> normfs_Id_bufsep(m, b, lo2, hi2);
+  }
+*/
+
+/*@ ghost
+  /@ requires normfs_Id_valid(m);
+     assigns \nothing;
+     ensures normfs_Id_raw_size(m) >= 0;
+     ensures normfs_Id_tsize(m) >= 0;
+  @/
+  void normfs_Id_tsize_nonneg(normfs_Id *m)
+  {
+    /@ assert normfs_Id_raw_size(m) >= 0; @/
+  }
 */
 
 /*@ ghost
@@ -1073,8 +1262,9 @@ normfs_Id_cached_size(const normfs_Id *m)
      assigns \nothing;
      ensures normfs_Id_tsize(m) >= 0;
   @/
-  void normfs_Id_tsize_nonneg(normfs_Id *m)
+  void normfs_Id_tsize_pos(normfs_Id *m)
   {
+    normfs_Id_tsize_nonneg(m);
   }
 */
 
@@ -1091,22 +1281,44 @@ normfs_Id_size(const normfs_Id *m)
 	size_t s = 0;
 	/*@ ghost normfs_Id_tsize_nonneg((normfs_Id *)m); */
 	/*@ ghost _A0: ; */
+	/*@ assert s + \at(normfs_Id_raw_size(m), Pre) <= \at(normfs_Id_tsize(m), Pre); */
 	if (m->raw.len > 0) {
 		s += 1
 		   + gremlin_varint_size(m->raw.len)
 		   + m->raw.len;
 	}
 	/*@ assert s == \at(s, _A0) + \at(normfs_Id_raw_size(m), Pre); */
-	/*@ ghost _A1: ; */
 	/*@ assert s == \at(normfs_Id_tsize(m), Pre); */
 	/*@ assert normfs_Id_dsame{Pre,Here}(m); */
 	/*@ ghost _Aw: ; */
 	((normfs_Id *)m)->_size = s;
-	/*@ assert normfs_Id_own{_Aw,Here}(m); */
+	/*@ assert \at(m->raw.len, _Aw) == m->raw.len; */
+	/*@ assert normfs_Id_nown{_Aw,Here}((normfs_Id *)m); */
+	/*@ assert normfs_Id_own{_Aw,Here}((normfs_Id *)m); */
 	/*@ assert normfs_Id_dsame{_Aw,Here}(m); */
 	/*@ assert normfs_Id_dsame{Pre,Here}(m); */
 	/*@ assert normfs_Id_tsize(m) == \at(normfs_Id_tsize(m), Pre); */
 	return s;
+}
+
+/*@ requires normfs_Id_valid(m) && normfs_Id_sized(m);
+    requires _off + normfs_Id_raw_size(m) <= 0x7fffffffffffffff;
+    requires normfs_Id_raw_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_Id_raw_size(m) - 1));
+    requires normfs_Id_bufsep(m, _buf, _off, _off + normfs_Id_raw_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_Id_raw_size(m) - 1];
+    ensures \result == \old(_off + normfs_Id_raw_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_Id_encode_raw_at(const normfs_Id *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_Id_tsize_nonneg((normfs_Id *)m); */
+	/*@ ghost _A0: ; */
+	if (m->raw.len > 0) {
+		_off = gremlin_varint32_encode_at(_buf, _off, 10u);
+		_off = gremlin_varint_encode_at(_buf, _off, m->raw.len);
+		_off = gremlin_write_bytes_at(_buf, _off, m->raw.data, m->raw.len);
+	}
+	return _off;
 }
 
 /*@ requires normfs_Id_valid(m) && normfs_Id_sized(m);
@@ -1121,13 +1333,9 @@ normfs_Id_encode_at(const normfs_Id *m, uint8_t * __restrict__ _buf, size_t _off
 {
 	/*@ ghost normfs_Id_tsize_nonneg((normfs_Id *)m); */
 	/*@ ghost _A0: ; */
-	if (m->raw.len > 0) {
-		_off = gremlin_varint32_encode_at(_buf, _off, 10u);
-		_off = gremlin_varint_encode_at(_buf, _off, m->raw.len);
-		_off = gremlin_write_bytes_at(_buf, _off, m->raw.data, m->raw.len);
-	}
+	/*@ assert _off + \at(normfs_Id_raw_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
+	_off = normfs_Id_encode_raw_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A0) + \at(normfs_Id_raw_size(m), Pre); */
-	/*@ ghost _A1: ; */
 	/*@ assert _off == \at(_off, Pre) + \at(normfs_Id_tsize(m), Pre); */
 	return _off;
 }
@@ -1156,9 +1364,13 @@ typedef struct normfs_Id_reader {
 	struct gremlin_bytes	raw;
 } normfs_Id_reader;
 
+/*@ predicate normfs_Id_reader_spans{L}(normfs_Id_reader *r, uint8_t *s, integer n) =
+      (r->_has.raw ==> gremlin_span_at((uint8_t *)r->raw.data, r->raw.len, s, n));
+*/
+
 /*@ predicate normfs_Id_reader_ok{L}(normfs_Id_reader *r, integer n) =
       r->src_len >= n &&
-      (r->_has.raw ==> gremlin_span_in(r->raw, (uint8_t *)r->src, n));
+      normfs_Id_reader_spans(r, (uint8_t *)r->src, n);
 */
 
 /*@ requires \valid(r);
@@ -1177,9 +1389,9 @@ normfs_Id_reader_init(normfs_Id_reader *r, const uint8_t *src, size_t len)
 {
 	*r = (normfs_Id_reader){ .src = src, .src_len = len };
 	size_t offset = 0;
-	/*@ loop invariant 0 <= offset <= len;
-	    loop invariant r->src == src && r->src_len == len;
-	    loop invariant normfs_Id_reader_ok(r, offset);
+	/*@ loop invariant offset_in: 0 <= offset <= len;
+	    loop invariant src_kept: r->src == src && r->src_len == len;
+	    loop invariant normfs_Id_reader_spans: normfs_Id_reader_spans(r, (uint8_t *)src, len);
 	    loop assigns offset, *r;
 	    loop variant len - offset;
 	*/
@@ -1190,10 +1402,12 @@ normfs_Id_reader_init(normfs_Id_reader *r, const uint8_t *src, size_t len)
 		offset += t.consumed;
 		if (t.value == 10u /* field 1, GREMLIN_WIRE_LEN_PREFIX */) {
 			struct gremlin_bytes_decode_result d =
-				gremlin_bytes_decode(src + offset, len - offset);
+				gremlin_bytes_decode_at(src, offset, len);
 			if (d.error != GREMLIN_OK) return d.error;
 			offset += d.consumed;
-			r->raw = d.bytes;
+			r->raw.data = d.bytes.data;
+			r->raw.len = d.bytes.len;
+			/*@ assert gremlin_span_at((uint8_t *)r->raw.data, r->raw.len, (uint8_t *)src, len); */
 			r->_has.raw = 1;
 			continue;
 		}
@@ -1237,42 +1451,54 @@ normfs_Offset_cached_size(const normfs_Offset *m)
 	return m->_size;
 }
 
-/*@ predicate normfs_Id_avoid_normfs_Offset{L}(normfs_Id *m, normfs_Offset *p) =
+/*@ axiomatic normfs_Id_avoid_normfs_Offset_ax {
+    predicate normfs_Id_avoid_normfs_Offset{L}(normfs_Id *m, normfs_Offset *p) =
       \separated(p, m);
+  }
 */
 
-/*@ predicate normfs_Offset_avoid_normfs_Encoding{L}(normfs_Offset *m, normfs_Encoding *p, integer n) =
+/*@ axiomatic normfs_Offset_avoid_normfs_Encoding_ax {
+    predicate normfs_Offset_avoid_normfs_Encoding{L}(normfs_Offset *m, normfs_Encoding *p, integer n) =
       n <= 0 || (\separated(p + (0 .. n - 1), m) &&
       (m->id != \null ==> normfs_Id_avoid_normfs_Encoding((normfs_Id *)m->id, p, n)));
+  }
 */
 
-/*@ predicate normfs_Offset_avoid_normfs_SetupRequest{L}(normfs_Offset *m, normfs_SetupRequest *p) =
+/*@ axiomatic normfs_Offset_avoid_normfs_SetupRequest_ax {
+    predicate normfs_Offset_avoid_normfs_SetupRequest{L}(normfs_Offset *m, normfs_SetupRequest *p) =
       \separated(p, m) &&
       (m->id != \null ==> normfs_Id_avoid_normfs_SetupRequest((normfs_Id *)m->id, p));
+  }
 */
 
-/*@ predicate normfs_Offset_avoid_normfs_PingRequest{L}(normfs_Offset *m, normfs_PingRequest *p) =
+/*@ axiomatic normfs_Offset_avoid_normfs_PingRequest_ax {
+    predicate normfs_Offset_avoid_normfs_PingRequest{L}(normfs_Offset *m, normfs_PingRequest *p) =
       \separated(p, m) &&
       (m->id != \null ==> normfs_Id_avoid_normfs_PingRequest((normfs_Id *)m->id, p));
+  }
 */
 
-/*@ predicate normfs_Offset_avoid_normfs_WriteRequest{L}(normfs_Offset *m, normfs_WriteRequest *p) =
+/*@ axiomatic normfs_Offset_avoid_normfs_WriteRequest_ax {
+    predicate normfs_Offset_avoid_normfs_WriteRequest{L}(normfs_Offset *m, normfs_WriteRequest *p) =
       \separated(p, m) &&
       (m->id != \null ==> normfs_Id_avoid_normfs_WriteRequest((normfs_Id *)m->id, p));
+  }
 */
 
-/*@ predicate normfs_Offset_avoid_bytes{L}(normfs_Offset *m, struct gremlin_bytes *p, integer n) =
+/*@ axiomatic normfs_Offset_avoid_bytes_ax {
+    predicate normfs_Offset_avoid_bytes{L}(normfs_Offset *m, struct gremlin_bytes *p, integer n) =
       n <= 0 || (\separated(p + (0 .. n - 1), m) &&
       (m->id != \null ==> normfs_Id_avoid_bytes((normfs_Id *)m->id, p, n)));
+  }
 */
 
-/*@
+/*@ axiomatic normfs_Offset_tsize_ax {
     logic integer normfs_Offset_id_size{L}(normfs_Offset *m) =
       m->id != \null ?
         1 + varint_size(normfs_Id_tsize((normfs_Id *)m->id)) + normfs_Id_tsize((normfs_Id *)m->id) : 0;
 
     logic integer normfs_Offset_type_size{L}(normfs_Offset *m) =
-      m->type != 0 ? 1 + varint_size((uint64_t)(int64_t)m->type) : 0;
+      m->type != 0 ? 1 + varint_size(enum_wire(m->type)) : 0;
 
     logic integer normfs_Offset_tsize{L}(normfs_Offset *m) =
       normfs_Offset_id_size(m) +
@@ -1324,17 +1550,22 @@ normfs_Offset_cached_size(const normfs_Offset *m)
 
     lemma normfs_Offset_bufsep_sub{L}: \forall normfs_Offset *m, uint8_t *b, integer lo, hi, lo2, hi2;
       lo <= lo2 ==> hi2 <= hi ==> normfs_Offset_bufsep(m, b, lo, hi) ==> normfs_Offset_bufsep(m, b, lo2, hi2);
+  }
 */
 
 /*@ ghost
   /@ requires normfs_Offset_valid(m);
      assigns \nothing;
+     ensures normfs_Offset_id_size(m) >= 0;
+     ensures normfs_Offset_type_size(m) >= 0;
      ensures m->id != \null ==> normfs_Id_tsize((normfs_Id *)m->id) >= 0;
      ensures normfs_Offset_tsize(m) >= 0;
   @/
   void normfs_Offset_tsize_nonneg(normfs_Offset *m)
   {
     if (m->id) normfs_Id_tsize_nonneg((normfs_Id *)m->id);
+    /@ assert normfs_Offset_id_size(m) >= 0; @/
+    /@ assert normfs_Offset_type_size(m) >= 0; @/
   }
 */
 
@@ -1373,18 +1604,19 @@ normfs_Offset_size(const normfs_Offset *m)
 	/*@ assert m->id != \null ==> normfs_Id_sized((normfs_Id *)m->id); */
 	/*@ assert s == \at(s, _A0) + \at(normfs_Offset_id_size(m), Pre); */
 	/*@ ghost _A1: ; */
+	/*@ assert s + \at(normfs_Offset_type_size(m), Pre) <= \at(normfs_Offset_tsize(m), Pre); */
 	if (m->type != 0) {
 		s += 1
-		   + gremlin_varint_size((uint64_t)(int64_t)m->type);
+		   + gremlin_varint_size(gremlin_enum_wire(m->type));
 	}
 	/*@ assert s == \at(s, _A1) + \at(normfs_Offset_type_size(m), Pre); */
-	/*@ ghost _A2: ; */
 	/*@ assert s == \at(normfs_Offset_tsize(m), Pre); */
 	/*@ assert normfs_Offset_dsame{Pre,Here}(m); */
 	/*@ assert m->id != \null ==> \separated(m, m->id); */
 	/*@ ghost _Aw: ; */
 	((normfs_Offset *)m)->_size = s;
-	/*@ assert normfs_Offset_own{_Aw,Here}(m); */
+	/*@ assert normfs_Offset_nown{_Aw,Here}((normfs_Offset *)m); */
+	/*@ assert normfs_Offset_own{_Aw,Here}((normfs_Offset *)m); */
 	/*@ assert m->id != \null ==> \at(m->id->_size, _Aw) == m->id->_size; */
 	/*@ assert m->id != \null ==> \at(m->id->raw.len, _Aw) == m->id->raw.len; */
 	/*@ assert m->id != \null ==> normfs_Id_nown{_Aw,Here}((normfs_Id *)m->id); */
@@ -1397,6 +1629,51 @@ normfs_Offset_size(const normfs_Offset *m)
 	/*@ assert normfs_Offset_dsame{Pre,Here}(m); */
 	/*@ assert normfs_Offset_tsize(m) == \at(normfs_Offset_tsize(m), Pre); */
 	return s;
+}
+
+/*@ requires normfs_Offset_valid(m) && normfs_Offset_sized(m);
+    requires _off + normfs_Offset_id_size(m) <= 0x7fffffffffffffff;
+    requires normfs_Offset_id_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_Offset_id_size(m) - 1));
+    requires normfs_Offset_bufsep(m, _buf, _off, _off + normfs_Offset_id_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_Offset_id_size(m) - 1];
+    ensures \result == \old(_off + normfs_Offset_id_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_Offset_encode_id_at(const normfs_Offset *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_Offset_tsize_nonneg((normfs_Offset *)m); */
+	/*@ ghost _A0: ; */
+	/*@ assert m->id != \null ==> normfs_Id_valid((normfs_Id *)m->id) && normfs_Id_sized((normfs_Id *)m->id); */
+	/*@ assert m->id != \null ==> normfs_Offset_id_size(m) == 1 + varint_size(m->id->_size) + m->id->_size; */
+	/*@ assert m->id != \null ==> normfs_Id_bufsep((normfs_Id *)m->id, _buf, _off, _off + normfs_Offset_id_size(m) - 1); */
+	if (m->id != NULL) {
+		_off = gremlin_varint32_encode_at(_buf, _off, 10u);
+		_off = gremlin_varint_encode_at(_buf, _off, normfs_Id_cached_size(m->id));
+		/*@ assert _off == \at(_off, _A0) + 1 + varint_size(m->id->_size); */
+		/*@ assert _off + m->id->_size <= \at(_off, Pre) + \at(normfs_Offset_id_size(m), Pre); */
+		/*@ assert normfs_Id_bufsep((normfs_Id *)m->id, _buf, _off, _off + m->id->_size - 1); */
+		_off = normfs_Id_encode_at(m->id, _buf, _off);
+	}
+	return _off;
+}
+
+/*@ requires normfs_Offset_valid(m) && normfs_Offset_sized(m);
+    requires _off + normfs_Offset_type_size(m) <= 0x7fffffffffffffff;
+    requires normfs_Offset_type_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_Offset_type_size(m) - 1));
+    requires normfs_Offset_bufsep(m, _buf, _off, _off + normfs_Offset_type_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_Offset_type_size(m) - 1];
+    ensures \result == \old(_off + normfs_Offset_type_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_Offset_encode_type_at(const normfs_Offset *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_Offset_tsize_nonneg((normfs_Offset *)m); */
+	/*@ ghost _A1: ; */
+	if (m->type != 0) {
+		_off = gremlin_varint32_encode_at(_buf, _off, 16u);
+		_off = gremlin_varint_encode_at(_buf, _off, gremlin_enum_wire(m->type));
+	}
+	return _off;
 }
 
 /*@ requires normfs_Offset_valid(m) && normfs_Offset_sized(m);
@@ -1415,25 +1692,13 @@ normfs_Offset_encode_at(const normfs_Offset *m, uint8_t * __restrict__ _buf, siz
 	/*@ assert \at(normfs_Offset_type_size(m), Pre) >= 0; */
 	/*@ assert _off + \at(normfs_Offset_id_size(m), Pre) + \at(normfs_Offset_type_size(m), Pre) == \at(_off, Pre) + \at(m->_size, Pre); */
 	/*@ assert _off + \at(normfs_Offset_id_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
-	/*@ assert m->id != \null ==> normfs_Id_valid((normfs_Id *)m->id) && normfs_Id_sized((normfs_Id *)m->id); */
-	/*@ assert m->id != \null ==> normfs_Offset_id_size(m) == 1 + varint_size(m->id->_size) + m->id->_size; */
-	/*@ assert m->id != \null ==> normfs_Id_bufsep((normfs_Id *)m->id, _buf, _off, \at(_off, Pre) + \at(m->_size, Pre) - 1); */
-	if (m->id != NULL) {
-		_off = gremlin_varint32_encode_at(_buf, _off, 10u);
-		_off = gremlin_varint_encode_at(_buf, _off, normfs_Id_cached_size(m->id));
-		/*@ assert _off == \at(_off, _A0) + 1 + varint_size(m->id->_size); */
-		/*@ assert _off + m->id->_size <= \at(_off, Pre) + \at(m->_size, Pre); */
-		/*@ assert normfs_Id_bufsep((normfs_Id *)m->id, _buf, _off, _off + m->id->_size - 1); */
-		_off = normfs_Id_encode_at(m->id, _buf, _off);
-	}
+	_off = normfs_Offset_encode_id_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A0) + \at(normfs_Offset_id_size(m), Pre); */
 	/*@ ghost _A1: ; */
-	if (m->type != 0) {
-		_off = gremlin_varint32_encode_at(_buf, _off, 16u);
-		_off = gremlin_varint_encode_at(_buf, _off, (uint64_t)(int64_t)m->type);
-	}
+	/*@ assert normfs_Offset_own{Pre,Here}(m); */
+	/*@ assert _off + \at(normfs_Offset_type_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
+	_off = normfs_Offset_encode_type_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A1) + \at(normfs_Offset_type_size(m), Pre); */
-	/*@ ghost _A2: ; */
 	/*@ assert _off == \at(_off, Pre) + \at(normfs_Offset_tsize(m), Pre); */
 	return _off;
 }
@@ -1464,9 +1729,13 @@ typedef struct normfs_Offset_reader {
 	normfs_OffsetType	type;
 } normfs_Offset_reader;
 
+/*@ predicate normfs_Offset_reader_spans{L}(normfs_Offset_reader *r, uint8_t *s, integer n) =
+      (r->_has.id ==> gremlin_span_at((uint8_t *)r->id.data, r->id.len, s, n));
+*/
+
 /*@ predicate normfs_Offset_reader_ok{L}(normfs_Offset_reader *r, integer n) =
       r->src_len >= n &&
-      (r->_has.id ==> gremlin_span_in(r->id, (uint8_t *)r->src, n));
+      normfs_Offset_reader_spans(r, (uint8_t *)r->src, n);
 */
 
 /*@ requires \valid(r);
@@ -1485,9 +1754,9 @@ normfs_Offset_reader_init(normfs_Offset_reader *r, const uint8_t *src, size_t le
 {
 	*r = (normfs_Offset_reader){ .src = src, .src_len = len };
 	size_t offset = 0;
-	/*@ loop invariant 0 <= offset <= len;
-	    loop invariant r->src == src && r->src_len == len;
-	    loop invariant normfs_Offset_reader_ok(r, offset);
+	/*@ loop invariant offset_in: 0 <= offset <= len;
+	    loop invariant src_kept: r->src == src && r->src_len == len;
+	    loop invariant normfs_Offset_reader_spans: normfs_Offset_reader_spans(r, (uint8_t *)src, len);
 	    loop assigns offset, *r;
 	    loop variant len - offset;
 	*/
@@ -1498,10 +1767,12 @@ normfs_Offset_reader_init(normfs_Offset_reader *r, const uint8_t *src, size_t le
 		offset += t.consumed;
 		if (t.value == 10u /* field 1, GREMLIN_WIRE_LEN_PREFIX */) {
 			struct gremlin_bytes_decode_result d =
-				gremlin_bytes_decode(src + offset, len - offset);
+				gremlin_bytes_decode_at(src, offset, len);
 			if (d.error != GREMLIN_OK) return d.error;
 			offset += d.consumed;
-			r->id = d.bytes;
+			r->id.data = d.bytes.data;
+			r->id.len = d.bytes.len;
+			/*@ assert gremlin_span_at((uint8_t *)r->id.data, r->id.len, (uint8_t *)src, len); */
 			r->_has.id = 1;
 			continue;
 		}
@@ -1530,8 +1801,12 @@ normfs_Offset_reader_init(normfs_Offset_reader *r, const uint8_t *src, size_t le
     requires r == \null || (\valid_read(r) && normfs_Offset_reader_ok(r, r->src_len) &&
                (r->src_len == 0 ||
                 \valid_read(r->src + (0 .. r->src_len - 1))) &&
-               \separated(out, r, r->src + (0 .. r->src_len - 1)));
+               \separated(out, r) &&
+               \separated(out, r->src + (0 .. r->src_len - 1)));
     assigns *out;
+    ensures r != \null && r->_has.id ==>
+              out->src == r->id.data && out->src_len == r->id.len;
+    ensures r == \null || !r->_has.id ==> out->src_len == 0;
     ensures \result == GREMLIN_OK ==>
               normfs_Id_reader_ok(out, out->src_len) &&
               (out->src_len == 0 ||
@@ -1553,6 +1828,7 @@ normfs_Offset_reader_get_id(const normfs_Offset_reader *r, normfs_Id_reader *out
 /*@ requires r == \null || \valid_read(r);
     assigns \nothing;
     ensures r != \null && r->_has.type ==> \result == r->type;
+    ensures !(r != \null && r->_has.type) ==> \result == 0;
 */
 static inline normfs_OffsetType
 normfs_Offset_reader_get_type(const normfs_Offset_reader *r)
@@ -1582,64 +1858,85 @@ normfs_ReadRequest_cached_size(const normfs_ReadRequest *m)
 	return m->_size;
 }
 
-/*@ predicate normfs_Id_avoid_normfs_ReadRequest{L}(normfs_Id *m, normfs_ReadRequest *p) =
+/*@ axiomatic normfs_Id_avoid_normfs_ReadRequest_ax {
+    predicate normfs_Id_avoid_normfs_ReadRequest{L}(normfs_Id *m, normfs_ReadRequest *p) =
       \separated(p, m);
+  }
 */
 
-/*@ predicate normfs_Offset_avoid_normfs_ReadRequest{L}(normfs_Offset *m, normfs_ReadRequest *p) =
+/*@ axiomatic normfs_Offset_avoid_normfs_ReadRequest_ax {
+    predicate normfs_Offset_avoid_normfs_ReadRequest{L}(normfs_Offset *m, normfs_ReadRequest *p) =
       \separated(p, m) &&
       (m->id != \null ==> normfs_Id_avoid_normfs_ReadRequest((normfs_Id *)m->id, p));
+  }
 */
 
-/*@ predicate normfs_ReadRequest_avoid_normfs_SetupRequest{L}(normfs_ReadRequest *m, normfs_SetupRequest *p) =
+/*@ axiomatic normfs_ReadRequest_avoid_normfs_SetupRequest_ax {
+    predicate normfs_ReadRequest_avoid_normfs_SetupRequest{L}(normfs_ReadRequest *m, normfs_SetupRequest *p) =
       \separated(p, m) &&
       (m->accept_encodings_count == 0 || \separated(p, m->accept_encodings + (0 .. m->accept_encodings_count - 1))) &&
       (m->offset != \null ==> normfs_Offset_avoid_normfs_SetupRequest((normfs_Offset *)m->offset, p));
+  }
 */
 
-/*@ predicate normfs_ReadRequest_avoid_normfs_PingRequest{L}(normfs_ReadRequest *m, normfs_PingRequest *p) =
+/*@ axiomatic normfs_ReadRequest_avoid_normfs_PingRequest_ax {
+    predicate normfs_ReadRequest_avoid_normfs_PingRequest{L}(normfs_ReadRequest *m, normfs_PingRequest *p) =
       \separated(p, m) &&
       (m->accept_encodings_count == 0 || \separated(p, m->accept_encodings + (0 .. m->accept_encodings_count - 1))) &&
       (m->offset != \null ==> normfs_Offset_avoid_normfs_PingRequest((normfs_Offset *)m->offset, p));
+  }
 */
 
-/*@ predicate normfs_ReadRequest_avoid_normfs_WriteRequest{L}(normfs_ReadRequest *m, normfs_WriteRequest *p) =
+/*@ axiomatic normfs_ReadRequest_avoid_normfs_WriteRequest_ax {
+    predicate normfs_ReadRequest_avoid_normfs_WriteRequest{L}(normfs_ReadRequest *m, normfs_WriteRequest *p) =
       \separated(p, m) &&
       (m->accept_encodings_count == 0 || \separated(p, m->accept_encodings + (0 .. m->accept_encodings_count - 1))) &&
       (m->offset != \null ==> normfs_Offset_avoid_normfs_WriteRequest((normfs_Offset *)m->offset, p));
+  }
 */
 
-/*@ predicate normfs_ReadRequest_avoid_bytes{L}(normfs_ReadRequest *m, struct gremlin_bytes *p, integer n) =
+/*@ axiomatic normfs_ReadRequest_avoid_bytes_ax {
+    predicate normfs_ReadRequest_avoid_bytes{L}(normfs_ReadRequest *m, struct gremlin_bytes *p, integer n) =
       n <= 0 || (\separated(p + (0 .. n - 1), m) &&
       (m->accept_encodings_count == 0 || \separated(p + (0 .. n - 1), m->accept_encodings + (0 .. m->accept_encodings_count - 1))) &&
       (m->offset != \null ==> normfs_Offset_avoid_bytes((normfs_Offset *)m->offset, p, n)));
+  }
 */
 
-/*@ predicate normfs_SetupRequest_navoid_normfs_ReadRequest{L}(normfs_SetupRequest *m, normfs_ReadRequest *t) =
+/*@ axiomatic normfs_SetupRequest_navoid_normfs_ReadRequest_ax {
+    predicate normfs_SetupRequest_navoid_normfs_ReadRequest{L}(normfs_SetupRequest *m, normfs_ReadRequest *t) =
       normfs_ReadRequest_avoid_normfs_SetupRequest(t, m);
+  }
 */
 
-/*@ predicate normfs_PingRequest_navoid_normfs_ReadRequest{L}(normfs_PingRequest *m, normfs_ReadRequest *t) =
+/*@ axiomatic normfs_PingRequest_navoid_normfs_ReadRequest_ax {
+    predicate normfs_PingRequest_navoid_normfs_ReadRequest{L}(normfs_PingRequest *m, normfs_ReadRequest *t) =
       normfs_ReadRequest_avoid_normfs_PingRequest(t, m);
+  }
 */
 
-/*@ predicate normfs_WriteRequest_navoid_normfs_ReadRequest{L}(normfs_WriteRequest *m, normfs_ReadRequest *t) =
+/*@ axiomatic normfs_WriteRequest_navoid_normfs_ReadRequest_ax {
+    predicate normfs_WriteRequest_navoid_normfs_ReadRequest{L}(normfs_WriteRequest *m, normfs_ReadRequest *t) =
       normfs_ReadRequest_avoid_normfs_WriteRequest(t, m) &&
       normfs_ReadRequest_avoid_bytes(t, m->packets, m->packets_count);
+  }
 */
 
-/*@ logic integer normfs_ReadRequest_accept_encodings_sum{L}(normfs_ReadRequest *m, integer n) =
-      n <= 0 ? 0 : normfs_ReadRequest_accept_encodings_sum(m, n - 1) + varint_size(m->accept_encodings[n - 1] < 0 ? m->accept_encodings[n - 1] + 18446744073709551616 : m->accept_encodings[n - 1]);
+/*@ axiomatic normfs_ReadRequest_accept_encodings_sum_ax {
+    logic integer normfs_ReadRequest_accept_encodings_sum{L}(normfs_ReadRequest *m, integer n) =
+      n <= 0 ? 0 : normfs_ReadRequest_accept_encodings_sum(m, n - 1) + varint_size(m->accept_encodings[n - 1] < 0 ? m->accept_encodings[n - 1] + 18446744073709551616 :
+        m->accept_encodings[n - 1] >= 2147483648 ? m->accept_encodings[n - 1] + 18446744069414584320 : m->accept_encodings[n - 1]);
 
     lemma normfs_ReadRequest_accept_encodings_sum_frame{L1,L2}: \forall normfs_ReadRequest *m, integer n; 0 <= n ==>
       \at(m->accept_encodings, L1) == \at(m->accept_encodings, L2) ==>
       (\forall integer k; 0 <= k < n ==> \at(m->accept_encodings[k], L1) == \at(m->accept_encodings[k], L2)) ==>
       \at(normfs_ReadRequest_accept_encodings_sum(m, n), L1) == \at(normfs_ReadRequest_accept_encodings_sum(m, n), L2);
+  }
 */
 /*@ \wp::strategy normfs_ReadRequest_accept_encodings_sum_ind: \tactic("Wp.induction", \pattern(0 <= n), \select(n)); */
 /*@ \wp::proof normfs_ReadRequest_accept_encodings_sum_ind: normfs_ReadRequest_accept_encodings_sum_frame; */
 
-/*@
+/*@ axiomatic normfs_ReadRequest_tsize_ax {
     logic integer normfs_ReadRequest_read_id_size{L}(normfs_ReadRequest *m) =
       m->read_id != 0 ? 1 + varint_size(m->read_id) : 0;
 
@@ -1650,7 +1947,8 @@ normfs_ReadRequest_cached_size(const normfs_ReadRequest *m)
       m->step != 0 ? 1 + varint_size(m->step) : 0;
 
     logic integer normfs_ReadRequest_accept_encodings_size{L}(normfs_ReadRequest *m) =
-      m->accept_encodings_count == 1 ? 1 + varint_size(m->accept_encodings[0] < 0 ? m->accept_encodings[0] + 18446744073709551616 : m->accept_encodings[0]) :
+      m->accept_encodings_count == 1 ? 1 + varint_size(m->accept_encodings[0] < 0 ? m->accept_encodings[0] + 18446744073709551616 :
+        m->accept_encodings[0] >= 2147483648 ? m->accept_encodings[0] + 18446744069414584320 : m->accept_encodings[0]) :
       m->accept_encodings_count > 1 ? 1 + varint_size(normfs_ReadRequest_accept_encodings_sum(m, m->accept_encodings_count)) + normfs_ReadRequest_accept_encodings_sum(m, m->accept_encodings_count) : 0;
 
     logic integer normfs_ReadRequest_offset_size{L}(normfs_ReadRequest *m) =
@@ -1711,6 +2009,7 @@ normfs_ReadRequest_cached_size(const normfs_ReadRequest *m)
 
     predicate normfs_ReadRequest_bufsep{L}(normfs_ReadRequest *m, uint8_t *b, integer lo, integer hi) =
       hi < lo || (\separated(b + (lo .. hi), m) &&
+      (m->queue_id.len == 0 || \separated(b + (lo .. hi), m->queue_id.data + (0 .. m->queue_id.len - 1))) &&
       (m->accept_encodings_count == 0 || \separated(b + (lo .. hi), m->accept_encodings + (0 .. m->accept_encodings_count - 1))) &&
       (m->offset != \null ==> normfs_Offset_bufsep((normfs_Offset *)m->offset, b, lo, hi)));
 
@@ -1743,6 +2042,7 @@ normfs_ReadRequest_cached_size(const normfs_ReadRequest *m)
 
     lemma normfs_ReadRequest_bufsep_sub{L}: \forall normfs_ReadRequest *m, uint8_t *b, integer lo, hi, lo2, hi2;
       lo <= lo2 ==> hi2 <= hi ==> normfs_ReadRequest_bufsep(m, b, lo, hi) ==> normfs_ReadRequest_bufsep(m, b, lo2, hi2);
+  }
 */
 
 /*@ ghost
@@ -1768,6 +2068,12 @@ normfs_ReadRequest_cached_size(const normfs_ReadRequest *m)
 /*@ ghost
   /@ requires normfs_ReadRequest_valid(m);
      assigns \nothing;
+     ensures normfs_ReadRequest_read_id_size(m) >= 0;
+     ensures normfs_ReadRequest_queue_id_size(m) >= 0;
+     ensures normfs_ReadRequest_step_size(m) >= 0;
+     ensures normfs_ReadRequest_accept_encodings_size(m) >= 0;
+     ensures normfs_ReadRequest_offset_size(m) >= 0;
+     ensures normfs_ReadRequest_limit_size(m) >= 0;
      ensures \forall integer j; 0 <= j <= m->accept_encodings_count ==>
                0 <= normfs_ReadRequest_accept_encodings_sum(m, j) <= normfs_ReadRequest_accept_encodings_sum(m, m->accept_encodings_count);
      ensures m->offset != \null ==> normfs_Offset_tsize((normfs_Offset *)m->offset) >= 0;
@@ -1777,6 +2083,12 @@ normfs_ReadRequest_cached_size(const normfs_ReadRequest *m)
   {
     normfs_ReadRequest_accept_encodings_mono(m);
     if (m->offset) normfs_Offset_tsize_nonneg((normfs_Offset *)m->offset);
+    /@ assert normfs_ReadRequest_read_id_size(m) >= 0; @/
+    /@ assert normfs_ReadRequest_queue_id_size(m) >= 0; @/
+    /@ assert normfs_ReadRequest_step_size(m) >= 0; @/
+    /@ assert normfs_ReadRequest_accept_encodings_size(m) >= 0; @/
+    /@ assert normfs_ReadRequest_offset_size(m) >= 0; @/
+    /@ assert normfs_ReadRequest_limit_size(m) >= 0; @/
   }
 */
 
@@ -1794,12 +2106,14 @@ normfs_ReadRequest_size(const normfs_ReadRequest *m)
 	/*@ ghost normfs_ReadRequest_tsize_nonneg((normfs_ReadRequest *)m); */
 	/*@ ghost _A0: ; */
 	/*@ assert (m->offset != \null ==> normfs_Offset_valid((normfs_Offset *)m->offset)); */
+	/*@ assert s + \at(normfs_ReadRequest_read_id_size(m), Pre) <= \at(normfs_ReadRequest_tsize(m), Pre); */
 	if (m->read_id != 0) {
 		s += 1
 		   + gremlin_varint_size(m->read_id);
 	}
 	/*@ assert s == \at(s, _A0) + \at(normfs_ReadRequest_read_id_size(m), Pre); */
 	/*@ ghost _A1: ; */
+	/*@ assert s + \at(normfs_ReadRequest_queue_id_size(m), Pre) <= \at(normfs_ReadRequest_tsize(m), Pre); */
 	if (m->queue_id.len > 0) {
 		s += 1
 		   + gremlin_varint_size(m->queue_id.len)
@@ -1807,14 +2121,16 @@ normfs_ReadRequest_size(const normfs_ReadRequest *m)
 	}
 	/*@ assert s == \at(s, _A1) + \at(normfs_ReadRequest_queue_id_size(m), Pre); */
 	/*@ ghost _A2: ; */
+	/*@ assert s + \at(normfs_ReadRequest_step_size(m), Pre) <= \at(normfs_ReadRequest_tsize(m), Pre); */
 	if (m->step != 0) {
 		s += 1
 		   + gremlin_varint_size(m->step);
 	}
 	/*@ assert s == \at(s, _A2) + \at(normfs_ReadRequest_step_size(m), Pre); */
 	/*@ ghost _A3: ; */
+	/*@ assert s + \at(normfs_ReadRequest_accept_encodings_size(m), Pre) <= \at(normfs_ReadRequest_tsize(m), Pre); */
 	if (m->accept_encodings_count == 1) {
-		s += 1 + gremlin_varint_size((uint64_t)(int64_t)m->accept_encodings[0]);
+		s += 1 + gremlin_varint_size((uint64_t)(int64_t)(int32_t)m->accept_encodings[0]);
 	} else if (m->accept_encodings_count > 1) {
 		size_t _payload = 0;
 		/*@ loop invariant 0 <= _i <= m->accept_encodings_count;
@@ -1823,7 +2139,7 @@ normfs_ReadRequest_size(const normfs_ReadRequest *m)
 		    loop variant m->accept_encodings_count - _i;
 		*/
 		for (size_t _i = 0; _i < m->accept_encodings_count; _i++) {
-			_payload += gremlin_varint_size((uint64_t)(int64_t)m->accept_encodings[_i]);
+			_payload += gremlin_varint_size((uint64_t)(int64_t)(int32_t)m->accept_encodings[_i]);
 		}
 		s += 1 + gremlin_varint_size(_payload) + _payload;
 	}
@@ -1868,19 +2184,27 @@ normfs_ReadRequest_size(const normfs_ReadRequest *m)
 	/*@ assert m->offset != \null ==> normfs_Offset_sized((normfs_Offset *)m->offset); */
 	/*@ assert s == \at(s, _A4) + \at(normfs_ReadRequest_offset_size(m), Pre); */
 	/*@ ghost _A5: ; */
+	/*@ assert s + \at(normfs_ReadRequest_limit_size(m), Pre) <= \at(normfs_ReadRequest_tsize(m), Pre); */
 	if (m->limit != 0) {
 		s += 1
 		   + gremlin_varint_size(m->limit);
 	}
 	/*@ assert s == \at(s, _A5) + \at(normfs_ReadRequest_limit_size(m), Pre); */
-	/*@ ghost _A6: ; */
 	/*@ assert s == \at(normfs_ReadRequest_tsize(m), Pre); */
 	/*@ assert normfs_ReadRequest_dsame{Pre,Here}(m); */
 	/*@ assert m->offset != \null ==> \separated(m, m->offset); */
 	/*@ assert m->offset != \null && m->offset->id != \null ==> \separated(m, m->offset->id); */
 	/*@ ghost _Aw: ; */
 	((normfs_ReadRequest *)m)->_size = s;
-	/*@ assert normfs_ReadRequest_own{_Aw,Here}(m); */
+	/*@ assert \at(m->read_id, _Aw) == m->read_id; */
+	/*@ assert \at(m->queue_id.len, _Aw) == m->queue_id.len; */
+	/*@ assert \at(m->step, _Aw) == m->step; */
+	/*@ assert \at(m->accept_encodings_count, _Aw) == m->accept_encodings_count; */
+	/*@ assert \at(m->limit, _Aw) == m->limit; */
+	/*@ assert normfs_ReadRequest_nown{_Aw,Here}((normfs_ReadRequest *)m); */
+	/*@ assert \forall integer q; 0 <= q < \at(m->accept_encodings_count, _Aw) ==>
+	      \at(m->accept_encodings[q], _Aw) == m->accept_encodings[q]; */
+	/*@ assert normfs_ReadRequest_own{_Aw,Here}((normfs_ReadRequest *)m); */
 	/*@ assert m->offset != \null ==> \at(m->offset->_size, _Aw) == m->offset->_size; */
 	/*@ assert m->offset != \null ==> normfs_Offset_nown{_Aw,Here}((normfs_Offset *)m->offset); */
 	/*@ assert m->offset != \null ==> normfs_Offset_own{_Aw,Here}((normfs_Offset *)m->offset); */
@@ -1899,6 +2223,153 @@ normfs_ReadRequest_size(const normfs_ReadRequest *m)
 }
 
 /*@ requires normfs_ReadRequest_valid(m) && normfs_ReadRequest_sized(m);
+    requires _off + normfs_ReadRequest_read_id_size(m) <= 0x7fffffffffffffff;
+    requires normfs_ReadRequest_read_id_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_ReadRequest_read_id_size(m) - 1));
+    requires normfs_ReadRequest_bufsep(m, _buf, _off, _off + normfs_ReadRequest_read_id_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_ReadRequest_read_id_size(m) - 1];
+    ensures \result == \old(_off + normfs_ReadRequest_read_id_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_ReadRequest_encode_read_id_at(const normfs_ReadRequest *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_ReadRequest_tsize_nonneg((normfs_ReadRequest *)m); */
+	/*@ ghost _A0: ; */
+	if (m->read_id != 0) {
+		_off = gremlin_varint32_encode_at(_buf, _off, 8u);
+		_off = gremlin_varint_encode_at(_buf, _off, m->read_id);
+	}
+	return _off;
+}
+
+/*@ requires normfs_ReadRequest_valid(m) && normfs_ReadRequest_sized(m);
+    requires _off + normfs_ReadRequest_queue_id_size(m) <= 0x7fffffffffffffff;
+    requires normfs_ReadRequest_queue_id_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_ReadRequest_queue_id_size(m) - 1));
+    requires normfs_ReadRequest_bufsep(m, _buf, _off, _off + normfs_ReadRequest_queue_id_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_ReadRequest_queue_id_size(m) - 1];
+    ensures \result == \old(_off + normfs_ReadRequest_queue_id_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_ReadRequest_encode_queue_id_at(const normfs_ReadRequest *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_ReadRequest_tsize_nonneg((normfs_ReadRequest *)m); */
+	/*@ ghost _A1: ; */
+	if (m->queue_id.len > 0) {
+		_off = gremlin_varint32_encode_at(_buf, _off, 18u);
+		_off = gremlin_varint_encode_at(_buf, _off, m->queue_id.len);
+		_off = gremlin_write_bytes_at(_buf, _off, m->queue_id.data, m->queue_id.len);
+	}
+	return _off;
+}
+
+/*@ requires normfs_ReadRequest_valid(m) && normfs_ReadRequest_sized(m);
+    requires _off + normfs_ReadRequest_step_size(m) <= 0x7fffffffffffffff;
+    requires normfs_ReadRequest_step_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_ReadRequest_step_size(m) - 1));
+    requires normfs_ReadRequest_bufsep(m, _buf, _off, _off + normfs_ReadRequest_step_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_ReadRequest_step_size(m) - 1];
+    ensures \result == \old(_off + normfs_ReadRequest_step_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_ReadRequest_encode_step_at(const normfs_ReadRequest *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_ReadRequest_tsize_nonneg((normfs_ReadRequest *)m); */
+	/*@ ghost _A2: ; */
+	if (m->step != 0) {
+		_off = gremlin_varint32_encode_at(_buf, _off, 24u);
+		_off = gremlin_varint_encode_at(_buf, _off, m->step);
+	}
+	return _off;
+}
+
+/*@ requires normfs_ReadRequest_valid(m) && normfs_ReadRequest_sized(m);
+    requires _off + normfs_ReadRequest_accept_encodings_size(m) <= 0x7fffffffffffffff;
+    requires normfs_ReadRequest_accept_encodings_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_ReadRequest_accept_encodings_size(m) - 1));
+    requires normfs_ReadRequest_bufsep(m, _buf, _off, _off + normfs_ReadRequest_accept_encodings_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_ReadRequest_accept_encodings_size(m) - 1];
+    ensures \result == \old(_off + normfs_ReadRequest_accept_encodings_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_ReadRequest_encode_accept_encodings_at(const normfs_ReadRequest *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_ReadRequest_tsize_nonneg((normfs_ReadRequest *)m); */
+	/*@ ghost _A3: ; */
+	if (m->accept_encodings_count == 1) {
+		_off = gremlin_varint32_encode_at(_buf, _off, 32u);
+		_off = gremlin_varint_encode_at(_buf, _off, (uint64_t)(int64_t)(int32_t)m->accept_encodings[0]);
+	} else if (m->accept_encodings_count > 1) {
+		size_t _payload = 0;
+		/*@ loop invariant 0 <= _i <= m->accept_encodings_count;
+		    loop invariant \forall integer k; k == _i ==> _payload == \at(normfs_ReadRequest_accept_encodings_sum(m, k), Pre);
+		    loop assigns _i, _payload;
+		    loop variant m->accept_encodings_count - _i;
+		*/
+		for (size_t _i = 0; _i < m->accept_encodings_count; _i++) {
+			_payload += gremlin_varint_size((uint64_t)(int64_t)(int32_t)m->accept_encodings[_i]);
+		}
+		_off = gremlin_varint32_encode_at(_buf, _off, 34u);
+		_off = gremlin_varint_encode_at(_buf, _off, _payload);
+		/*@ ghost _P3: ; */
+		/*@ loop invariant 0 <= _i <= m->accept_encodings_count;
+		    loop invariant \forall integer k; k == _i ==> _off == \at(_off, _P3) + \at(normfs_ReadRequest_accept_encodings_sum(m, k), Pre);
+		    loop assigns _i, _off, _buf[\at(_off, _A3) .. \at(_off, _A3) + \at(normfs_ReadRequest_accept_encodings_size(m), Pre) - 1];
+		    loop variant m->accept_encodings_count - _i;
+		*/
+		for (size_t _i = 0; _i < m->accept_encodings_count; _i++) {
+			/*@ assert \forall integer k; k == _i ==>
+			      \at(normfs_ReadRequest_accept_encodings_sum(m, k + 1), Pre) == \at(normfs_ReadRequest_accept_encodings_sum(m, k), Pre) + \at(varint_size(m->accept_encodings[k] < 0 ? m->accept_encodings[k] + 18446744073709551616 :
+        m->accept_encodings[k] >= 2147483648 ? m->accept_encodings[k] + 18446744069414584320 : m->accept_encodings[k]), Pre) &&
+			      \at(normfs_ReadRequest_accept_encodings_sum(m, k + 1), Pre) <= \at(normfs_ReadRequest_accept_encodings_sum(m, m->accept_encodings_count), Pre); */
+		_off = gremlin_varint_encode_at(_buf, _off, (uint64_t)(int64_t)(int32_t)m->accept_encodings[_i]);
+		}
+	}
+	return _off;
+}
+
+/*@ requires normfs_ReadRequest_valid(m) && normfs_ReadRequest_sized(m);
+    requires _off + normfs_ReadRequest_offset_size(m) <= 0x7fffffffffffffff;
+    requires normfs_ReadRequest_offset_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_ReadRequest_offset_size(m) - 1));
+    requires normfs_ReadRequest_bufsep(m, _buf, _off, _off + normfs_ReadRequest_offset_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_ReadRequest_offset_size(m) - 1];
+    ensures \result == \old(_off + normfs_ReadRequest_offset_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_ReadRequest_encode_offset_at(const normfs_ReadRequest *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_ReadRequest_tsize_nonneg((normfs_ReadRequest *)m); */
+	/*@ ghost _A4: ; */
+	/*@ assert m->offset != \null ==> normfs_Offset_valid((normfs_Offset *)m->offset) && normfs_Offset_sized((normfs_Offset *)m->offset); */
+	/*@ assert m->offset != \null ==> normfs_ReadRequest_offset_size(m) == 1 + varint_size(m->offset->_size) + m->offset->_size; */
+	/*@ assert m->offset != \null ==> normfs_Offset_bufsep((normfs_Offset *)m->offset, _buf, _off, _off + normfs_ReadRequest_offset_size(m) - 1); */
+	if (m->offset != NULL) {
+		_off = gremlin_varint32_encode_at(_buf, _off, 82u);
+		_off = gremlin_varint_encode_at(_buf, _off, normfs_Offset_cached_size(m->offset));
+		/*@ assert _off == \at(_off, _A4) + 1 + varint_size(m->offset->_size); */
+		/*@ assert _off + m->offset->_size <= \at(_off, Pre) + \at(normfs_ReadRequest_offset_size(m), Pre); */
+		/*@ assert normfs_Offset_bufsep((normfs_Offset *)m->offset, _buf, _off, _off + m->offset->_size - 1); */
+		_off = normfs_Offset_encode_at(m->offset, _buf, _off);
+	}
+	return _off;
+}
+
+/*@ requires normfs_ReadRequest_valid(m) && normfs_ReadRequest_sized(m);
+    requires _off + normfs_ReadRequest_limit_size(m) <= 0x7fffffffffffffff;
+    requires normfs_ReadRequest_limit_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_ReadRequest_limit_size(m) - 1));
+    requires normfs_ReadRequest_bufsep(m, _buf, _off, _off + normfs_ReadRequest_limit_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_ReadRequest_limit_size(m) - 1];
+    ensures \result == \old(_off + normfs_ReadRequest_limit_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_ReadRequest_encode_limit_at(const normfs_ReadRequest *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_ReadRequest_tsize_nonneg((normfs_ReadRequest *)m); */
+	/*@ ghost _A5: ; */
+	if (m->limit != 0) {
+		_off = gremlin_varint32_encode_at(_buf, _off, 88u);
+		_off = gremlin_varint_encode_at(_buf, _off, m->limit);
+	}
+	return _off;
+}
+
+/*@ requires normfs_ReadRequest_valid(m) && normfs_ReadRequest_sized(m);
     requires _off + m->_size <= 0x7fffffffffffffff;
     requires m->_size == 0 || \valid(_buf + (_off .. _off + m->_size - 1));
     requires normfs_ReadRequest_bufsep(m, _buf, _off, _off + m->_size - 1);
@@ -1911,81 +2382,39 @@ normfs_ReadRequest_encode_at(const normfs_ReadRequest *m, uint8_t * __restrict__
 	/*@ ghost normfs_ReadRequest_tsize_nonneg((normfs_ReadRequest *)m); */
 	/*@ ghost _A0: ; */
 	/*@ assert (m->offset != \null ==> normfs_Offset_valid((normfs_Offset *)m->offset)); */
-	if (m->read_id != 0) {
-		_off = gremlin_varint32_encode_at(_buf, _off, 8u);
-		_off = gremlin_varint_encode_at(_buf, _off, m->read_id);
-	}
+	/*@ assert _off + \at(normfs_ReadRequest_read_id_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
+	_off = normfs_ReadRequest_encode_read_id_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A0) + \at(normfs_ReadRequest_read_id_size(m), Pre); */
 	/*@ ghost _A1: ; */
-	if (m->queue_id.len > 0) {
-		_off = gremlin_varint32_encode_at(_buf, _off, 18u);
-		_off = gremlin_varint_encode_at(_buf, _off, m->queue_id.len);
-		_off = gremlin_write_bytes_at(_buf, _off, m->queue_id.data, m->queue_id.len);
-	}
+	/*@ assert normfs_ReadRequest_own{Pre,Here}(m); */
+	/*@ assert _off + \at(normfs_ReadRequest_queue_id_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
+	_off = normfs_ReadRequest_encode_queue_id_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A1) + \at(normfs_ReadRequest_queue_id_size(m), Pre); */
 	/*@ ghost _A2: ; */
-	if (m->step != 0) {
-		_off = gremlin_varint32_encode_at(_buf, _off, 24u);
-		_off = gremlin_varint_encode_at(_buf, _off, m->step);
-	}
+	/*@ assert normfs_ReadRequest_own{Pre,Here}(m); */
+	/*@ assert _off + \at(normfs_ReadRequest_step_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
+	_off = normfs_ReadRequest_encode_step_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A2) + \at(normfs_ReadRequest_step_size(m), Pre); */
 	/*@ ghost _A3: ; */
+	/*@ assert normfs_ReadRequest_own{Pre,Here}(m); */
 	/*@ assert \at(normfs_ReadRequest_offset_size(m), Pre) >= 0; */
 	/*@ assert \at(normfs_ReadRequest_limit_size(m), Pre) >= 0; */
 	/*@ assert _off + \at(normfs_ReadRequest_accept_encodings_size(m), Pre) + \at(normfs_ReadRequest_offset_size(m), Pre) + \at(normfs_ReadRequest_limit_size(m), Pre) == \at(_off, Pre) + \at(m->_size, Pre); */
 	/*@ assert _off + \at(normfs_ReadRequest_accept_encodings_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
-	if (m->accept_encodings_count == 1) {
-		_off = gremlin_varint32_encode_at(_buf, _off, 32u);
-		_off = gremlin_varint_encode_at(_buf, _off, (uint64_t)(int64_t)m->accept_encodings[0]);
-	} else if (m->accept_encodings_count > 1) {
-		size_t _payload = 0;
-		/*@ loop invariant 0 <= _i <= m->accept_encodings_count;
-		    loop invariant \forall integer k; k == _i ==> _payload == \at(normfs_ReadRequest_accept_encodings_sum(m, k), Pre);
-		    loop assigns _i, _payload;
-		    loop variant m->accept_encodings_count - _i;
-		*/
-		for (size_t _i = 0; _i < m->accept_encodings_count; _i++) {
-			_payload += gremlin_varint_size((uint64_t)(int64_t)m->accept_encodings[_i]);
-		}
-		_off = gremlin_varint32_encode_at(_buf, _off, 34u);
-		_off = gremlin_varint_encode_at(_buf, _off, _payload);
-		/*@ ghost _P3: ; */
-		/*@ loop invariant 0 <= _i <= m->accept_encodings_count;
-		    loop invariant \forall integer k; k == _i ==> _off == \at(_off, _P3) + \at(normfs_ReadRequest_accept_encodings_sum(m, k), Pre);
-		    loop assigns _i, _off, _buf[\at(_off, Pre) .. \at(_off, Pre) + \at(m->_size, Pre) - 1];
-		    loop variant m->accept_encodings_count - _i;
-		*/
-		for (size_t _i = 0; _i < m->accept_encodings_count; _i++) {
-			/*@ assert \forall integer k; k == _i ==>
-			      \at(normfs_ReadRequest_accept_encodings_sum(m, k + 1), Pre) == \at(normfs_ReadRequest_accept_encodings_sum(m, k), Pre) + \at(varint_size(m->accept_encodings[k] < 0 ? m->accept_encodings[k] + 18446744073709551616 : m->accept_encodings[k]), Pre) &&
-			      \at(normfs_ReadRequest_accept_encodings_sum(m, k + 1), Pre) <= \at(normfs_ReadRequest_accept_encodings_sum(m, m->accept_encodings_count), Pre); */
-		_off = gremlin_varint_encode_at(_buf, _off, (uint64_t)(int64_t)m->accept_encodings[_i]);
-		}
-	}
+	_off = normfs_ReadRequest_encode_accept_encodings_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A3) + \at(normfs_ReadRequest_accept_encodings_size(m), Pre); */
 	/*@ ghost _A4: ; */
+	/*@ assert normfs_ReadRequest_own{Pre,Here}(m); */
 	/*@ assert \at(normfs_ReadRequest_limit_size(m), Pre) >= 0; */
 	/*@ assert _off + \at(normfs_ReadRequest_offset_size(m), Pre) + \at(normfs_ReadRequest_limit_size(m), Pre) == \at(_off, Pre) + \at(m->_size, Pre); */
 	/*@ assert _off + \at(normfs_ReadRequest_offset_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
-	/*@ assert m->offset != \null ==> normfs_Offset_valid((normfs_Offset *)m->offset) && normfs_Offset_sized((normfs_Offset *)m->offset); */
-	/*@ assert m->offset != \null ==> normfs_ReadRequest_offset_size(m) == 1 + varint_size(m->offset->_size) + m->offset->_size; */
-	/*@ assert m->offset != \null ==> normfs_Offset_bufsep((normfs_Offset *)m->offset, _buf, _off, \at(_off, Pre) + \at(m->_size, Pre) - 1); */
-	if (m->offset != NULL) {
-		_off = gremlin_varint32_encode_at(_buf, _off, 82u);
-		_off = gremlin_varint_encode_at(_buf, _off, normfs_Offset_cached_size(m->offset));
-		/*@ assert _off == \at(_off, _A4) + 1 + varint_size(m->offset->_size); */
-		/*@ assert _off + m->offset->_size <= \at(_off, Pre) + \at(m->_size, Pre); */
-		/*@ assert normfs_Offset_bufsep((normfs_Offset *)m->offset, _buf, _off, _off + m->offset->_size - 1); */
-		_off = normfs_Offset_encode_at(m->offset, _buf, _off);
-	}
+	_off = normfs_ReadRequest_encode_offset_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A4) + \at(normfs_ReadRequest_offset_size(m), Pre); */
 	/*@ ghost _A5: ; */
-	if (m->limit != 0) {
-		_off = gremlin_varint32_encode_at(_buf, _off, 88u);
-		_off = gremlin_varint_encode_at(_buf, _off, m->limit);
-	}
+	/*@ assert normfs_ReadRequest_own{Pre,Here}(m); */
+	/*@ assert _off + \at(normfs_ReadRequest_limit_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
+	_off = normfs_ReadRequest_encode_limit_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A5) + \at(normfs_ReadRequest_limit_size(m), Pre); */
-	/*@ ghost _A6: ; */
 	/*@ assert _off == \at(_off, Pre) + \at(normfs_ReadRequest_tsize(m), Pre); */
 	return _off;
 }
@@ -2026,12 +2455,16 @@ typedef struct normfs_ReadRequest_reader {
 	uint64_t	limit;
 } normfs_ReadRequest_reader;
 
+/*@ predicate normfs_ReadRequest_reader_spans{L}(normfs_ReadRequest_reader *r, uint8_t *s, integer n) =
+      (r->_has.queue_id ==> gremlin_span_at((uint8_t *)r->queue_id.data, r->queue_id.len, s, n)) &&
+      (r->_has.offset ==> gremlin_span_at((uint8_t *)r->offset.data, r->offset.len, s, n));
+*/
+
 /*@ predicate normfs_ReadRequest_reader_ok{L}(normfs_ReadRequest_reader *r, integer n) =
       r->src_len >= n &&
-      (r->_has.queue_id ==> gremlin_span_in(r->queue_id, (uint8_t *)r->src, n)) &&
+      normfs_ReadRequest_reader_spans(r, (uint8_t *)r->src, n) &&
       r->accept_encodings_count <= n &&
-      (r->accept_encodings_count > 0 ==> r->accept_encodings_first_offset < n) &&
-      (r->_has.offset ==> gremlin_span_in(r->offset, (uint8_t *)r->src, n));
+      (r->accept_encodings_count > 0 ==> r->accept_encodings_first_offset < n);
 */
 
 /*@ requires \valid(r);
@@ -2050,9 +2483,10 @@ normfs_ReadRequest_reader_init(normfs_ReadRequest_reader *r, const uint8_t *src,
 {
 	*r = (normfs_ReadRequest_reader){ .src = src, .src_len = len };
 	size_t offset = 0;
-	/*@ loop invariant 0 <= offset <= len;
-	    loop invariant r->src == src && r->src_len == len;
-	    loop invariant normfs_ReadRequest_reader_ok(r, offset);
+	/*@ loop invariant offset_in: 0 <= offset <= len;
+	    loop invariant src_kept: r->src == src && r->src_len == len;
+	    loop invariant normfs_ReadRequest_reader_spans: normfs_ReadRequest_reader_spans(r, (uint8_t *)src, len);
+	    loop invariant count_accept_encodings: r->accept_encodings_count <= offset && (r->accept_encodings_count > 0 ==> r->accept_encodings_first_offset < offset);
 	    loop assigns offset, *r;
 	    loop variant len - offset;
 	*/
@@ -2072,10 +2506,12 @@ normfs_ReadRequest_reader_init(normfs_ReadRequest_reader *r, const uint8_t *src,
 		}
 		if (t.value == 18u /* field 2, GREMLIN_WIRE_LEN_PREFIX */) {
 			struct gremlin_bytes_decode_result d =
-				gremlin_bytes_decode(src + offset, len - offset);
+				gremlin_bytes_decode_at(src, offset, len);
 			if (d.error != GREMLIN_OK) return d.error;
 			offset += d.consumed;
-			r->queue_id = d.bytes;
+			r->queue_id.data = d.bytes.data;
+			r->queue_id.len = d.bytes.len;
+			/*@ assert gremlin_span_at((uint8_t *)r->queue_id.data, r->queue_id.len, (uint8_t *)src, len); */
 			r->_has.queue_id = 1;
 			continue;
 		}
@@ -2126,10 +2562,12 @@ normfs_ReadRequest_reader_init(normfs_ReadRequest_reader *r, const uint8_t *src,
 		}
 		if (t.value == 82u /* field 10, GREMLIN_WIRE_LEN_PREFIX */) {
 			struct gremlin_bytes_decode_result d =
-				gremlin_bytes_decode(src + offset, len - offset);
+				gremlin_bytes_decode_at(src, offset, len);
 			if (d.error != GREMLIN_OK) return d.error;
 			offset += d.consumed;
-			r->offset = d.bytes;
+			r->offset.data = d.bytes.data;
+			r->offset.len = d.bytes.len;
+			/*@ assert gremlin_span_at((uint8_t *)r->offset.data, r->offset.len, (uint8_t *)src, len); */
 			r->_has.offset = 1;
 			continue;
 		}
@@ -2157,6 +2595,7 @@ normfs_ReadRequest_reader_init(normfs_ReadRequest_reader *r, const uint8_t *src,
 /*@ requires r == \null || \valid_read(r);
     assigns \nothing;
     ensures r != \null && r->_has.read_id ==> \result == r->read_id;
+    ensures !(r != \null && r->_has.read_id) ==> \result == 0;
 */
 static inline uint64_t
 normfs_ReadRequest_reader_get_read_id(const normfs_ReadRequest_reader *r)
@@ -2180,6 +2619,7 @@ normfs_ReadRequest_reader_get_queue_id(const normfs_ReadRequest_reader *r)
 /*@ requires r == \null || \valid_read(r);
     assigns \nothing;
     ensures r != \null && r->_has.step ==> \result == r->step;
+    ensures !(r != \null && r->_has.step) ==> \result == 0;
 */
 static inline uint64_t
 normfs_ReadRequest_reader_get_step(const normfs_ReadRequest_reader *r)
@@ -2206,6 +2646,7 @@ typedef struct normfs_ReadRequest_reader_accept_encodings_iter {
 /*@ requires r == \null || \valid_read(r);
     assigns \nothing;
     ensures r != \null ==> \result == r->accept_encodings_count;
+    ensures r == \null ==> \result == 0;
 */
 static inline size_t
 normfs_ReadRequest_reader_accept_encodings_count(const normfs_ReadRequest_reader *r)
@@ -2244,6 +2685,8 @@ normfs_ReadRequest_reader_accept_encodings_begin(const normfs_ReadRequest_reader
     assigns *it, *out;
     ensures normfs_ReadRequest_reader_accept_encodings_iter_ok(*it);
     ensures it->src == \old(it->src) && it->src_len == \old(it->src_len);
+    ensures \old(it->count_remaining) > 0 && \result == GREMLIN_OK ==>
+              it->count_remaining == \old(it->count_remaining) - 1;
     ensures \result == GREMLIN_OK || \result == GREMLIN_ERROR_TRUNCATED ||
             \result == GREMLIN_ERROR_OVERFLOW ||
             \result == GREMLIN_ERROR_INVALID_WIRE_TYPE ||
@@ -2273,7 +2716,8 @@ normfs_ReadRequest_reader_accept_encodings_next(normfs_ReadRequest_reader_accept
 					it->offset += _l.consumed;
 					if (_l.value > it->src_len - it->offset) return GREMLIN_ERROR_TRUNCATED;
 					it->block_end = it->offset + (size_t)_l.value;
-					break;
+					if (it->block_end > it->offset) break;
+					continue;
 				}
 				unsigned _wt = (unsigned)(_t.value % 8u);
 				if (_wt == 6u || _wt == 7u) return GREMLIN_ERROR_INVALID_WIRE_TYPE;
@@ -2332,8 +2776,12 @@ normfs_ReadRequest_reader_accept_encodings_next(normfs_ReadRequest_reader_accept
     requires r == \null || (\valid_read(r) && normfs_ReadRequest_reader_ok(r, r->src_len) &&
                (r->src_len == 0 ||
                 \valid_read(r->src + (0 .. r->src_len - 1))) &&
-               \separated(out, r, r->src + (0 .. r->src_len - 1)));
+               \separated(out, r) &&
+               \separated(out, r->src + (0 .. r->src_len - 1)));
     assigns *out;
+    ensures r != \null && r->_has.offset ==>
+              out->src == r->offset.data && out->src_len == r->offset.len;
+    ensures r == \null || !r->_has.offset ==> out->src_len == 0;
     ensures \result == GREMLIN_OK ==>
               normfs_Offset_reader_ok(out, out->src_len) &&
               (out->src_len == 0 ||
@@ -2355,6 +2803,7 @@ normfs_ReadRequest_reader_get_offset(const normfs_ReadRequest_reader *r, normfs_
 /*@ requires r == \null || \valid_read(r);
     assigns \nothing;
     ensures r != \null && r->_has.limit ==> \result == r->limit;
+    ensures !(r != \null && r->_has.limit) ==> \result == 0;
 */
 static inline uint64_t
 normfs_ReadRequest_reader_get_limit(const normfs_ReadRequest_reader *r)
@@ -2381,35 +2830,47 @@ normfs_ClientRequest_cached_size(const normfs_ClientRequest *m)
 	return m->_size;
 }
 
-/*@ predicate normfs_SetupRequest_avoid_normfs_ClientRequest{L}(normfs_SetupRequest *m, normfs_ClientRequest *p) =
+/*@ axiomatic normfs_SetupRequest_avoid_normfs_ClientRequest_ax {
+    predicate normfs_SetupRequest_avoid_normfs_ClientRequest{L}(normfs_SetupRequest *m, normfs_ClientRequest *p) =
       \separated(p, m);
+  }
 */
 
-/*@ predicate normfs_PingRequest_avoid_normfs_ClientRequest{L}(normfs_PingRequest *m, normfs_ClientRequest *p) =
+/*@ axiomatic normfs_PingRequest_avoid_normfs_ClientRequest_ax {
+    predicate normfs_PingRequest_avoid_normfs_ClientRequest{L}(normfs_PingRequest *m, normfs_ClientRequest *p) =
       \separated(p, m);
+  }
 */
 
-/*@ predicate normfs_WriteRequest_avoid_normfs_ClientRequest{L}(normfs_WriteRequest *m, normfs_ClientRequest *p) =
+/*@ axiomatic normfs_WriteRequest_avoid_normfs_ClientRequest_ax {
+    predicate normfs_WriteRequest_avoid_normfs_ClientRequest{L}(normfs_WriteRequest *m, normfs_ClientRequest *p) =
       \separated(p, m) &&
       (m->packets_count == 0 || \separated(p, m->packets + (0 .. m->packets_count - 1)));
+  }
 */
 
-/*@ predicate normfs_Id_avoid_normfs_ClientRequest{L}(normfs_Id *m, normfs_ClientRequest *p) =
+/*@ axiomatic normfs_Id_avoid_normfs_ClientRequest_ax {
+    predicate normfs_Id_avoid_normfs_ClientRequest{L}(normfs_Id *m, normfs_ClientRequest *p) =
       \separated(p, m);
+  }
 */
 
-/*@ predicate normfs_Offset_avoid_normfs_ClientRequest{L}(normfs_Offset *m, normfs_ClientRequest *p) =
+/*@ axiomatic normfs_Offset_avoid_normfs_ClientRequest_ax {
+    predicate normfs_Offset_avoid_normfs_ClientRequest{L}(normfs_Offset *m, normfs_ClientRequest *p) =
       \separated(p, m) &&
       (m->id != \null ==> normfs_Id_avoid_normfs_ClientRequest((normfs_Id *)m->id, p));
+  }
 */
 
-/*@ predicate normfs_ReadRequest_avoid_normfs_ClientRequest{L}(normfs_ReadRequest *m, normfs_ClientRequest *p) =
+/*@ axiomatic normfs_ReadRequest_avoid_normfs_ClientRequest_ax {
+    predicate normfs_ReadRequest_avoid_normfs_ClientRequest{L}(normfs_ReadRequest *m, normfs_ClientRequest *p) =
       \separated(p, m) &&
       (m->accept_encodings_count == 0 || \separated(p, m->accept_encodings + (0 .. m->accept_encodings_count - 1))) &&
       (m->offset != \null ==> normfs_Offset_avoid_normfs_ClientRequest((normfs_Offset *)m->offset, p));
+  }
 */
 
-/*@
+/*@ axiomatic normfs_ClientRequest_tsize_ax {
     logic integer normfs_ClientRequest_setup_size{L}(normfs_ClientRequest *m) =
       m->setup != \null ?
         1 + varint_size(normfs_SetupRequest_tsize((normfs_SetupRequest *)m->setup)) + normfs_SetupRequest_tsize((normfs_SetupRequest *)m->setup) : 0;
@@ -2518,11 +2979,16 @@ normfs_ClientRequest_cached_size(const normfs_ClientRequest *m)
 
     lemma normfs_ClientRequest_bufsep_sub{L}: \forall normfs_ClientRequest *m, uint8_t *b, integer lo, hi, lo2, hi2;
       lo <= lo2 ==> hi2 <= hi ==> normfs_ClientRequest_bufsep(m, b, lo, hi) ==> normfs_ClientRequest_bufsep(m, b, lo2, hi2);
+  }
 */
 
 /*@ ghost
   /@ requires normfs_ClientRequest_valid(m);
      assigns \nothing;
+     ensures normfs_ClientRequest_setup_size(m) >= 0;
+     ensures normfs_ClientRequest_ping_size(m) >= 0;
+     ensures normfs_ClientRequest_write_size(m) >= 0;
+     ensures normfs_ClientRequest_read_size(m) >= 0;
      ensures m->setup != \null ==> normfs_SetupRequest_tsize((normfs_SetupRequest *)m->setup) >= 0;
      ensures m->ping != \null ==> normfs_PingRequest_tsize((normfs_PingRequest *)m->ping) >= 0;
      ensures m->write != \null ==> normfs_WriteRequest_tsize((normfs_WriteRequest *)m->write) >= 0;
@@ -2535,6 +3001,10 @@ normfs_ClientRequest_cached_size(const normfs_ClientRequest *m)
     if (m->ping) normfs_PingRequest_tsize_nonneg((normfs_PingRequest *)m->ping);
     if (m->write) normfs_WriteRequest_tsize_nonneg((normfs_WriteRequest *)m->write);
     if (m->read) normfs_ReadRequest_tsize_nonneg((normfs_ReadRequest *)m->read);
+    /@ assert normfs_ClientRequest_setup_size(m) >= 0; @/
+    /@ assert normfs_ClientRequest_ping_size(m) >= 0; @/
+    /@ assert normfs_ClientRequest_write_size(m) >= 0; @/
+    /@ assert normfs_ClientRequest_read_size(m) >= 0; @/
   }
 */
 
@@ -2929,7 +3399,6 @@ normfs_ClientRequest_size(const normfs_ClientRequest *m)
 	/*@ assert m->read != \null ==> normfs_ReadRequest_dsame{Pre,Here}((normfs_ReadRequest *)m->read); */
 	/*@ assert m->read != \null ==> normfs_ReadRequest_sized((normfs_ReadRequest *)m->read); */
 	/*@ assert s == \at(s, _A3) + \at(normfs_ClientRequest_read_size(m), Pre); */
-	/*@ ghost _A4: ; */
 	/*@ assert s == \at(normfs_ClientRequest_tsize(m), Pre); */
 	/*@ assert normfs_ClientRequest_dsame{Pre,Here}(m); */
 	/*@ assert m->setup != \null ==> \separated(m, m->setup); */
@@ -2942,7 +3411,8 @@ normfs_ClientRequest_size(const normfs_ClientRequest *m)
 	/*@ assert m->read != \null && m->read->offset != \null && m->read->offset->id != \null ==> \separated(m, m->read->offset->id); */
 	/*@ ghost _Aw: ; */
 	((normfs_ClientRequest *)m)->_size = s;
-	/*@ assert normfs_ClientRequest_own{_Aw,Here}(m); */
+	/*@ assert normfs_ClientRequest_nown{_Aw,Here}((normfs_ClientRequest *)m); */
+	/*@ assert normfs_ClientRequest_own{_Aw,Here}((normfs_ClientRequest *)m); */
 	/*@ assert m->setup != \null ==> \at(m->setup->_size, _Aw) == m->setup->_size; */
 	/*@ assert m->setup != \null ==> \at(m->setup->version, _Aw) == m->setup->version; */
 	/*@ assert m->setup != \null ==> normfs_SetupRequest_nown{_Aw,Here}((normfs_SetupRequest *)m->setup); */
@@ -3000,6 +3470,110 @@ normfs_ClientRequest_size(const normfs_ClientRequest *m)
 }
 
 /*@ requires normfs_ClientRequest_valid(m) && normfs_ClientRequest_sized(m);
+    requires _off + normfs_ClientRequest_setup_size(m) <= 0x7fffffffffffffff;
+    requires normfs_ClientRequest_setup_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_ClientRequest_setup_size(m) - 1));
+    requires normfs_ClientRequest_bufsep(m, _buf, _off, _off + normfs_ClientRequest_setup_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_ClientRequest_setup_size(m) - 1];
+    ensures \result == \old(_off + normfs_ClientRequest_setup_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_ClientRequest_encode_setup_at(const normfs_ClientRequest *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_ClientRequest_tsize_nonneg((normfs_ClientRequest *)m); */
+	/*@ ghost _A0: ; */
+	/*@ assert m->setup != \null ==> normfs_SetupRequest_valid((normfs_SetupRequest *)m->setup) && normfs_SetupRequest_sized((normfs_SetupRequest *)m->setup); */
+	/*@ assert m->setup != \null ==> normfs_ClientRequest_setup_size(m) == 1 + varint_size(m->setup->_size) + m->setup->_size; */
+	/*@ assert m->setup != \null ==> normfs_SetupRequest_bufsep((normfs_SetupRequest *)m->setup, _buf, _off, _off + normfs_ClientRequest_setup_size(m) - 1); */
+	if (m->setup != NULL) {
+		_off = gremlin_varint32_encode_at(_buf, _off, 10u);
+		_off = gremlin_varint_encode_at(_buf, _off, normfs_SetupRequest_cached_size(m->setup));
+		/*@ assert _off == \at(_off, _A0) + 1 + varint_size(m->setup->_size); */
+		/*@ assert _off + m->setup->_size <= \at(_off, Pre) + \at(normfs_ClientRequest_setup_size(m), Pre); */
+		/*@ assert normfs_SetupRequest_bufsep((normfs_SetupRequest *)m->setup, _buf, _off, _off + m->setup->_size - 1); */
+		_off = normfs_SetupRequest_encode_at(m->setup, _buf, _off);
+	}
+	return _off;
+}
+
+/*@ requires normfs_ClientRequest_valid(m) && normfs_ClientRequest_sized(m);
+    requires _off + normfs_ClientRequest_ping_size(m) <= 0x7fffffffffffffff;
+    requires normfs_ClientRequest_ping_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_ClientRequest_ping_size(m) - 1));
+    requires normfs_ClientRequest_bufsep(m, _buf, _off, _off + normfs_ClientRequest_ping_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_ClientRequest_ping_size(m) - 1];
+    ensures \result == \old(_off + normfs_ClientRequest_ping_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_ClientRequest_encode_ping_at(const normfs_ClientRequest *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_ClientRequest_tsize_nonneg((normfs_ClientRequest *)m); */
+	/*@ ghost _A1: ; */
+	/*@ assert m->ping != \null ==> normfs_PingRequest_valid((normfs_PingRequest *)m->ping) && normfs_PingRequest_sized((normfs_PingRequest *)m->ping); */
+	/*@ assert m->ping != \null ==> normfs_ClientRequest_ping_size(m) == 1 + varint_size(m->ping->_size) + m->ping->_size; */
+	/*@ assert m->ping != \null ==> normfs_PingRequest_bufsep((normfs_PingRequest *)m->ping, _buf, _off, _off + normfs_ClientRequest_ping_size(m) - 1); */
+	if (m->ping != NULL) {
+		_off = gremlin_varint32_encode_at(_buf, _off, 18u);
+		_off = gremlin_varint_encode_at(_buf, _off, normfs_PingRequest_cached_size(m->ping));
+		/*@ assert _off == \at(_off, _A1) + 1 + varint_size(m->ping->_size); */
+		/*@ assert _off + m->ping->_size <= \at(_off, Pre) + \at(normfs_ClientRequest_ping_size(m), Pre); */
+		/*@ assert normfs_PingRequest_bufsep((normfs_PingRequest *)m->ping, _buf, _off, _off + m->ping->_size - 1); */
+		_off = normfs_PingRequest_encode_at(m->ping, _buf, _off);
+	}
+	return _off;
+}
+
+/*@ requires normfs_ClientRequest_valid(m) && normfs_ClientRequest_sized(m);
+    requires _off + normfs_ClientRequest_write_size(m) <= 0x7fffffffffffffff;
+    requires normfs_ClientRequest_write_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_ClientRequest_write_size(m) - 1));
+    requires normfs_ClientRequest_bufsep(m, _buf, _off, _off + normfs_ClientRequest_write_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_ClientRequest_write_size(m) - 1];
+    ensures \result == \old(_off + normfs_ClientRequest_write_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_ClientRequest_encode_write_at(const normfs_ClientRequest *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_ClientRequest_tsize_nonneg((normfs_ClientRequest *)m); */
+	/*@ ghost _A2: ; */
+	/*@ assert m->write != \null ==> normfs_WriteRequest_valid((normfs_WriteRequest *)m->write) && normfs_WriteRequest_sized((normfs_WriteRequest *)m->write); */
+	/*@ assert m->write != \null ==> normfs_ClientRequest_write_size(m) == 1 + varint_size(m->write->_size) + m->write->_size; */
+	/*@ assert m->write != \null ==> normfs_WriteRequest_bufsep((normfs_WriteRequest *)m->write, _buf, _off, _off + normfs_ClientRequest_write_size(m) - 1); */
+	if (m->write != NULL) {
+		_off = gremlin_varint32_encode_at(_buf, _off, 82u);
+		_off = gremlin_varint_encode_at(_buf, _off, normfs_WriteRequest_cached_size(m->write));
+		/*@ assert _off == \at(_off, _A2) + 1 + varint_size(m->write->_size); */
+		/*@ assert _off + m->write->_size <= \at(_off, Pre) + \at(normfs_ClientRequest_write_size(m), Pre); */
+		/*@ assert normfs_WriteRequest_bufsep((normfs_WriteRequest *)m->write, _buf, _off, _off + m->write->_size - 1); */
+		_off = normfs_WriteRequest_encode_at(m->write, _buf, _off);
+	}
+	return _off;
+}
+
+/*@ requires normfs_ClientRequest_valid(m) && normfs_ClientRequest_sized(m);
+    requires _off + normfs_ClientRequest_read_size(m) <= 0x7fffffffffffffff;
+    requires normfs_ClientRequest_read_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_ClientRequest_read_size(m) - 1));
+    requires normfs_ClientRequest_bufsep(m, _buf, _off, _off + normfs_ClientRequest_read_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_ClientRequest_read_size(m) - 1];
+    ensures \result == \old(_off + normfs_ClientRequest_read_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_ClientRequest_encode_read_at(const normfs_ClientRequest *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_ClientRequest_tsize_nonneg((normfs_ClientRequest *)m); */
+	/*@ ghost _A3: ; */
+	/*@ assert m->read != \null ==> normfs_ReadRequest_valid((normfs_ReadRequest *)m->read) && normfs_ReadRequest_sized((normfs_ReadRequest *)m->read); */
+	/*@ assert m->read != \null ==> normfs_ClientRequest_read_size(m) == 1 + varint_size(m->read->_size) + m->read->_size; */
+	/*@ assert m->read != \null ==> normfs_ReadRequest_bufsep((normfs_ReadRequest *)m->read, _buf, _off, _off + normfs_ClientRequest_read_size(m) - 1); */
+	if (m->read != NULL) {
+		_off = gremlin_varint32_encode_at(_buf, _off, 90u);
+		_off = gremlin_varint_encode_at(_buf, _off, normfs_ReadRequest_cached_size(m->read));
+		/*@ assert _off == \at(_off, _A3) + 1 + varint_size(m->read->_size); */
+		/*@ assert _off + m->read->_size <= \at(_off, Pre) + \at(normfs_ClientRequest_read_size(m), Pre); */
+		/*@ assert normfs_ReadRequest_bufsep((normfs_ReadRequest *)m->read, _buf, _off, _off + m->read->_size - 1); */
+		_off = normfs_ReadRequest_encode_at(m->read, _buf, _off);
+	}
+	return _off;
+}
+
+/*@ requires normfs_ClientRequest_valid(m) && normfs_ClientRequest_sized(m);
     requires _off + m->_size <= 0x7fffffffffffffff;
     requires m->_size == 0 || \valid(_buf + (_off .. _off + m->_size - 1));
     requires normfs_ClientRequest_bufsep(m, _buf, _off, _off + m->_size - 1);
@@ -3020,67 +3594,28 @@ normfs_ClientRequest_encode_at(const normfs_ClientRequest *m, uint8_t * __restri
 	/*@ assert \at(normfs_ClientRequest_read_size(m), Pre) >= 0; */
 	/*@ assert _off + \at(normfs_ClientRequest_setup_size(m), Pre) + \at(normfs_ClientRequest_ping_size(m), Pre) + \at(normfs_ClientRequest_write_size(m), Pre) + \at(normfs_ClientRequest_read_size(m), Pre) == \at(_off, Pre) + \at(m->_size, Pre); */
 	/*@ assert _off + \at(normfs_ClientRequest_setup_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
-	/*@ assert m->setup != \null ==> normfs_SetupRequest_valid((normfs_SetupRequest *)m->setup) && normfs_SetupRequest_sized((normfs_SetupRequest *)m->setup); */
-	/*@ assert m->setup != \null ==> normfs_ClientRequest_setup_size(m) == 1 + varint_size(m->setup->_size) + m->setup->_size; */
-	/*@ assert m->setup != \null ==> normfs_SetupRequest_bufsep((normfs_SetupRequest *)m->setup, _buf, _off, \at(_off, Pre) + \at(m->_size, Pre) - 1); */
-	if (m->setup != NULL) {
-		_off = gremlin_varint32_encode_at(_buf, _off, 10u);
-		_off = gremlin_varint_encode_at(_buf, _off, normfs_SetupRequest_cached_size(m->setup));
-		/*@ assert _off == \at(_off, _A0) + 1 + varint_size(m->setup->_size); */
-		/*@ assert _off + m->setup->_size <= \at(_off, Pre) + \at(m->_size, Pre); */
-		/*@ assert normfs_SetupRequest_bufsep((normfs_SetupRequest *)m->setup, _buf, _off, _off + m->setup->_size - 1); */
-		_off = normfs_SetupRequest_encode_at(m->setup, _buf, _off);
-	}
+	_off = normfs_ClientRequest_encode_setup_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A0) + \at(normfs_ClientRequest_setup_size(m), Pre); */
 	/*@ ghost _A1: ; */
+	/*@ assert normfs_ClientRequest_own{Pre,Here}(m); */
 	/*@ assert \at(normfs_ClientRequest_write_size(m), Pre) >= 0; */
 	/*@ assert \at(normfs_ClientRequest_read_size(m), Pre) >= 0; */
 	/*@ assert _off + \at(normfs_ClientRequest_ping_size(m), Pre) + \at(normfs_ClientRequest_write_size(m), Pre) + \at(normfs_ClientRequest_read_size(m), Pre) == \at(_off, Pre) + \at(m->_size, Pre); */
 	/*@ assert _off + \at(normfs_ClientRequest_ping_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
-	/*@ assert m->ping != \null ==> normfs_PingRequest_valid((normfs_PingRequest *)m->ping) && normfs_PingRequest_sized((normfs_PingRequest *)m->ping); */
-	/*@ assert m->ping != \null ==> normfs_ClientRequest_ping_size(m) == 1 + varint_size(m->ping->_size) + m->ping->_size; */
-	/*@ assert m->ping != \null ==> normfs_PingRequest_bufsep((normfs_PingRequest *)m->ping, _buf, _off, \at(_off, Pre) + \at(m->_size, Pre) - 1); */
-	if (m->ping != NULL) {
-		_off = gremlin_varint32_encode_at(_buf, _off, 18u);
-		_off = gremlin_varint_encode_at(_buf, _off, normfs_PingRequest_cached_size(m->ping));
-		/*@ assert _off == \at(_off, _A1) + 1 + varint_size(m->ping->_size); */
-		/*@ assert _off + m->ping->_size <= \at(_off, Pre) + \at(m->_size, Pre); */
-		/*@ assert normfs_PingRequest_bufsep((normfs_PingRequest *)m->ping, _buf, _off, _off + m->ping->_size - 1); */
-		_off = normfs_PingRequest_encode_at(m->ping, _buf, _off);
-	}
+	_off = normfs_ClientRequest_encode_ping_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A1) + \at(normfs_ClientRequest_ping_size(m), Pre); */
 	/*@ ghost _A2: ; */
+	/*@ assert normfs_ClientRequest_own{Pre,Here}(m); */
 	/*@ assert \at(normfs_ClientRequest_read_size(m), Pre) >= 0; */
 	/*@ assert _off + \at(normfs_ClientRequest_write_size(m), Pre) + \at(normfs_ClientRequest_read_size(m), Pre) == \at(_off, Pre) + \at(m->_size, Pre); */
 	/*@ assert _off + \at(normfs_ClientRequest_write_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
-	/*@ assert m->write != \null ==> normfs_WriteRequest_valid((normfs_WriteRequest *)m->write) && normfs_WriteRequest_sized((normfs_WriteRequest *)m->write); */
-	/*@ assert m->write != \null ==> normfs_ClientRequest_write_size(m) == 1 + varint_size(m->write->_size) + m->write->_size; */
-	/*@ assert m->write != \null ==> normfs_WriteRequest_bufsep((normfs_WriteRequest *)m->write, _buf, _off, \at(_off, Pre) + \at(m->_size, Pre) - 1); */
-	if (m->write != NULL) {
-		_off = gremlin_varint32_encode_at(_buf, _off, 82u);
-		_off = gremlin_varint_encode_at(_buf, _off, normfs_WriteRequest_cached_size(m->write));
-		/*@ assert _off == \at(_off, _A2) + 1 + varint_size(m->write->_size); */
-		/*@ assert _off + m->write->_size <= \at(_off, Pre) + \at(m->_size, Pre); */
-		/*@ assert normfs_WriteRequest_bufsep((normfs_WriteRequest *)m->write, _buf, _off, _off + m->write->_size - 1); */
-		_off = normfs_WriteRequest_encode_at(m->write, _buf, _off);
-	}
+	_off = normfs_ClientRequest_encode_write_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A2) + \at(normfs_ClientRequest_write_size(m), Pre); */
 	/*@ ghost _A3: ; */
+	/*@ assert normfs_ClientRequest_own{Pre,Here}(m); */
 	/*@ assert _off + \at(normfs_ClientRequest_read_size(m), Pre) == \at(_off, Pre) + \at(m->_size, Pre); */
-	/*@ assert _off + \at(normfs_ClientRequest_read_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
-	/*@ assert m->read != \null ==> normfs_ReadRequest_valid((normfs_ReadRequest *)m->read) && normfs_ReadRequest_sized((normfs_ReadRequest *)m->read); */
-	/*@ assert m->read != \null ==> normfs_ClientRequest_read_size(m) == 1 + varint_size(m->read->_size) + m->read->_size; */
-	/*@ assert m->read != \null ==> normfs_ReadRequest_bufsep((normfs_ReadRequest *)m->read, _buf, _off, \at(_off, Pre) + \at(m->_size, Pre) - 1); */
-	if (m->read != NULL) {
-		_off = gremlin_varint32_encode_at(_buf, _off, 90u);
-		_off = gremlin_varint_encode_at(_buf, _off, normfs_ReadRequest_cached_size(m->read));
-		/*@ assert _off == \at(_off, _A3) + 1 + varint_size(m->read->_size); */
-		/*@ assert _off + m->read->_size <= \at(_off, Pre) + \at(m->_size, Pre); */
-		/*@ assert normfs_ReadRequest_bufsep((normfs_ReadRequest *)m->read, _buf, _off, _off + m->read->_size - 1); */
-		_off = normfs_ReadRequest_encode_at(m->read, _buf, _off);
-	}
+	_off = normfs_ClientRequest_encode_read_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A3) + \at(normfs_ClientRequest_read_size(m), Pre); */
-	/*@ ghost _A4: ; */
 	/*@ assert _off == \at(_off, Pre) + \at(normfs_ClientRequest_tsize(m), Pre); */
 	return _off;
 }
@@ -3115,12 +3650,16 @@ typedef struct normfs_ClientRequest_reader {
 	struct gremlin_bytes	read;
 } normfs_ClientRequest_reader;
 
+/*@ predicate normfs_ClientRequest_reader_spans{L}(normfs_ClientRequest_reader *r, uint8_t *s, integer n) =
+      (r->_has.setup ==> gremlin_span_at((uint8_t *)r->setup.data, r->setup.len, s, n)) &&
+      (r->_has.ping ==> gremlin_span_at((uint8_t *)r->ping.data, r->ping.len, s, n)) &&
+      (r->_has.write ==> gremlin_span_at((uint8_t *)r->write.data, r->write.len, s, n)) &&
+      (r->_has.read ==> gremlin_span_at((uint8_t *)r->read.data, r->read.len, s, n));
+*/
+
 /*@ predicate normfs_ClientRequest_reader_ok{L}(normfs_ClientRequest_reader *r, integer n) =
       r->src_len >= n &&
-      (r->_has.setup ==> gremlin_span_in(r->setup, (uint8_t *)r->src, n)) &&
-      (r->_has.ping ==> gremlin_span_in(r->ping, (uint8_t *)r->src, n)) &&
-      (r->_has.write ==> gremlin_span_in(r->write, (uint8_t *)r->src, n)) &&
-      (r->_has.read ==> gremlin_span_in(r->read, (uint8_t *)r->src, n));
+      normfs_ClientRequest_reader_spans(r, (uint8_t *)r->src, n);
 */
 
 /*@ requires \valid(r);
@@ -3139,9 +3678,9 @@ normfs_ClientRequest_reader_init(normfs_ClientRequest_reader *r, const uint8_t *
 {
 	*r = (normfs_ClientRequest_reader){ .src = src, .src_len = len };
 	size_t offset = 0;
-	/*@ loop invariant 0 <= offset <= len;
-	    loop invariant r->src == src && r->src_len == len;
-	    loop invariant normfs_ClientRequest_reader_ok(r, offset);
+	/*@ loop invariant offset_in: 0 <= offset <= len;
+	    loop invariant src_kept: r->src == src && r->src_len == len;
+	    loop invariant normfs_ClientRequest_reader_spans: normfs_ClientRequest_reader_spans(r, (uint8_t *)src, len);
 	    loop assigns offset, *r;
 	    loop variant len - offset;
 	*/
@@ -3152,37 +3691,45 @@ normfs_ClientRequest_reader_init(normfs_ClientRequest_reader *r, const uint8_t *
 		offset += t.consumed;
 		if (t.value == 10u /* field 1, GREMLIN_WIRE_LEN_PREFIX */) {
 			struct gremlin_bytes_decode_result d =
-				gremlin_bytes_decode(src + offset, len - offset);
+				gremlin_bytes_decode_at(src, offset, len);
 			if (d.error != GREMLIN_OK) return d.error;
 			offset += d.consumed;
-			r->setup = d.bytes;
+			r->setup.data = d.bytes.data;
+			r->setup.len = d.bytes.len;
+			/*@ assert gremlin_span_at((uint8_t *)r->setup.data, r->setup.len, (uint8_t *)src, len); */
 			r->_has.setup = 1;
 			continue;
 		}
 		if (t.value == 18u /* field 2, GREMLIN_WIRE_LEN_PREFIX */) {
 			struct gremlin_bytes_decode_result d =
-				gremlin_bytes_decode(src + offset, len - offset);
+				gremlin_bytes_decode_at(src, offset, len);
 			if (d.error != GREMLIN_OK) return d.error;
 			offset += d.consumed;
-			r->ping = d.bytes;
+			r->ping.data = d.bytes.data;
+			r->ping.len = d.bytes.len;
+			/*@ assert gremlin_span_at((uint8_t *)r->ping.data, r->ping.len, (uint8_t *)src, len); */
 			r->_has.ping = 1;
 			continue;
 		}
 		if (t.value == 82u /* field 10, GREMLIN_WIRE_LEN_PREFIX */) {
 			struct gremlin_bytes_decode_result d =
-				gremlin_bytes_decode(src + offset, len - offset);
+				gremlin_bytes_decode_at(src, offset, len);
 			if (d.error != GREMLIN_OK) return d.error;
 			offset += d.consumed;
-			r->write = d.bytes;
+			r->write.data = d.bytes.data;
+			r->write.len = d.bytes.len;
+			/*@ assert gremlin_span_at((uint8_t *)r->write.data, r->write.len, (uint8_t *)src, len); */
 			r->_has.write = 1;
 			continue;
 		}
 		if (t.value == 90u /* field 11, GREMLIN_WIRE_LEN_PREFIX */) {
 			struct gremlin_bytes_decode_result d =
-				gremlin_bytes_decode(src + offset, len - offset);
+				gremlin_bytes_decode_at(src, offset, len);
 			if (d.error != GREMLIN_OK) return d.error;
 			offset += d.consumed;
-			r->read = d.bytes;
+			r->read.data = d.bytes.data;
+			r->read.len = d.bytes.len;
+			/*@ assert gremlin_span_at((uint8_t *)r->read.data, r->read.len, (uint8_t *)src, len); */
 			r->_has.read = 1;
 			continue;
 		}
@@ -3202,8 +3749,12 @@ normfs_ClientRequest_reader_init(normfs_ClientRequest_reader *r, const uint8_t *
     requires r == \null || (\valid_read(r) && normfs_ClientRequest_reader_ok(r, r->src_len) &&
                (r->src_len == 0 ||
                 \valid_read(r->src + (0 .. r->src_len - 1))) &&
-               \separated(out, r, r->src + (0 .. r->src_len - 1)));
+               \separated(out, r) &&
+               \separated(out, r->src + (0 .. r->src_len - 1)));
     assigns *out;
+    ensures r != \null && r->_has.setup ==>
+              out->src == r->setup.data && out->src_len == r->setup.len;
+    ensures r == \null || !r->_has.setup ==> out->src_len == 0;
     ensures \result == GREMLIN_OK ==>
               normfs_SetupRequest_reader_ok(out, out->src_len) &&
               (out->src_len == 0 ||
@@ -3226,8 +3777,12 @@ normfs_ClientRequest_reader_get_setup(const normfs_ClientRequest_reader *r, norm
     requires r == \null || (\valid_read(r) && normfs_ClientRequest_reader_ok(r, r->src_len) &&
                (r->src_len == 0 ||
                 \valid_read(r->src + (0 .. r->src_len - 1))) &&
-               \separated(out, r, r->src + (0 .. r->src_len - 1)));
+               \separated(out, r) &&
+               \separated(out, r->src + (0 .. r->src_len - 1)));
     assigns *out;
+    ensures r != \null && r->_has.ping ==>
+              out->src == r->ping.data && out->src_len == r->ping.len;
+    ensures r == \null || !r->_has.ping ==> out->src_len == 0;
     ensures \result == GREMLIN_OK ==>
               normfs_PingRequest_reader_ok(out, out->src_len) &&
               (out->src_len == 0 ||
@@ -3250,8 +3805,12 @@ normfs_ClientRequest_reader_get_ping(const normfs_ClientRequest_reader *r, normf
     requires r == \null || (\valid_read(r) && normfs_ClientRequest_reader_ok(r, r->src_len) &&
                (r->src_len == 0 ||
                 \valid_read(r->src + (0 .. r->src_len - 1))) &&
-               \separated(out, r, r->src + (0 .. r->src_len - 1)));
+               \separated(out, r) &&
+               \separated(out, r->src + (0 .. r->src_len - 1)));
     assigns *out;
+    ensures r != \null && r->_has.write ==>
+              out->src == r->write.data && out->src_len == r->write.len;
+    ensures r == \null || !r->_has.write ==> out->src_len == 0;
     ensures \result == GREMLIN_OK ==>
               normfs_WriteRequest_reader_ok(out, out->src_len) &&
               (out->src_len == 0 ||
@@ -3274,8 +3833,12 @@ normfs_ClientRequest_reader_get_write(const normfs_ClientRequest_reader *r, norm
     requires r == \null || (\valid_read(r) && normfs_ClientRequest_reader_ok(r, r->src_len) &&
                (r->src_len == 0 ||
                 \valid_read(r->src + (0 .. r->src_len - 1))) &&
-               \separated(out, r, r->src + (0 .. r->src_len - 1)));
+               \separated(out, r) &&
+               \separated(out, r->src + (0 .. r->src_len - 1)));
     assigns *out;
+    ensures r != \null && r->_has.read ==>
+              out->src == r->read.data && out->src_len == r->read.len;
+    ensures r == \null || !r->_has.read ==> out->src_len == 0;
     ensures \result == GREMLIN_OK ==>
               normfs_ReadRequest_reader_ok(out, out->src_len) &&
               (out->src_len == 0 ||
@@ -3311,15 +3874,19 @@ normfs_SetupResponse_cached_size(const normfs_SetupResponse *m)
 	return m->_size;
 }
 
-/*@ predicate normfs_PingRequest_avoid_normfs_SetupResponse{L}(normfs_PingRequest *m, normfs_SetupResponse *p) =
+/*@ axiomatic normfs_PingRequest_avoid_normfs_SetupResponse_ax {
+    predicate normfs_PingRequest_avoid_normfs_SetupResponse{L}(normfs_PingRequest *m, normfs_SetupResponse *p) =
       \separated(p, m);
+  }
 */
 
-/*@ predicate normfs_Id_avoid_normfs_SetupResponse{L}(normfs_Id *m, normfs_SetupResponse *p) =
+/*@ axiomatic normfs_Id_avoid_normfs_SetupResponse_ax {
+    predicate normfs_Id_avoid_normfs_SetupResponse{L}(normfs_Id *m, normfs_SetupResponse *p) =
       \separated(p, m);
+  }
 */
 
-/*@
+/*@ axiomatic normfs_SetupResponse_tsize_ax {
     logic integer normfs_SetupResponse_version_size{L}(normfs_SetupResponse *m) =
       m->version != 0 ? 1 + varint_size(m->version) : 0;
 
@@ -3363,7 +3930,9 @@ normfs_SetupResponse_cached_size(const normfs_SetupResponse *m)
       (m->instance_id.len == 0 || \valid_read(m->instance_id.data + (0 .. m->instance_id.len - 1)));
 
     predicate normfs_SetupResponse_bufsep{L}(normfs_SetupResponse *m, uint8_t *b, integer lo, integer hi) =
-      hi < lo || (\separated(b + (lo .. hi), m));
+      hi < lo || (\separated(b + (lo .. hi), m) &&
+      (m->instance_id_bytes.len == 0 || \separated(b + (lo .. hi), m->instance_id_bytes.data + (0 .. m->instance_id_bytes.len - 1))) &&
+      (m->instance_id.len == 0 || \separated(b + (lo .. hi), m->instance_id.data + (0 .. m->instance_id.len - 1))));
 
     lemma normfs_SetupResponse_version_size_frame{L1,L2}: \forall normfs_SetupResponse *m;
       normfs_SetupResponse_dsame{L1,L2}(m) ==> \at(normfs_SetupResponse_version_size(m), L1) == \at(normfs_SetupResponse_version_size(m), L2);
@@ -3385,15 +3954,22 @@ normfs_SetupResponse_cached_size(const normfs_SetupResponse *m)
 
     lemma normfs_SetupResponse_bufsep_sub{L}: \forall normfs_SetupResponse *m, uint8_t *b, integer lo, hi, lo2, hi2;
       lo <= lo2 ==> hi2 <= hi ==> normfs_SetupResponse_bufsep(m, b, lo, hi) ==> normfs_SetupResponse_bufsep(m, b, lo2, hi2);
+  }
 */
 
 /*@ ghost
   /@ requires normfs_SetupResponse_valid(m);
      assigns \nothing;
+     ensures normfs_SetupResponse_version_size(m) >= 0;
+     ensures normfs_SetupResponse_instance_id_bytes_size(m) >= 0;
+     ensures normfs_SetupResponse_instance_id_size(m) >= 0;
      ensures normfs_SetupResponse_tsize(m) >= 0;
   @/
   void normfs_SetupResponse_tsize_nonneg(normfs_SetupResponse *m)
   {
+    /@ assert normfs_SetupResponse_version_size(m) >= 0; @/
+    /@ assert normfs_SetupResponse_instance_id_bytes_size(m) >= 0; @/
+    /@ assert normfs_SetupResponse_instance_id_size(m) >= 0; @/
   }
 */
 
@@ -3410,12 +3986,14 @@ normfs_SetupResponse_size(const normfs_SetupResponse *m)
 	size_t s = 0;
 	/*@ ghost normfs_SetupResponse_tsize_nonneg((normfs_SetupResponse *)m); */
 	/*@ ghost _A0: ; */
+	/*@ assert s + \at(normfs_SetupResponse_version_size(m), Pre) <= \at(normfs_SetupResponse_tsize(m), Pre); */
 	if (m->version != 0) {
 		s += 1
 		   + gremlin_varint_size(m->version);
 	}
 	/*@ assert s == \at(s, _A0) + \at(normfs_SetupResponse_version_size(m), Pre); */
 	/*@ ghost _A1: ; */
+	/*@ assert s + \at(normfs_SetupResponse_instance_id_bytes_size(m), Pre) <= \at(normfs_SetupResponse_tsize(m), Pre); */
 	if (m->instance_id_bytes.len > 0) {
 		s += 1
 		   + gremlin_varint_size(m->instance_id_bytes.len)
@@ -3423,22 +4001,85 @@ normfs_SetupResponse_size(const normfs_SetupResponse *m)
 	}
 	/*@ assert s == \at(s, _A1) + \at(normfs_SetupResponse_instance_id_bytes_size(m), Pre); */
 	/*@ ghost _A2: ; */
+	/*@ assert s + \at(normfs_SetupResponse_instance_id_size(m), Pre) <= \at(normfs_SetupResponse_tsize(m), Pre); */
 	if (m->instance_id.len > 0) {
 		s += 1
 		   + gremlin_varint_size(m->instance_id.len)
 		   + m->instance_id.len;
 	}
 	/*@ assert s == \at(s, _A2) + \at(normfs_SetupResponse_instance_id_size(m), Pre); */
-	/*@ ghost _A3: ; */
 	/*@ assert s == \at(normfs_SetupResponse_tsize(m), Pre); */
 	/*@ assert normfs_SetupResponse_dsame{Pre,Here}(m); */
 	/*@ ghost _Aw: ; */
 	((normfs_SetupResponse *)m)->_size = s;
-	/*@ assert normfs_SetupResponse_own{_Aw,Here}(m); */
+	/*@ assert \at(m->version, _Aw) == m->version; */
+	/*@ assert \at(m->instance_id_bytes.len, _Aw) == m->instance_id_bytes.len; */
+	/*@ assert \at(m->instance_id.len, _Aw) == m->instance_id.len; */
+	/*@ assert normfs_SetupResponse_nown{_Aw,Here}((normfs_SetupResponse *)m); */
+	/*@ assert normfs_SetupResponse_own{_Aw,Here}((normfs_SetupResponse *)m); */
 	/*@ assert normfs_SetupResponse_dsame{_Aw,Here}(m); */
 	/*@ assert normfs_SetupResponse_dsame{Pre,Here}(m); */
 	/*@ assert normfs_SetupResponse_tsize(m) == \at(normfs_SetupResponse_tsize(m), Pre); */
 	return s;
+}
+
+/*@ requires normfs_SetupResponse_valid(m) && normfs_SetupResponse_sized(m);
+    requires _off + normfs_SetupResponse_version_size(m) <= 0x7fffffffffffffff;
+    requires normfs_SetupResponse_version_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_SetupResponse_version_size(m) - 1));
+    requires normfs_SetupResponse_bufsep(m, _buf, _off, _off + normfs_SetupResponse_version_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_SetupResponse_version_size(m) - 1];
+    ensures \result == \old(_off + normfs_SetupResponse_version_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_SetupResponse_encode_version_at(const normfs_SetupResponse *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_SetupResponse_tsize_nonneg((normfs_SetupResponse *)m); */
+	/*@ ghost _A0: ; */
+	if (m->version != 0) {
+		_off = gremlin_varint32_encode_at(_buf, _off, 8u);
+		_off = gremlin_varint_encode_at(_buf, _off, m->version);
+	}
+	return _off;
+}
+
+/*@ requires normfs_SetupResponse_valid(m) && normfs_SetupResponse_sized(m);
+    requires _off + normfs_SetupResponse_instance_id_bytes_size(m) <= 0x7fffffffffffffff;
+    requires normfs_SetupResponse_instance_id_bytes_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_SetupResponse_instance_id_bytes_size(m) - 1));
+    requires normfs_SetupResponse_bufsep(m, _buf, _off, _off + normfs_SetupResponse_instance_id_bytes_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_SetupResponse_instance_id_bytes_size(m) - 1];
+    ensures \result == \old(_off + normfs_SetupResponse_instance_id_bytes_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_SetupResponse_encode_instance_id_bytes_at(const normfs_SetupResponse *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_SetupResponse_tsize_nonneg((normfs_SetupResponse *)m); */
+	/*@ ghost _A1: ; */
+	if (m->instance_id_bytes.len > 0) {
+		_off = gremlin_varint32_encode_at(_buf, _off, 18u);
+		_off = gremlin_varint_encode_at(_buf, _off, m->instance_id_bytes.len);
+		_off = gremlin_write_bytes_at(_buf, _off, m->instance_id_bytes.data, m->instance_id_bytes.len);
+	}
+	return _off;
+}
+
+/*@ requires normfs_SetupResponse_valid(m) && normfs_SetupResponse_sized(m);
+    requires _off + normfs_SetupResponse_instance_id_size(m) <= 0x7fffffffffffffff;
+    requires normfs_SetupResponse_instance_id_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_SetupResponse_instance_id_size(m) - 1));
+    requires normfs_SetupResponse_bufsep(m, _buf, _off, _off + normfs_SetupResponse_instance_id_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_SetupResponse_instance_id_size(m) - 1];
+    ensures \result == \old(_off + normfs_SetupResponse_instance_id_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_SetupResponse_encode_instance_id_at(const normfs_SetupResponse *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_SetupResponse_tsize_nonneg((normfs_SetupResponse *)m); */
+	/*@ ghost _A2: ; */
+	if (m->instance_id.len > 0) {
+		_off = gremlin_varint32_encode_at(_buf, _off, 26u);
+		_off = gremlin_varint_encode_at(_buf, _off, m->instance_id.len);
+		_off = gremlin_write_bytes_at(_buf, _off, m->instance_id.data, m->instance_id.len);
+	}
+	return _off;
 }
 
 /*@ requires normfs_SetupResponse_valid(m) && normfs_SetupResponse_sized(m);
@@ -3453,26 +4094,19 @@ normfs_SetupResponse_encode_at(const normfs_SetupResponse *m, uint8_t * __restri
 {
 	/*@ ghost normfs_SetupResponse_tsize_nonneg((normfs_SetupResponse *)m); */
 	/*@ ghost _A0: ; */
-	if (m->version != 0) {
-		_off = gremlin_varint32_encode_at(_buf, _off, 8u);
-		_off = gremlin_varint_encode_at(_buf, _off, m->version);
-	}
+	/*@ assert _off + \at(normfs_SetupResponse_version_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
+	_off = normfs_SetupResponse_encode_version_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A0) + \at(normfs_SetupResponse_version_size(m), Pre); */
 	/*@ ghost _A1: ; */
-	if (m->instance_id_bytes.len > 0) {
-		_off = gremlin_varint32_encode_at(_buf, _off, 18u);
-		_off = gremlin_varint_encode_at(_buf, _off, m->instance_id_bytes.len);
-		_off = gremlin_write_bytes_at(_buf, _off, m->instance_id_bytes.data, m->instance_id_bytes.len);
-	}
+	/*@ assert normfs_SetupResponse_own{Pre,Here}(m); */
+	/*@ assert _off + \at(normfs_SetupResponse_instance_id_bytes_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
+	_off = normfs_SetupResponse_encode_instance_id_bytes_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A1) + \at(normfs_SetupResponse_instance_id_bytes_size(m), Pre); */
 	/*@ ghost _A2: ; */
-	if (m->instance_id.len > 0) {
-		_off = gremlin_varint32_encode_at(_buf, _off, 26u);
-		_off = gremlin_varint_encode_at(_buf, _off, m->instance_id.len);
-		_off = gremlin_write_bytes_at(_buf, _off, m->instance_id.data, m->instance_id.len);
-	}
+	/*@ assert normfs_SetupResponse_own{Pre,Here}(m); */
+	/*@ assert _off + \at(normfs_SetupResponse_instance_id_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
+	_off = normfs_SetupResponse_encode_instance_id_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A2) + \at(normfs_SetupResponse_instance_id_size(m), Pre); */
-	/*@ ghost _A3: ; */
 	/*@ assert _off == \at(_off, Pre) + \at(normfs_SetupResponse_tsize(m), Pre); */
 	return _off;
 }
@@ -3505,10 +4139,14 @@ typedef struct normfs_SetupResponse_reader {
 	struct gremlin_bytes	instance_id;
 } normfs_SetupResponse_reader;
 
+/*@ predicate normfs_SetupResponse_reader_spans{L}(normfs_SetupResponse_reader *r, uint8_t *s, integer n) =
+      (r->_has.instance_id_bytes ==> gremlin_span_at((uint8_t *)r->instance_id_bytes.data, r->instance_id_bytes.len, s, n)) &&
+      (r->_has.instance_id ==> gremlin_span_at((uint8_t *)r->instance_id.data, r->instance_id.len, s, n));
+*/
+
 /*@ predicate normfs_SetupResponse_reader_ok{L}(normfs_SetupResponse_reader *r, integer n) =
       r->src_len >= n &&
-      (r->_has.instance_id_bytes ==> gremlin_span_in(r->instance_id_bytes, (uint8_t *)r->src, n)) &&
-      (r->_has.instance_id ==> gremlin_span_in(r->instance_id, (uint8_t *)r->src, n));
+      normfs_SetupResponse_reader_spans(r, (uint8_t *)r->src, n);
 */
 
 /*@ requires \valid(r);
@@ -3527,9 +4165,9 @@ normfs_SetupResponse_reader_init(normfs_SetupResponse_reader *r, const uint8_t *
 {
 	*r = (normfs_SetupResponse_reader){ .src = src, .src_len = len };
 	size_t offset = 0;
-	/*@ loop invariant 0 <= offset <= len;
-	    loop invariant r->src == src && r->src_len == len;
-	    loop invariant normfs_SetupResponse_reader_ok(r, offset);
+	/*@ loop invariant offset_in: 0 <= offset <= len;
+	    loop invariant src_kept: r->src == src && r->src_len == len;
+	    loop invariant normfs_SetupResponse_reader_spans: normfs_SetupResponse_reader_spans(r, (uint8_t *)src, len);
 	    loop assigns offset, *r;
 	    loop variant len - offset;
 	*/
@@ -3549,19 +4187,23 @@ normfs_SetupResponse_reader_init(normfs_SetupResponse_reader *r, const uint8_t *
 		}
 		if (t.value == 18u /* field 2, GREMLIN_WIRE_LEN_PREFIX */) {
 			struct gremlin_bytes_decode_result d =
-				gremlin_bytes_decode(src + offset, len - offset);
+				gremlin_bytes_decode_at(src, offset, len);
 			if (d.error != GREMLIN_OK) return d.error;
 			offset += d.consumed;
-			r->instance_id_bytes = d.bytes;
+			r->instance_id_bytes.data = d.bytes.data;
+			r->instance_id_bytes.len = d.bytes.len;
+			/*@ assert gremlin_span_at((uint8_t *)r->instance_id_bytes.data, r->instance_id_bytes.len, (uint8_t *)src, len); */
 			r->_has.instance_id_bytes = 1;
 			continue;
 		}
 		if (t.value == 26u /* field 3, GREMLIN_WIRE_LEN_PREFIX */) {
 			struct gremlin_bytes_decode_result d =
-				gremlin_bytes_decode(src + offset, len - offset);
+				gremlin_bytes_decode_at(src, offset, len);
 			if (d.error != GREMLIN_OK) return d.error;
 			offset += d.consumed;
-			r->instance_id = d.bytes;
+			r->instance_id.data = d.bytes.data;
+			r->instance_id.len = d.bytes.len;
+			/*@ assert gremlin_span_at((uint8_t *)r->instance_id.data, r->instance_id.len, (uint8_t *)src, len); */
 			r->_has.instance_id = 1;
 			continue;
 		}
@@ -3580,6 +4222,7 @@ normfs_SetupResponse_reader_init(normfs_SetupResponse_reader *r, const uint8_t *
 /*@ requires r == \null || \valid_read(r);
     assigns \nothing;
     ensures r != \null && r->_has.version ==> \result == r->version;
+    ensures !(r != \null && r->_has.version) ==> \result == 0;
 */
 static inline uint64_t
 normfs_SetupResponse_reader_get_version(const normfs_SetupResponse_reader *r)
@@ -3629,24 +4272,32 @@ normfs_PingResponse_cached_size(const normfs_PingResponse *m)
 	return m->_size;
 }
 
-/*@ predicate normfs_PingRequest_avoid_normfs_PingResponse{L}(normfs_PingRequest *m, normfs_PingResponse *p) =
+/*@ axiomatic normfs_PingRequest_avoid_normfs_PingResponse_ax {
+    predicate normfs_PingRequest_avoid_normfs_PingResponse{L}(normfs_PingRequest *m, normfs_PingResponse *p) =
       \separated(p, m);
+  }
 */
 
-/*@ predicate normfs_Id_avoid_normfs_PingResponse{L}(normfs_Id *m, normfs_PingResponse *p) =
+/*@ axiomatic normfs_Id_avoid_normfs_PingResponse_ax {
+    predicate normfs_Id_avoid_normfs_PingResponse{L}(normfs_Id *m, normfs_PingResponse *p) =
       \separated(p, m);
+  }
 */
 
-/*@ predicate normfs_PingResponse_avoid_normfs_SetupResponse{L}(normfs_PingResponse *m, normfs_SetupResponse *p) =
+/*@ axiomatic normfs_PingResponse_avoid_normfs_SetupResponse_ax {
+    predicate normfs_PingResponse_avoid_normfs_SetupResponse{L}(normfs_PingResponse *m, normfs_SetupResponse *p) =
       \separated(p, m) &&
       (m->request != \null ==> normfs_PingRequest_avoid_normfs_SetupResponse((normfs_PingRequest *)m->request, p));
+  }
 */
 
-/*@ predicate normfs_SetupResponse_navoid_normfs_PingResponse{L}(normfs_SetupResponse *m, normfs_PingResponse *t) =
+/*@ axiomatic normfs_SetupResponse_navoid_normfs_PingResponse_ax {
+    predicate normfs_SetupResponse_navoid_normfs_PingResponse{L}(normfs_SetupResponse *m, normfs_PingResponse *t) =
       normfs_PingResponse_avoid_normfs_SetupResponse(t, m);
+  }
 */
 
-/*@
+/*@ axiomatic normfs_PingResponse_tsize_ax {
     logic integer normfs_PingResponse_local_stamp_ns_size{L}(normfs_PingResponse *m) =
       m->local_stamp_ns != 0 ? 1 + varint_size(m->local_stamp_ns) : 0;
 
@@ -3713,17 +4364,24 @@ normfs_PingResponse_cached_size(const normfs_PingResponse *m)
 
     lemma normfs_PingResponse_bufsep_sub{L}: \forall normfs_PingResponse *m, uint8_t *b, integer lo, hi, lo2, hi2;
       lo <= lo2 ==> hi2 <= hi ==> normfs_PingResponse_bufsep(m, b, lo, hi) ==> normfs_PingResponse_bufsep(m, b, lo2, hi2);
+  }
 */
 
 /*@ ghost
   /@ requires normfs_PingResponse_valid(m);
      assigns \nothing;
+     ensures normfs_PingResponse_local_stamp_ns_size(m) >= 0;
+     ensures normfs_PingResponse_monotonic_stamp_ns_size(m) >= 0;
+     ensures normfs_PingResponse_request_size(m) >= 0;
      ensures m->request != \null ==> normfs_PingRequest_tsize((normfs_PingRequest *)m->request) >= 0;
      ensures normfs_PingResponse_tsize(m) >= 0;
   @/
   void normfs_PingResponse_tsize_nonneg(normfs_PingResponse *m)
   {
     if (m->request) normfs_PingRequest_tsize_nonneg((normfs_PingRequest *)m->request);
+    /@ assert normfs_PingResponse_local_stamp_ns_size(m) >= 0; @/
+    /@ assert normfs_PingResponse_monotonic_stamp_ns_size(m) >= 0; @/
+    /@ assert normfs_PingResponse_request_size(m) >= 0; @/
   }
 */
 
@@ -3741,12 +4399,14 @@ normfs_PingResponse_size(const normfs_PingResponse *m)
 	/*@ ghost normfs_PingResponse_tsize_nonneg((normfs_PingResponse *)m); */
 	/*@ ghost _A0: ; */
 	/*@ assert (m->request != \null ==> normfs_PingRequest_valid((normfs_PingRequest *)m->request)); */
+	/*@ assert s + \at(normfs_PingResponse_local_stamp_ns_size(m), Pre) <= \at(normfs_PingResponse_tsize(m), Pre); */
 	if (m->local_stamp_ns != 0) {
 		s += 1
 		   + gremlin_varint_size(m->local_stamp_ns);
 	}
 	/*@ assert s == \at(s, _A0) + \at(normfs_PingResponse_local_stamp_ns_size(m), Pre); */
 	/*@ ghost _A1: ; */
+	/*@ assert s + \at(normfs_PingResponse_monotonic_stamp_ns_size(m), Pre) <= \at(normfs_PingResponse_tsize(m), Pre); */
 	if (m->monotonic_stamp_ns != 0) {
 		s += 1
 		   + gremlin_varint_size(m->monotonic_stamp_ns);
@@ -3776,13 +4436,15 @@ normfs_PingResponse_size(const normfs_PingResponse *m)
 	/*@ assert m->request != \null ==> normfs_PingRequest_dsame{Pre,Here}((normfs_PingRequest *)m->request); */
 	/*@ assert m->request != \null ==> normfs_PingRequest_sized((normfs_PingRequest *)m->request); */
 	/*@ assert s == \at(s, _A2) + \at(normfs_PingResponse_request_size(m), Pre); */
-	/*@ ghost _A3: ; */
 	/*@ assert s == \at(normfs_PingResponse_tsize(m), Pre); */
 	/*@ assert normfs_PingResponse_dsame{Pre,Here}(m); */
 	/*@ assert m->request != \null ==> \separated(m, m->request); */
 	/*@ ghost _Aw: ; */
 	((normfs_PingResponse *)m)->_size = s;
-	/*@ assert normfs_PingResponse_own{_Aw,Here}(m); */
+	/*@ assert \at(m->local_stamp_ns, _Aw) == m->local_stamp_ns; */
+	/*@ assert \at(m->monotonic_stamp_ns, _Aw) == m->monotonic_stamp_ns; */
+	/*@ assert normfs_PingResponse_nown{_Aw,Here}((normfs_PingResponse *)m); */
+	/*@ assert normfs_PingResponse_own{_Aw,Here}((normfs_PingResponse *)m); */
 	/*@ assert m->request != \null ==> \at(m->request->_size, _Aw) == m->request->_size; */
 	/*@ assert m->request != \null ==> \at(m->request->sequence, _Aw) == m->request->sequence; */
 	/*@ assert m->request != \null ==> \at(m->request->client_timestamp_ns, _Aw) == m->request->client_timestamp_ns; */
@@ -3799,6 +4461,70 @@ normfs_PingResponse_size(const normfs_PingResponse *m)
 }
 
 /*@ requires normfs_PingResponse_valid(m) && normfs_PingResponse_sized(m);
+    requires _off + normfs_PingResponse_local_stamp_ns_size(m) <= 0x7fffffffffffffff;
+    requires normfs_PingResponse_local_stamp_ns_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_PingResponse_local_stamp_ns_size(m) - 1));
+    requires normfs_PingResponse_bufsep(m, _buf, _off, _off + normfs_PingResponse_local_stamp_ns_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_PingResponse_local_stamp_ns_size(m) - 1];
+    ensures \result == \old(_off + normfs_PingResponse_local_stamp_ns_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_PingResponse_encode_local_stamp_ns_at(const normfs_PingResponse *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_PingResponse_tsize_nonneg((normfs_PingResponse *)m); */
+	/*@ ghost _A0: ; */
+	if (m->local_stamp_ns != 0) {
+		_off = gremlin_varint32_encode_at(_buf, _off, 16u);
+		_off = gremlin_varint_encode_at(_buf, _off, m->local_stamp_ns);
+	}
+	return _off;
+}
+
+/*@ requires normfs_PingResponse_valid(m) && normfs_PingResponse_sized(m);
+    requires _off + normfs_PingResponse_monotonic_stamp_ns_size(m) <= 0x7fffffffffffffff;
+    requires normfs_PingResponse_monotonic_stamp_ns_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_PingResponse_monotonic_stamp_ns_size(m) - 1));
+    requires normfs_PingResponse_bufsep(m, _buf, _off, _off + normfs_PingResponse_monotonic_stamp_ns_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_PingResponse_monotonic_stamp_ns_size(m) - 1];
+    ensures \result == \old(_off + normfs_PingResponse_monotonic_stamp_ns_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_PingResponse_encode_monotonic_stamp_ns_at(const normfs_PingResponse *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_PingResponse_tsize_nonneg((normfs_PingResponse *)m); */
+	/*@ ghost _A1: ; */
+	if (m->monotonic_stamp_ns != 0) {
+		_off = gremlin_varint32_encode_at(_buf, _off, 24u);
+		_off = gremlin_varint_encode_at(_buf, _off, m->monotonic_stamp_ns);
+	}
+	return _off;
+}
+
+/*@ requires normfs_PingResponse_valid(m) && normfs_PingResponse_sized(m);
+    requires _off + normfs_PingResponse_request_size(m) <= 0x7fffffffffffffff;
+    requires normfs_PingResponse_request_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_PingResponse_request_size(m) - 1));
+    requires normfs_PingResponse_bufsep(m, _buf, _off, _off + normfs_PingResponse_request_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_PingResponse_request_size(m) - 1];
+    ensures \result == \old(_off + normfs_PingResponse_request_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_PingResponse_encode_request_at(const normfs_PingResponse *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_PingResponse_tsize_nonneg((normfs_PingResponse *)m); */
+	/*@ ghost _A2: ; */
+	/*@ assert m->request != \null ==> normfs_PingRequest_valid((normfs_PingRequest *)m->request) && normfs_PingRequest_sized((normfs_PingRequest *)m->request); */
+	/*@ assert m->request != \null ==> normfs_PingResponse_request_size(m) == 1 + varint_size(m->request->_size) + m->request->_size; */
+	/*@ assert m->request != \null ==> normfs_PingRequest_bufsep((normfs_PingRequest *)m->request, _buf, _off, _off + normfs_PingResponse_request_size(m) - 1); */
+	if (m->request != NULL) {
+		_off = gremlin_varint32_encode_at(_buf, _off, 34u);
+		_off = gremlin_varint_encode_at(_buf, _off, normfs_PingRequest_cached_size(m->request));
+		/*@ assert _off == \at(_off, _A2) + 1 + varint_size(m->request->_size); */
+		/*@ assert _off + m->request->_size <= \at(_off, Pre) + \at(normfs_PingResponse_request_size(m), Pre); */
+		/*@ assert normfs_PingRequest_bufsep((normfs_PingRequest *)m->request, _buf, _off, _off + m->request->_size - 1); */
+		_off = normfs_PingRequest_encode_at(m->request, _buf, _off);
+	}
+	return _off;
+}
+
+/*@ requires normfs_PingResponse_valid(m) && normfs_PingResponse_sized(m);
     requires _off + m->_size <= 0x7fffffffffffffff;
     requires m->_size == 0 || \valid(_buf + (_off .. _off + m->_size - 1));
     requires normfs_PingResponse_bufsep(m, _buf, _off, _off + m->_size - 1);
@@ -3811,33 +4537,19 @@ normfs_PingResponse_encode_at(const normfs_PingResponse *m, uint8_t * __restrict
 	/*@ ghost normfs_PingResponse_tsize_nonneg((normfs_PingResponse *)m); */
 	/*@ ghost _A0: ; */
 	/*@ assert (m->request != \null ==> normfs_PingRequest_valid((normfs_PingRequest *)m->request)); */
-	if (m->local_stamp_ns != 0) {
-		_off = gremlin_varint32_encode_at(_buf, _off, 16u);
-		_off = gremlin_varint_encode_at(_buf, _off, m->local_stamp_ns);
-	}
+	/*@ assert _off + \at(normfs_PingResponse_local_stamp_ns_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
+	_off = normfs_PingResponse_encode_local_stamp_ns_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A0) + \at(normfs_PingResponse_local_stamp_ns_size(m), Pre); */
 	/*@ ghost _A1: ; */
-	if (m->monotonic_stamp_ns != 0) {
-		_off = gremlin_varint32_encode_at(_buf, _off, 24u);
-		_off = gremlin_varint_encode_at(_buf, _off, m->monotonic_stamp_ns);
-	}
+	/*@ assert normfs_PingResponse_own{Pre,Here}(m); */
+	/*@ assert _off + \at(normfs_PingResponse_monotonic_stamp_ns_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
+	_off = normfs_PingResponse_encode_monotonic_stamp_ns_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A1) + \at(normfs_PingResponse_monotonic_stamp_ns_size(m), Pre); */
 	/*@ ghost _A2: ; */
+	/*@ assert normfs_PingResponse_own{Pre,Here}(m); */
 	/*@ assert _off + \at(normfs_PingResponse_request_size(m), Pre) == \at(_off, Pre) + \at(m->_size, Pre); */
-	/*@ assert _off + \at(normfs_PingResponse_request_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
-	/*@ assert m->request != \null ==> normfs_PingRequest_valid((normfs_PingRequest *)m->request) && normfs_PingRequest_sized((normfs_PingRequest *)m->request); */
-	/*@ assert m->request != \null ==> normfs_PingResponse_request_size(m) == 1 + varint_size(m->request->_size) + m->request->_size; */
-	/*@ assert m->request != \null ==> normfs_PingRequest_bufsep((normfs_PingRequest *)m->request, _buf, _off, \at(_off, Pre) + \at(m->_size, Pre) - 1); */
-	if (m->request != NULL) {
-		_off = gremlin_varint32_encode_at(_buf, _off, 34u);
-		_off = gremlin_varint_encode_at(_buf, _off, normfs_PingRequest_cached_size(m->request));
-		/*@ assert _off == \at(_off, _A2) + 1 + varint_size(m->request->_size); */
-		/*@ assert _off + m->request->_size <= \at(_off, Pre) + \at(m->_size, Pre); */
-		/*@ assert normfs_PingRequest_bufsep((normfs_PingRequest *)m->request, _buf, _off, _off + m->request->_size - 1); */
-		_off = normfs_PingRequest_encode_at(m->request, _buf, _off);
-	}
+	_off = normfs_PingResponse_encode_request_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A2) + \at(normfs_PingResponse_request_size(m), Pre); */
-	/*@ ghost _A3: ; */
 	/*@ assert _off == \at(_off, Pre) + \at(normfs_PingResponse_tsize(m), Pre); */
 	return _off;
 }
@@ -3870,9 +4582,13 @@ typedef struct normfs_PingResponse_reader {
 	struct gremlin_bytes	request;
 } normfs_PingResponse_reader;
 
+/*@ predicate normfs_PingResponse_reader_spans{L}(normfs_PingResponse_reader *r, uint8_t *s, integer n) =
+      (r->_has.request ==> gremlin_span_at((uint8_t *)r->request.data, r->request.len, s, n));
+*/
+
 /*@ predicate normfs_PingResponse_reader_ok{L}(normfs_PingResponse_reader *r, integer n) =
       r->src_len >= n &&
-      (r->_has.request ==> gremlin_span_in(r->request, (uint8_t *)r->src, n));
+      normfs_PingResponse_reader_spans(r, (uint8_t *)r->src, n);
 */
 
 /*@ requires \valid(r);
@@ -3891,9 +4607,9 @@ normfs_PingResponse_reader_init(normfs_PingResponse_reader *r, const uint8_t *sr
 {
 	*r = (normfs_PingResponse_reader){ .src = src, .src_len = len };
 	size_t offset = 0;
-	/*@ loop invariant 0 <= offset <= len;
-	    loop invariant r->src == src && r->src_len == len;
-	    loop invariant normfs_PingResponse_reader_ok(r, offset);
+	/*@ loop invariant offset_in: 0 <= offset <= len;
+	    loop invariant src_kept: r->src == src && r->src_len == len;
+	    loop invariant normfs_PingResponse_reader_spans: normfs_PingResponse_reader_spans(r, (uint8_t *)src, len);
 	    loop assigns offset, *r;
 	    loop variant len - offset;
 	*/
@@ -3922,10 +4638,12 @@ normfs_PingResponse_reader_init(normfs_PingResponse_reader *r, const uint8_t *sr
 		}
 		if (t.value == 34u /* field 4, GREMLIN_WIRE_LEN_PREFIX */) {
 			struct gremlin_bytes_decode_result d =
-				gremlin_bytes_decode(src + offset, len - offset);
+				gremlin_bytes_decode_at(src, offset, len);
 			if (d.error != GREMLIN_OK) return d.error;
 			offset += d.consumed;
-			r->request = d.bytes;
+			r->request.data = d.bytes.data;
+			r->request.len = d.bytes.len;
+			/*@ assert gremlin_span_at((uint8_t *)r->request.data, r->request.len, (uint8_t *)src, len); */
 			r->_has.request = 1;
 			continue;
 		}
@@ -3944,6 +4662,7 @@ normfs_PingResponse_reader_init(normfs_PingResponse_reader *r, const uint8_t *sr
 /*@ requires r == \null || \valid_read(r);
     assigns \nothing;
     ensures r != \null && r->_has.local_stamp_ns ==> \result == r->local_stamp_ns;
+    ensures !(r != \null && r->_has.local_stamp_ns) ==> \result == 0;
 */
 static inline uint64_t
 normfs_PingResponse_reader_get_local_stamp_ns(const normfs_PingResponse_reader *r)
@@ -3955,6 +4674,7 @@ normfs_PingResponse_reader_get_local_stamp_ns(const normfs_PingResponse_reader *
 /*@ requires r == \null || \valid_read(r);
     assigns \nothing;
     ensures r != \null && r->_has.monotonic_stamp_ns ==> \result == r->monotonic_stamp_ns;
+    ensures !(r != \null && r->_has.monotonic_stamp_ns) ==> \result == 0;
 */
 static inline uint64_t
 normfs_PingResponse_reader_get_monotonic_stamp_ns(const normfs_PingResponse_reader *r)
@@ -3967,8 +4687,12 @@ normfs_PingResponse_reader_get_monotonic_stamp_ns(const normfs_PingResponse_read
     requires r == \null || (\valid_read(r) && normfs_PingResponse_reader_ok(r, r->src_len) &&
                (r->src_len == 0 ||
                 \valid_read(r->src + (0 .. r->src_len - 1))) &&
-               \separated(out, r, r->src + (0 .. r->src_len - 1)));
+               \separated(out, r) &&
+               \separated(out, r->src + (0 .. r->src_len - 1)));
     assigns *out;
+    ensures r != \null && r->_has.request ==>
+              out->src == r->request.data && out->src_len == r->request.len;
+    ensures r == \null || !r->_has.request ==> out->src_len == 0;
     ensures \result == GREMLIN_OK ==>
               normfs_PingRequest_reader_ok(out, out->src_len) &&
               (out->src_len == 0 ||
@@ -4005,42 +4729,57 @@ normfs_WriteResponse_cached_size(const normfs_WriteResponse *m)
 	return m->_size;
 }
 
-/*@ predicate normfs_Id_avoid_normfs_WriteResponse{L}(normfs_Id *m, normfs_WriteResponse *p) =
+/*@ axiomatic normfs_Id_avoid_normfs_WriteResponse_ax {
+    predicate normfs_Id_avoid_normfs_WriteResponse{L}(normfs_Id *m, normfs_WriteResponse *p) =
       \separated(p, m);
+  }
 */
 
-/*@ predicate normfs_WriteResponse_avoid_normfs_SetupResponse{L}(normfs_WriteResponse *m, normfs_SetupResponse *p) =
+/*@ axiomatic normfs_WriteResponse_avoid_normfs_SetupResponse_ax {
+    predicate normfs_WriteResponse_avoid_normfs_SetupResponse{L}(normfs_WriteResponse *m, normfs_SetupResponse *p) =
       \separated(p, m) &&
       (\forall integer k; 0 <= k < m->ids_count && m->ids[k] != \null ==>
          normfs_Id_avoid_normfs_SetupResponse((normfs_Id *)m->ids[k], p));
+  }
 */
 
-/*@ predicate normfs_WriteResponse_avoid_normfs_PingResponse{L}(normfs_WriteResponse *m, normfs_PingResponse *p) =
+/*@ axiomatic normfs_WriteResponse_avoid_normfs_PingResponse_ax {
+    predicate normfs_WriteResponse_avoid_normfs_PingResponse{L}(normfs_WriteResponse *m, normfs_PingResponse *p) =
       \separated(p, m) &&
       (\forall integer k; 0 <= k < m->ids_count && m->ids[k] != \null ==>
          normfs_Id_avoid_normfs_PingResponse((normfs_Id *)m->ids[k], p));
+  }
 */
 
-/*@ predicate normfs_WriteResponse_avoid_normfs_PingRequest{L}(normfs_WriteResponse *m, normfs_PingRequest *p) =
+/*@ axiomatic normfs_WriteResponse_avoid_normfs_PingRequest_ax {
+    predicate normfs_WriteResponse_avoid_normfs_PingRequest{L}(normfs_WriteResponse *m, normfs_PingRequest *p) =
       \separated(p, m) &&
       (\forall integer k; 0 <= k < m->ids_count && m->ids[k] != \null ==>
          normfs_Id_avoid_normfs_PingRequest((normfs_Id *)m->ids[k], p));
+  }
 */
 
-/*@ predicate normfs_PingRequest_navoid_normfs_WriteResponse{L}(normfs_PingRequest *m, normfs_WriteResponse *t) =
+/*@ axiomatic normfs_PingRequest_navoid_normfs_WriteResponse_ax {
+    predicate normfs_PingRequest_navoid_normfs_WriteResponse{L}(normfs_PingRequest *m, normfs_WriteResponse *t) =
       normfs_WriteResponse_avoid_normfs_PingRequest(t, m);
+  }
 */
 
-/*@ predicate normfs_SetupResponse_navoid_normfs_WriteResponse{L}(normfs_SetupResponse *m, normfs_WriteResponse *t) =
+/*@ axiomatic normfs_SetupResponse_navoid_normfs_WriteResponse_ax {
+    predicate normfs_SetupResponse_navoid_normfs_WriteResponse{L}(normfs_SetupResponse *m, normfs_WriteResponse *t) =
       normfs_WriteResponse_avoid_normfs_SetupResponse(t, m);
+  }
 */
 
-/*@ predicate normfs_PingResponse_navoid_normfs_WriteResponse{L}(normfs_PingResponse *m, normfs_WriteResponse *t) =
+/*@ axiomatic normfs_PingResponse_navoid_normfs_WriteResponse_ax {
+    predicate normfs_PingResponse_navoid_normfs_WriteResponse{L}(normfs_PingResponse *m, normfs_WriteResponse *t) =
       normfs_WriteResponse_avoid_normfs_PingResponse(t, m) &&
       (m->request != \null ==> normfs_PingRequest_navoid_normfs_WriteResponse((normfs_PingRequest *)m->request, t));
+  }
 */
 
-/*@ logic integer normfs_WriteResponse_ids_term{L}(normfs_Id *e) =
+/*@ axiomatic normfs_WriteResponse_ids_sum_ax {
+    logic integer normfs_WriteResponse_ids_term{L}(normfs_Id *e) =
       e != \null ? 1 + varint_size(normfs_Id_tsize(e)) + normfs_Id_tsize(e) : 2;
 
     lemma normfs_WriteResponse_ids_term_frame{L1,L2}: \forall normfs_Id *e;
@@ -4055,16 +4794,17 @@ normfs_WriteResponse_cached_size(const normfs_WriteResponse *m)
          \at(m->ids[k], L1) == \at(m->ids[k], L2) &&
          \at(normfs_WriteResponse_ids_term((normfs_Id *)m->ids[k]), L1) == \at(normfs_WriteResponse_ids_term((normfs_Id *)m->ids[k]), L2)) ==>
       \at(normfs_WriteResponse_ids_sum(m, n), L1) == \at(normfs_WriteResponse_ids_sum(m, n), L2);
+  }
 */
 /*@ \wp::strategy normfs_WriteResponse_ids_sum_ind: \tactic("Wp.induction", \pattern(0 <= n), \select(n)); */
 /*@ \wp::proof normfs_WriteResponse_ids_sum_ind: normfs_WriteResponse_ids_sum_frame; */
 
-/*@
+/*@ axiomatic normfs_WriteResponse_tsize_ax {
     logic integer normfs_WriteResponse_write_id_size{L}(normfs_WriteResponse *m) =
       m->write_id != 0 ? 1 + varint_size(m->write_id) : 0;
 
     logic integer normfs_WriteResponse_result_size{L}(normfs_WriteResponse *m) =
-      m->result != 0 ? 1 + varint_size((uint64_t)(int64_t)m->result) : 0;
+      m->result != 0 ? 1 + varint_size(enum_wire(m->result)) : 0;
 
     logic integer normfs_WriteResponse_ids_size{L}(normfs_WriteResponse *m) =
       normfs_WriteResponse_ids_sum(m, m->ids_count);
@@ -4138,13 +4878,7 @@ normfs_WriteResponse_cached_size(const normfs_WriteResponse *m)
 
     lemma normfs_WriteResponse_bufsep_sub{L}: \forall normfs_WriteResponse *m, uint8_t *b, integer lo, hi, lo2, hi2;
       lo <= lo2 ==> hi2 <= hi ==> normfs_WriteResponse_bufsep(m, b, lo, hi) ==> normfs_WriteResponse_bufsep(m, b, lo2, hi2);
-*/
-
-/*@ ghost
-  /@ assigns \nothing;
-     ensures normfs_WriteResponse_ids_term((normfs_Id *)\null) == 2;
-  @/
-  void normfs_WriteResponse_ids_term_null(void) { }
+  }
 */
 
 /*@ ghost
@@ -4162,7 +4896,9 @@ normfs_WriteResponse_cached_size(const normfs_WriteResponse *m)
        loop variant m->ids_count - i;
     @/
     while (i < m->ids_count) {
-      if (m->ids[i]) normfs_Id_tsize_nonneg((normfs_Id *)m->ids[i]);
+      if (m->ids[i]) normfs_Id_tsize_pos((normfs_Id *)m->ids[i]);
+      /@ assert normfs_WriteResponse_ids_term((normfs_Id *)m->ids[i]) >= 0; @/
+      /@ assert normfs_WriteResponse_ids_sum(m, i + 1) == normfs_WriteResponse_ids_sum(m, i) + normfs_WriteResponse_ids_term((normfs_Id *)m->ids[i]); @/
       i++;
     }
   }
@@ -4171,6 +4907,9 @@ normfs_WriteResponse_cached_size(const normfs_WriteResponse *m)
 /*@ ghost
   /@ requires normfs_WriteResponse_valid(m);
      assigns \nothing;
+     ensures normfs_WriteResponse_write_id_size(m) >= 0;
+     ensures normfs_WriteResponse_result_size(m) >= 0;
+     ensures normfs_WriteResponse_ids_size(m) >= 0;
      ensures \forall integer j; 0 <= j <= m->ids_count ==>
                0 <= normfs_WriteResponse_ids_sum(m, j) <= normfs_WriteResponse_ids_sum(m, m->ids_count);
      ensures normfs_WriteResponse_tsize(m) >= 0;
@@ -4178,6 +4917,9 @@ normfs_WriteResponse_cached_size(const normfs_WriteResponse *m)
   void normfs_WriteResponse_tsize_nonneg(normfs_WriteResponse *m)
   {
     normfs_WriteResponse_ids_mono(m);
+    /@ assert normfs_WriteResponse_write_id_size(m) >= 0; @/
+    /@ assert normfs_WriteResponse_result_size(m) >= 0; @/
+    /@ assert normfs_WriteResponse_ids_size(m) >= 0; @/
   }
 */
 
@@ -4196,18 +4938,21 @@ normfs_WriteResponse_size(const normfs_WriteResponse *m)
 	/*@ ghost _A0: ; */
 	/*@ assert (\forall integer k; 0 <= k < m->ids_count && m->ids[k] != \null ==>
          normfs_Id_valid((normfs_Id *)m->ids[k])); */
+	/*@ assert s + \at(normfs_WriteResponse_write_id_size(m), Pre) <= \at(normfs_WriteResponse_tsize(m), Pre); */
 	if (m->write_id != 0) {
 		s += 1
 		   + gremlin_varint_size(m->write_id);
 	}
 	/*@ assert s == \at(s, _A0) + \at(normfs_WriteResponse_write_id_size(m), Pre); */
 	/*@ ghost _A1: ; */
+	/*@ assert s + \at(normfs_WriteResponse_result_size(m), Pre) <= \at(normfs_WriteResponse_tsize(m), Pre); */
 	if (m->result != 0) {
 		s += 1
-		   + gremlin_varint_size((uint64_t)(int64_t)m->result);
+		   + gremlin_varint_size(gremlin_enum_wire(m->result));
 	}
 	/*@ assert s == \at(s, _A1) + \at(normfs_WriteResponse_result_size(m), Pre); */
 	/*@ ghost _A2: ; */
+	/*@ assert s + \at(normfs_WriteResponse_ids_size(m), Pre) <= \at(normfs_WriteResponse_tsize(m), Pre); */
 	/*@ loop invariant 0 <= _i <= m->ids_count;
 	    loop invariant normfs_WriteResponse_own{Pre,Here}(m);
 	    loop invariant \forall integer k; 0 <= k < m->ids_count && m->ids[k] != \null ==>
@@ -4232,20 +4977,25 @@ normfs_WriteResponse_size(const normfs_WriteResponse *m)
 			   + gremlin_varint_size(_child_size)
 			   + _child_size;
 		} else {
-			/*@ ghost normfs_WriteResponse_ids_term_null(); */
+			/*@ assert \forall integer k; k == _i ==>
+			      \at(m->ids[k] == \null ==> normfs_WriteResponse_ids_term((normfs_Id *)m->ids[k]) == 2, Pre); */
 			/*@ assert \forall integer k; k == _i ==> \at(normfs_WriteResponse_ids_term((normfs_Id *)m->ids[k]), Pre) == 2; */
 			s += 1 + 1;
 		}
 	}
 	/*@ assert normfs_WriteResponse_own{Pre,Here}(m); */
 	/*@ assert s == \at(s, _A2) + \at(normfs_WriteResponse_ids_size(m), Pre); */
-	/*@ ghost _A3: ; */
 	/*@ assert s == \at(normfs_WriteResponse_tsize(m), Pre); */
 	/*@ assert normfs_WriteResponse_dsame{Pre,Here}(m); */
 	/*@ assert \forall integer j; 0 <= j < m->ids_count && m->ids[j] != \null ==> \separated(m, m->ids[j]); */
 	/*@ ghost _Aw: ; */
 	((normfs_WriteResponse *)m)->_size = s;
-	/*@ assert normfs_WriteResponse_own{_Aw,Here}(m); */
+	/*@ assert \at(m->write_id, _Aw) == m->write_id; */
+	/*@ assert \at(m->ids_count, _Aw) == m->ids_count; */
+	/*@ assert normfs_WriteResponse_nown{_Aw,Here}((normfs_WriteResponse *)m); */
+	/*@ assert \forall integer q; 0 <= q < \at(m->ids_count, _Aw) ==>
+	      \at(m->ids[q], _Aw) == m->ids[q]; */
+	/*@ assert normfs_WriteResponse_own{_Aw,Here}((normfs_WriteResponse *)m); */
 	/*@ assert \forall integer k; 0 <= k < m->ids_count && m->ids[k] != \null ==> normfs_Id_dsame{_Aw,Here}((normfs_Id *)m->ids[k]); */
 	/*@ assert \forall integer k; 0 <= k < m->ids_count && m->ids[k] != \null ==> normfs_Id_dsame{Pre,Here}((normfs_Id *)m->ids[k]); */
 	/*@ assert \forall integer k; 0 <= k < m->ids_count && m->ids[k] != \null ==> normfs_Id_csame{_Aw,Here}((normfs_Id *)m->ids[k]); */
@@ -4254,6 +5004,84 @@ normfs_WriteResponse_size(const normfs_WriteResponse *m)
 	/*@ assert normfs_WriteResponse_dsame{Pre,Here}(m); */
 	/*@ assert normfs_WriteResponse_tsize(m) == \at(normfs_WriteResponse_tsize(m), Pre); */
 	return s;
+}
+
+/*@ requires normfs_WriteResponse_valid(m) && normfs_WriteResponse_sized(m);
+    requires _off + normfs_WriteResponse_write_id_size(m) <= 0x7fffffffffffffff;
+    requires normfs_WriteResponse_write_id_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_WriteResponse_write_id_size(m) - 1));
+    requires normfs_WriteResponse_bufsep(m, _buf, _off, _off + normfs_WriteResponse_write_id_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_WriteResponse_write_id_size(m) - 1];
+    ensures \result == \old(_off + normfs_WriteResponse_write_id_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_WriteResponse_encode_write_id_at(const normfs_WriteResponse *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_WriteResponse_tsize_nonneg((normfs_WriteResponse *)m); */
+	/*@ ghost _A0: ; */
+	if (m->write_id != 0) {
+		_off = gremlin_varint32_encode_at(_buf, _off, 8u);
+		_off = gremlin_varint_encode_at(_buf, _off, m->write_id);
+	}
+	return _off;
+}
+
+/*@ requires normfs_WriteResponse_valid(m) && normfs_WriteResponse_sized(m);
+    requires _off + normfs_WriteResponse_result_size(m) <= 0x7fffffffffffffff;
+    requires normfs_WriteResponse_result_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_WriteResponse_result_size(m) - 1));
+    requires normfs_WriteResponse_bufsep(m, _buf, _off, _off + normfs_WriteResponse_result_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_WriteResponse_result_size(m) - 1];
+    ensures \result == \old(_off + normfs_WriteResponse_result_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_WriteResponse_encode_result_at(const normfs_WriteResponse *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_WriteResponse_tsize_nonneg((normfs_WriteResponse *)m); */
+	/*@ ghost _A1: ; */
+	if (m->result != 0) {
+		_off = gremlin_varint32_encode_at(_buf, _off, 16u);
+		_off = gremlin_varint_encode_at(_buf, _off, gremlin_enum_wire(m->result));
+	}
+	return _off;
+}
+
+/*@ requires normfs_WriteResponse_valid(m) && normfs_WriteResponse_sized(m);
+    requires _off + normfs_WriteResponse_ids_size(m) <= 0x7fffffffffffffff;
+    requires normfs_WriteResponse_ids_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_WriteResponse_ids_size(m) - 1));
+    requires normfs_WriteResponse_bufsep(m, _buf, _off, _off + normfs_WriteResponse_ids_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_WriteResponse_ids_size(m) - 1];
+    ensures \result == \old(_off + normfs_WriteResponse_ids_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_WriteResponse_encode_ids_at(const normfs_WriteResponse *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_WriteResponse_tsize_nonneg((normfs_WriteResponse *)m); */
+	/*@ ghost _A2: ; */
+	/*@ loop invariant 0 <= _i <= m->ids_count;
+	    loop invariant \forall integer k; k == _i ==> _off == \at(_off, _A2) + \at(normfs_WriteResponse_ids_sum(m, k), Pre);
+	    loop assigns _i, _off, _buf[\at(_off, _A2) .. \at(_off, _A2) + \at(normfs_WriteResponse_ids_size(m), Pre) - 1];
+	    loop variant m->ids_count - _i;
+	*/
+	for (size_t _i = 0; _i < m->ids_count; _i++) {
+		const normfs_Id *_el = m->ids[_i];
+		/*@ assert \forall integer k; k == _i ==>
+		      \at(normfs_WriteResponse_ids_sum(m, k + 1), Pre) == \at(normfs_WriteResponse_ids_sum(m, k), Pre) + \at(normfs_WriteResponse_ids_term((normfs_Id *)m->ids[k]), Pre) &&
+		      \at(normfs_WriteResponse_ids_sum(m, k + 1), Pre) <= \at(normfs_WriteResponse_ids_sum(m, m->ids_count), Pre); */
+		if (_el != NULL) {
+			/*@ assert normfs_Id_sized((normfs_Id *)_el); */
+			/*@ assert \forall integer k; k == _i ==>
+			      \at(normfs_WriteResponse_ids_term((normfs_Id *)m->ids[k]), Pre) == 1 + varint_size(_el->_size) + _el->_size; */
+			_off = gremlin_varint32_encode_at(_buf, _off, 82u);
+			_off = gremlin_varint_encode_at(_buf, _off, normfs_Id_cached_size(_el));
+			_off = normfs_Id_encode_at(_el, _buf, _off);
+		} else {
+			/*@ assert \forall integer k; k == _i ==>
+			      \at(m->ids[k] == \null ==> normfs_WriteResponse_ids_term((normfs_Id *)m->ids[k]) == 2, Pre); */
+			/*@ assert \forall integer k; k == _i ==> \at(normfs_WriteResponse_ids_term((normfs_Id *)m->ids[k]), Pre) == 2; */
+			_off = gremlin_varint32_encode_at(_buf, _off, 82u);
+			_off = gremlin_varint_encode_at(_buf, _off, 0);
+		}
+	}
+	return _off;
 }
 
 /*@ requires normfs_WriteResponse_valid(m) && normfs_WriteResponse_sized(m);
@@ -4270,44 +5098,19 @@ normfs_WriteResponse_encode_at(const normfs_WriteResponse *m, uint8_t * __restri
 	/*@ ghost _A0: ; */
 	/*@ assert (\forall integer k; 0 <= k < m->ids_count && m->ids[k] != \null ==>
          normfs_Id_valid((normfs_Id *)m->ids[k])); */
-	if (m->write_id != 0) {
-		_off = gremlin_varint32_encode_at(_buf, _off, 8u);
-		_off = gremlin_varint_encode_at(_buf, _off, m->write_id);
-	}
+	/*@ assert _off + \at(normfs_WriteResponse_write_id_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
+	_off = normfs_WriteResponse_encode_write_id_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A0) + \at(normfs_WriteResponse_write_id_size(m), Pre); */
 	/*@ ghost _A1: ; */
-	if (m->result != 0) {
-		_off = gremlin_varint32_encode_at(_buf, _off, 16u);
-		_off = gremlin_varint_encode_at(_buf, _off, (uint64_t)(int64_t)m->result);
-	}
+	/*@ assert normfs_WriteResponse_own{Pre,Here}(m); */
+	/*@ assert _off + \at(normfs_WriteResponse_result_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
+	_off = normfs_WriteResponse_encode_result_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A1) + \at(normfs_WriteResponse_result_size(m), Pre); */
 	/*@ ghost _A2: ; */
-	/*@ loop invariant 0 <= _i <= m->ids_count;
-	    loop invariant \forall integer k; k == _i ==> _off == \at(_off, _A2) + \at(normfs_WriteResponse_ids_sum(m, k), Pre);
-	    loop assigns _i, _off, _buf[\at(_off, Pre) .. \at(_off, Pre) + \at(m->_size, Pre) - 1];
-	    loop variant m->ids_count - _i;
-	*/
-	for (size_t _i = 0; _i < m->ids_count; _i++) {
-		const normfs_Id *_el = m->ids[_i];
-		/*@ assert \forall integer k; k == _i ==>
-		      \at(normfs_WriteResponse_ids_sum(m, k + 1), Pre) == \at(normfs_WriteResponse_ids_sum(m, k), Pre) + \at(normfs_WriteResponse_ids_term((normfs_Id *)m->ids[k]), Pre) &&
-		      \at(normfs_WriteResponse_ids_sum(m, k + 1), Pre) <= \at(normfs_WriteResponse_ids_sum(m, m->ids_count), Pre); */
-		if (_el != NULL) {
-			/*@ assert normfs_Id_sized((normfs_Id *)_el); */
-			/*@ assert \forall integer k; k == _i ==>
-			      \at(normfs_WriteResponse_ids_term((normfs_Id *)m->ids[k]), Pre) == 1 + varint_size(_el->_size) + _el->_size; */
-			_off = gremlin_varint32_encode_at(_buf, _off, 82u);
-			_off = gremlin_varint_encode_at(_buf, _off, normfs_Id_cached_size(_el));
-			_off = normfs_Id_encode_at(_el, _buf, _off);
-		} else {
-			/*@ ghost normfs_WriteResponse_ids_term_null(); */
-			/*@ assert \forall integer k; k == _i ==> \at(normfs_WriteResponse_ids_term((normfs_Id *)m->ids[k]), Pre) == 2; */
-			_off = gremlin_varint32_encode_at(_buf, _off, 82u);
-			_off = gremlin_varint_encode_at(_buf, _off, 0);
-		}
-	}
+	/*@ assert normfs_WriteResponse_own{Pre,Here}(m); */
+	/*@ assert _off + \at(normfs_WriteResponse_ids_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
+	_off = normfs_WriteResponse_encode_ids_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A2) + \at(normfs_WriteResponse_ids_size(m), Pre); */
-	/*@ ghost _A3: ; */
 	/*@ assert _off == \at(_off, Pre) + \at(normfs_WriteResponse_tsize(m), Pre); */
 	return _off;
 }
@@ -4363,9 +5166,9 @@ normfs_WriteResponse_reader_init(normfs_WriteResponse_reader *r, const uint8_t *
 {
 	*r = (normfs_WriteResponse_reader){ .src = src, .src_len = len };
 	size_t offset = 0;
-	/*@ loop invariant 0 <= offset <= len;
-	    loop invariant r->src == src && r->src_len == len;
-	    loop invariant normfs_WriteResponse_reader_ok(r, offset);
+	/*@ loop invariant offset_in: 0 <= offset <= len;
+	    loop invariant src_kept: r->src == src && r->src_len == len;
+	    loop invariant count_ids: r->ids_count <= offset && (r->ids_count > 0 ==> r->ids_first_offset < offset);
 	    loop assigns offset, *r;
 	    loop variant len - offset;
 	*/
@@ -4419,6 +5222,7 @@ normfs_WriteResponse_reader_init(normfs_WriteResponse_reader *r, const uint8_t *
 /*@ requires r == \null || \valid_read(r);
     assigns \nothing;
     ensures r != \null && r->_has.write_id ==> \result == r->write_id;
+    ensures !(r != \null && r->_has.write_id) ==> \result == 0;
 */
 static inline uint64_t
 normfs_WriteResponse_reader_get_write_id(const normfs_WriteResponse_reader *r)
@@ -4430,6 +5234,7 @@ normfs_WriteResponse_reader_get_write_id(const normfs_WriteResponse_reader *r)
 /*@ requires r == \null || \valid_read(r);
     assigns \nothing;
     ensures r != \null && r->_has.result ==> \result == r->result;
+    ensures !(r != \null && r->_has.result) ==> \result == 0;
 */
 static inline normfs_WriteResponse_Result
 normfs_WriteResponse_reader_get_result(const normfs_WriteResponse_reader *r)
@@ -4453,6 +5258,7 @@ typedef struct normfs_WriteResponse_reader_ids_iter {
 /*@ requires r == \null || \valid_read(r);
     assigns \nothing;
     ensures r != \null ==> \result == r->ids_count;
+    ensures r == \null ==> \result == 0;
 */
 static inline size_t
 normfs_WriteResponse_reader_ids_count(const normfs_WriteResponse_reader *r)
@@ -4490,6 +5296,8 @@ normfs_WriteResponse_reader_ids_begin(const normfs_WriteResponse_reader *r)
     assigns *it, *out;
     ensures normfs_WriteResponse_reader_ids_iter_ok(*it);
     ensures it->src == \old(it->src) && it->src_len == \old(it->src_len);
+    ensures \old(it->count_remaining) > 0 && \result == GREMLIN_OK ==>
+              it->count_remaining == \old(it->count_remaining) - 1;
     ensures \result == GREMLIN_OK ==>
               normfs_Id_reader_ok(out, out->src_len) &&
               (out->src_len == 0 ||
@@ -4510,8 +5318,6 @@ normfs_WriteResponse_reader_ids_next(normfs_WriteResponse_reader_ids_iter *it, n
 	if (d.error != GREMLIN_OK) return d.error;
 	it->offset += d.consumed;
 	it->count_remaining--;
-	enum gremlin_error _ie = normfs_Id_reader_init(out, d.bytes.data, d.bytes.len);
-	if (_ie != GREMLIN_OK) return _ie;
 	/*@ loop invariant it->offset <= it->src_len;
 	    loop assigns it->offset;
 	    loop variant it->src_len - it->offset;
@@ -4530,7 +5336,7 @@ normfs_WriteResponse_reader_ids_next(normfs_WriteResponse_reader_ids_iter *it, n
 		if (sk.error != GREMLIN_OK) return sk.error;
 		it->offset += sk.consumed;
 	}
-	return GREMLIN_OK;
+	return normfs_Id_reader_init(out, d.bytes.data, d.bytes.len);
 }
 
 typedef struct normfs_ReadResponse {
@@ -4553,64 +5359,86 @@ normfs_ReadResponse_cached_size(const normfs_ReadResponse *m)
 	return m->_size;
 }
 
-/*@ predicate normfs_Id_avoid_normfs_ReadResponse{L}(normfs_Id *m, normfs_ReadResponse *p) =
+/*@ axiomatic normfs_Id_avoid_normfs_ReadResponse_ax {
+    predicate normfs_Id_avoid_normfs_ReadResponse{L}(normfs_Id *m, normfs_ReadResponse *p) =
       \separated(p, m);
+  }
 */
 
-/*@ predicate normfs_ReadResponse_avoid_normfs_SetupResponse{L}(normfs_ReadResponse *m, normfs_SetupResponse *p) =
+/*@ axiomatic normfs_ReadResponse_avoid_normfs_SetupResponse_ax {
+    predicate normfs_ReadResponse_avoid_normfs_SetupResponse{L}(normfs_ReadResponse *m, normfs_SetupResponse *p) =
       \separated(p, m) &&
       (m->id != \null ==> normfs_Id_avoid_normfs_SetupResponse((normfs_Id *)m->id, p));
+  }
 */
 
-/*@ predicate normfs_ReadResponse_avoid_normfs_PingResponse{L}(normfs_ReadResponse *m, normfs_PingResponse *p) =
+/*@ axiomatic normfs_ReadResponse_avoid_normfs_PingResponse_ax {
+    predicate normfs_ReadResponse_avoid_normfs_PingResponse{L}(normfs_ReadResponse *m, normfs_PingResponse *p) =
       \separated(p, m) &&
       (m->id != \null ==> normfs_Id_avoid_normfs_PingResponse((normfs_Id *)m->id, p));
+  }
 */
 
-/*@ predicate normfs_ReadResponse_avoid_normfs_WriteResponse{L}(normfs_ReadResponse *m, normfs_WriteResponse *p) =
+/*@ axiomatic normfs_ReadResponse_avoid_normfs_WriteResponse_ax {
+    predicate normfs_ReadResponse_avoid_normfs_WriteResponse{L}(normfs_ReadResponse *m, normfs_WriteResponse *p) =
       \separated(p, m) &&
       (m->id != \null ==> normfs_Id_avoid_normfs_WriteResponse((normfs_Id *)m->id, p));
+  }
 */
 
-/*@ predicate normfs_ReadResponse_avoid_normfs_PingRequest{L}(normfs_ReadResponse *m, normfs_PingRequest *p) =
+/*@ axiomatic normfs_ReadResponse_avoid_normfs_PingRequest_ax {
+    predicate normfs_ReadResponse_avoid_normfs_PingRequest{L}(normfs_ReadResponse *m, normfs_PingRequest *p) =
       \separated(p, m) &&
       (m->id != \null ==> normfs_Id_avoid_normfs_PingRequest((normfs_Id *)m->id, p));
+  }
 */
 
-/*@ predicate normfs_ReadResponse_avoid_normfs_Id{L}(normfs_ReadResponse *m, normfs_Id *p) =
+/*@ axiomatic normfs_ReadResponse_avoid_normfs_Id_ax {
+    predicate normfs_ReadResponse_avoid_normfs_Id{L}(normfs_ReadResponse *m, normfs_Id *p) =
       \separated(p, m) &&
       (m->id != \null ==> normfs_Id_avoid_normfs_Id((normfs_Id *)m->id, p));
+  }
 */
 
-/*@ predicate normfs_PingRequest_navoid_normfs_ReadResponse{L}(normfs_PingRequest *m, normfs_ReadResponse *t) =
+/*@ axiomatic normfs_PingRequest_navoid_normfs_ReadResponse_ax {
+    predicate normfs_PingRequest_navoid_normfs_ReadResponse{L}(normfs_PingRequest *m, normfs_ReadResponse *t) =
       normfs_ReadResponse_avoid_normfs_PingRequest(t, m);
+  }
 */
 
-/*@ predicate normfs_Id_navoid_normfs_ReadResponse{L}(normfs_Id *m, normfs_ReadResponse *t) =
+/*@ axiomatic normfs_Id_navoid_normfs_ReadResponse_ax {
+    predicate normfs_Id_navoid_normfs_ReadResponse{L}(normfs_Id *m, normfs_ReadResponse *t) =
       normfs_ReadResponse_avoid_normfs_Id(t, m);
+  }
 */
 
-/*@ predicate normfs_SetupResponse_navoid_normfs_ReadResponse{L}(normfs_SetupResponse *m, normfs_ReadResponse *t) =
+/*@ axiomatic normfs_SetupResponse_navoid_normfs_ReadResponse_ax {
+    predicate normfs_SetupResponse_navoid_normfs_ReadResponse{L}(normfs_SetupResponse *m, normfs_ReadResponse *t) =
       normfs_ReadResponse_avoid_normfs_SetupResponse(t, m);
+  }
 */
 
-/*@ predicate normfs_PingResponse_navoid_normfs_ReadResponse{L}(normfs_PingResponse *m, normfs_ReadResponse *t) =
+/*@ axiomatic normfs_PingResponse_navoid_normfs_ReadResponse_ax {
+    predicate normfs_PingResponse_navoid_normfs_ReadResponse{L}(normfs_PingResponse *m, normfs_ReadResponse *t) =
       normfs_ReadResponse_avoid_normfs_PingResponse(t, m) &&
       (m->request != \null ==> normfs_PingRequest_navoid_normfs_ReadResponse((normfs_PingRequest *)m->request, t));
+  }
 */
 
-/*@ predicate normfs_WriteResponse_navoid_normfs_ReadResponse{L}(normfs_WriteResponse *m, normfs_ReadResponse *t) =
+/*@ axiomatic normfs_WriteResponse_navoid_normfs_ReadResponse_ax {
+    predicate normfs_WriteResponse_navoid_normfs_ReadResponse{L}(normfs_WriteResponse *m, normfs_ReadResponse *t) =
       normfs_ReadResponse_avoid_normfs_WriteResponse(t, m) &&
       (\forall integer k; 0 <= k < m->ids_count && m->ids[k] != \null ==>
          normfs_Id_navoid_normfs_ReadResponse((normfs_Id *)m->ids[k], t));
+  }
 */
 
-/*@
+/*@ axiomatic normfs_ReadResponse_tsize_ax {
     logic integer normfs_ReadResponse_read_id_size{L}(normfs_ReadResponse *m) =
       m->read_id != 0 ? 1 + varint_size(m->read_id) : 0;
 
     logic integer normfs_ReadResponse_result_size{L}(normfs_ReadResponse *m) =
-      m->result != 0 ? 1 + varint_size((uint64_t)(int64_t)m->result) : 0;
+      m->result != 0 ? 1 + varint_size(enum_wire(m->result)) : 0;
 
     logic integer normfs_ReadResponse_id_size{L}(normfs_ReadResponse *m) =
       m->id != \null ?
@@ -4620,10 +5448,10 @@ normfs_ReadResponse_cached_size(const normfs_ReadResponse *m)
       m->data.len > 0 ? 1 + varint_size(m->data.len) + m->data.len : 0;
 
     logic integer normfs_ReadResponse_data_source_size{L}(normfs_ReadResponse *m) =
-      m->data_source != 0 ? 1 + varint_size((uint64_t)(int64_t)m->data_source) : 0;
+      m->data_source != 0 ? 1 + varint_size(enum_wire(m->data_source)) : 0;
 
     logic integer normfs_ReadResponse_encoding_size{L}(normfs_ReadResponse *m) =
-      m->encoding != 0 ? 1 + varint_size((uint64_t)(int64_t)m->encoding) : 0;
+      m->encoding != 0 ? 1 + varint_size(enum_wire(m->encoding)) : 0;
 
     logic integer normfs_ReadResponse_tsize{L}(normfs_ReadResponse *m) =
       normfs_ReadResponse_read_id_size(m) +
@@ -4671,7 +5499,8 @@ normfs_ReadResponse_cached_size(const normfs_ReadResponse *m)
 
     predicate normfs_ReadResponse_bufsep{L}(normfs_ReadResponse *m, uint8_t *b, integer lo, integer hi) =
       hi < lo || (\separated(b + (lo .. hi), m) &&
-      (m->id != \null ==> normfs_Id_bufsep((normfs_Id *)m->id, b, lo, hi)));
+      (m->id != \null ==> normfs_Id_bufsep((normfs_Id *)m->id, b, lo, hi)) &&
+      (m->data.len == 0 || \separated(b + (lo .. hi), m->data.data + (0 .. m->data.len - 1))));
 
     lemma normfs_ReadResponse_read_id_size_frame{L1,L2}: \forall normfs_ReadResponse *m;
       normfs_ReadResponse_dsame{L1,L2}(m) ==> \at(normfs_ReadResponse_read_id_size(m), L1) == \at(normfs_ReadResponse_read_id_size(m), L2);
@@ -4702,17 +5531,30 @@ normfs_ReadResponse_cached_size(const normfs_ReadResponse *m)
 
     lemma normfs_ReadResponse_bufsep_sub{L}: \forall normfs_ReadResponse *m, uint8_t *b, integer lo, hi, lo2, hi2;
       lo <= lo2 ==> hi2 <= hi ==> normfs_ReadResponse_bufsep(m, b, lo, hi) ==> normfs_ReadResponse_bufsep(m, b, lo2, hi2);
+  }
 */
 
 /*@ ghost
   /@ requires normfs_ReadResponse_valid(m);
      assigns \nothing;
+     ensures normfs_ReadResponse_read_id_size(m) >= 0;
+     ensures normfs_ReadResponse_result_size(m) >= 0;
+     ensures normfs_ReadResponse_id_size(m) >= 0;
+     ensures normfs_ReadResponse_data_size(m) >= 0;
+     ensures normfs_ReadResponse_data_source_size(m) >= 0;
+     ensures normfs_ReadResponse_encoding_size(m) >= 0;
      ensures m->id != \null ==> normfs_Id_tsize((normfs_Id *)m->id) >= 0;
      ensures normfs_ReadResponse_tsize(m) >= 0;
   @/
   void normfs_ReadResponse_tsize_nonneg(normfs_ReadResponse *m)
   {
     if (m->id) normfs_Id_tsize_nonneg((normfs_Id *)m->id);
+    /@ assert normfs_ReadResponse_read_id_size(m) >= 0; @/
+    /@ assert normfs_ReadResponse_result_size(m) >= 0; @/
+    /@ assert normfs_ReadResponse_id_size(m) >= 0; @/
+    /@ assert normfs_ReadResponse_data_size(m) >= 0; @/
+    /@ assert normfs_ReadResponse_data_source_size(m) >= 0; @/
+    /@ assert normfs_ReadResponse_encoding_size(m) >= 0; @/
   }
 */
 
@@ -4730,15 +5572,17 @@ normfs_ReadResponse_size(const normfs_ReadResponse *m)
 	/*@ ghost normfs_ReadResponse_tsize_nonneg((normfs_ReadResponse *)m); */
 	/*@ ghost _A0: ; */
 	/*@ assert (m->id != \null ==> normfs_Id_valid((normfs_Id *)m->id)); */
+	/*@ assert s + \at(normfs_ReadResponse_read_id_size(m), Pre) <= \at(normfs_ReadResponse_tsize(m), Pre); */
 	if (m->read_id != 0) {
 		s += 1
 		   + gremlin_varint_size(m->read_id);
 	}
 	/*@ assert s == \at(s, _A0) + \at(normfs_ReadResponse_read_id_size(m), Pre); */
 	/*@ ghost _A1: ; */
+	/*@ assert s + \at(normfs_ReadResponse_result_size(m), Pre) <= \at(normfs_ReadResponse_tsize(m), Pre); */
 	if (m->result != 0) {
 		s += 1
-		   + gremlin_varint_size((uint64_t)(int64_t)m->result);
+		   + gremlin_varint_size(gremlin_enum_wire(m->result));
 	}
 	/*@ assert s == \at(s, _A1) + \at(normfs_ReadResponse_result_size(m), Pre); */
 	/*@ ghost _A2: ; */
@@ -4769,6 +5613,7 @@ normfs_ReadResponse_size(const normfs_ReadResponse *m)
 	/*@ assert m->id != \null ==> normfs_Id_sized((normfs_Id *)m->id); */
 	/*@ assert s == \at(s, _A2) + \at(normfs_ReadResponse_id_size(m), Pre); */
 	/*@ ghost _A3: ; */
+	/*@ assert s + \at(normfs_ReadResponse_data_size(m), Pre) <= \at(normfs_ReadResponse_tsize(m), Pre); */
 	if (m->data.len > 0) {
 		s += 1
 		   + gremlin_varint_size(m->data.len)
@@ -4776,24 +5621,28 @@ normfs_ReadResponse_size(const normfs_ReadResponse *m)
 	}
 	/*@ assert s == \at(s, _A3) + \at(normfs_ReadResponse_data_size(m), Pre); */
 	/*@ ghost _A4: ; */
+	/*@ assert s + \at(normfs_ReadResponse_data_source_size(m), Pre) <= \at(normfs_ReadResponse_tsize(m), Pre); */
 	if (m->data_source != 0) {
 		s += 1
-		   + gremlin_varint_size((uint64_t)(int64_t)m->data_source);
+		   + gremlin_varint_size(gremlin_enum_wire(m->data_source));
 	}
 	/*@ assert s == \at(s, _A4) + \at(normfs_ReadResponse_data_source_size(m), Pre); */
 	/*@ ghost _A5: ; */
+	/*@ assert s + \at(normfs_ReadResponse_encoding_size(m), Pre) <= \at(normfs_ReadResponse_tsize(m), Pre); */
 	if (m->encoding != 0) {
 		s += 1
-		   + gremlin_varint_size((uint64_t)(int64_t)m->encoding);
+		   + gremlin_varint_size(gremlin_enum_wire(m->encoding));
 	}
 	/*@ assert s == \at(s, _A5) + \at(normfs_ReadResponse_encoding_size(m), Pre); */
-	/*@ ghost _A6: ; */
 	/*@ assert s == \at(normfs_ReadResponse_tsize(m), Pre); */
 	/*@ assert normfs_ReadResponse_dsame{Pre,Here}(m); */
 	/*@ assert m->id != \null ==> \separated(m, m->id); */
 	/*@ ghost _Aw: ; */
 	((normfs_ReadResponse *)m)->_size = s;
-	/*@ assert normfs_ReadResponse_own{_Aw,Here}(m); */
+	/*@ assert \at(m->read_id, _Aw) == m->read_id; */
+	/*@ assert \at(m->data.len, _Aw) == m->data.len; */
+	/*@ assert normfs_ReadResponse_nown{_Aw,Here}((normfs_ReadResponse *)m); */
+	/*@ assert normfs_ReadResponse_own{_Aw,Here}((normfs_ReadResponse *)m); */
 	/*@ assert m->id != \null ==> \at(m->id->_size, _Aw) == m->id->_size; */
 	/*@ assert m->id != \null ==> \at(m->id->raw.len, _Aw) == m->id->raw.len; */
 	/*@ assert m->id != \null ==> normfs_Id_nown{_Aw,Here}((normfs_Id *)m->id); */
@@ -4809,6 +5658,128 @@ normfs_ReadResponse_size(const normfs_ReadResponse *m)
 }
 
 /*@ requires normfs_ReadResponse_valid(m) && normfs_ReadResponse_sized(m);
+    requires _off + normfs_ReadResponse_read_id_size(m) <= 0x7fffffffffffffff;
+    requires normfs_ReadResponse_read_id_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_ReadResponse_read_id_size(m) - 1));
+    requires normfs_ReadResponse_bufsep(m, _buf, _off, _off + normfs_ReadResponse_read_id_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_ReadResponse_read_id_size(m) - 1];
+    ensures \result == \old(_off + normfs_ReadResponse_read_id_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_ReadResponse_encode_read_id_at(const normfs_ReadResponse *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_ReadResponse_tsize_nonneg((normfs_ReadResponse *)m); */
+	/*@ ghost _A0: ; */
+	if (m->read_id != 0) {
+		_off = gremlin_varint32_encode_at(_buf, _off, 8u);
+		_off = gremlin_varint_encode_at(_buf, _off, m->read_id);
+	}
+	return _off;
+}
+
+/*@ requires normfs_ReadResponse_valid(m) && normfs_ReadResponse_sized(m);
+    requires _off + normfs_ReadResponse_result_size(m) <= 0x7fffffffffffffff;
+    requires normfs_ReadResponse_result_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_ReadResponse_result_size(m) - 1));
+    requires normfs_ReadResponse_bufsep(m, _buf, _off, _off + normfs_ReadResponse_result_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_ReadResponse_result_size(m) - 1];
+    ensures \result == \old(_off + normfs_ReadResponse_result_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_ReadResponse_encode_result_at(const normfs_ReadResponse *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_ReadResponse_tsize_nonneg((normfs_ReadResponse *)m); */
+	/*@ ghost _A1: ; */
+	if (m->result != 0) {
+		_off = gremlin_varint32_encode_at(_buf, _off, 16u);
+		_off = gremlin_varint_encode_at(_buf, _off, gremlin_enum_wire(m->result));
+	}
+	return _off;
+}
+
+/*@ requires normfs_ReadResponse_valid(m) && normfs_ReadResponse_sized(m);
+    requires _off + normfs_ReadResponse_id_size(m) <= 0x7fffffffffffffff;
+    requires normfs_ReadResponse_id_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_ReadResponse_id_size(m) - 1));
+    requires normfs_ReadResponse_bufsep(m, _buf, _off, _off + normfs_ReadResponse_id_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_ReadResponse_id_size(m) - 1];
+    ensures \result == \old(_off + normfs_ReadResponse_id_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_ReadResponse_encode_id_at(const normfs_ReadResponse *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_ReadResponse_tsize_nonneg((normfs_ReadResponse *)m); */
+	/*@ ghost _A2: ; */
+	/*@ assert m->id != \null ==> normfs_Id_valid((normfs_Id *)m->id) && normfs_Id_sized((normfs_Id *)m->id); */
+	/*@ assert m->id != \null ==> normfs_ReadResponse_id_size(m) == 1 + varint_size(m->id->_size) + m->id->_size; */
+	/*@ assert m->id != \null ==> normfs_Id_bufsep((normfs_Id *)m->id, _buf, _off, _off + normfs_ReadResponse_id_size(m) - 1); */
+	if (m->id != NULL) {
+		_off = gremlin_varint32_encode_at(_buf, _off, 82u);
+		_off = gremlin_varint_encode_at(_buf, _off, normfs_Id_cached_size(m->id));
+		/*@ assert _off == \at(_off, _A2) + 1 + varint_size(m->id->_size); */
+		/*@ assert _off + m->id->_size <= \at(_off, Pre) + \at(normfs_ReadResponse_id_size(m), Pre); */
+		/*@ assert normfs_Id_bufsep((normfs_Id *)m->id, _buf, _off, _off + m->id->_size - 1); */
+		_off = normfs_Id_encode_at(m->id, _buf, _off);
+	}
+	return _off;
+}
+
+/*@ requires normfs_ReadResponse_valid(m) && normfs_ReadResponse_sized(m);
+    requires _off + normfs_ReadResponse_data_size(m) <= 0x7fffffffffffffff;
+    requires normfs_ReadResponse_data_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_ReadResponse_data_size(m) - 1));
+    requires normfs_ReadResponse_bufsep(m, _buf, _off, _off + normfs_ReadResponse_data_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_ReadResponse_data_size(m) - 1];
+    ensures \result == \old(_off + normfs_ReadResponse_data_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_ReadResponse_encode_data_at(const normfs_ReadResponse *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_ReadResponse_tsize_nonneg((normfs_ReadResponse *)m); */
+	/*@ ghost _A3: ; */
+	if (m->data.len > 0) {
+		_off = gremlin_varint32_encode_at(_buf, _off, 90u);
+		_off = gremlin_varint_encode_at(_buf, _off, m->data.len);
+		_off = gremlin_write_bytes_at(_buf, _off, m->data.data, m->data.len);
+	}
+	return _off;
+}
+
+/*@ requires normfs_ReadResponse_valid(m) && normfs_ReadResponse_sized(m);
+    requires _off + normfs_ReadResponse_data_source_size(m) <= 0x7fffffffffffffff;
+    requires normfs_ReadResponse_data_source_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_ReadResponse_data_source_size(m) - 1));
+    requires normfs_ReadResponse_bufsep(m, _buf, _off, _off + normfs_ReadResponse_data_source_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_ReadResponse_data_source_size(m) - 1];
+    ensures \result == \old(_off + normfs_ReadResponse_data_source_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_ReadResponse_encode_data_source_at(const normfs_ReadResponse *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_ReadResponse_tsize_nonneg((normfs_ReadResponse *)m); */
+	/*@ ghost _A4: ; */
+	if (m->data_source != 0) {
+		_off = gremlin_varint32_encode_at(_buf, _off, 96u);
+		_off = gremlin_varint_encode_at(_buf, _off, gremlin_enum_wire(m->data_source));
+	}
+	return _off;
+}
+
+/*@ requires normfs_ReadResponse_valid(m) && normfs_ReadResponse_sized(m);
+    requires _off + normfs_ReadResponse_encoding_size(m) <= 0x7fffffffffffffff;
+    requires normfs_ReadResponse_encoding_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_ReadResponse_encoding_size(m) - 1));
+    requires normfs_ReadResponse_bufsep(m, _buf, _off, _off + normfs_ReadResponse_encoding_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_ReadResponse_encoding_size(m) - 1];
+    ensures \result == \old(_off + normfs_ReadResponse_encoding_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_ReadResponse_encode_encoding_at(const normfs_ReadResponse *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_ReadResponse_tsize_nonneg((normfs_ReadResponse *)m); */
+	/*@ ghost _A5: ; */
+	if (m->encoding != 0) {
+		_off = gremlin_varint32_encode_at(_buf, _off, 104u);
+		_off = gremlin_varint_encode_at(_buf, _off, gremlin_enum_wire(m->encoding));
+	}
+	return _off;
+}
+
+/*@ requires normfs_ReadResponse_valid(m) && normfs_ReadResponse_sized(m);
     requires _off + m->_size <= 0x7fffffffffffffff;
     requires m->_size == 0 || \valid(_buf + (_off .. _off + m->_size - 1));
     requires normfs_ReadResponse_bufsep(m, _buf, _off, _off + m->_size - 1);
@@ -4821,55 +5792,38 @@ normfs_ReadResponse_encode_at(const normfs_ReadResponse *m, uint8_t * __restrict
 	/*@ ghost normfs_ReadResponse_tsize_nonneg((normfs_ReadResponse *)m); */
 	/*@ ghost _A0: ; */
 	/*@ assert (m->id != \null ==> normfs_Id_valid((normfs_Id *)m->id)); */
-	if (m->read_id != 0) {
-		_off = gremlin_varint32_encode_at(_buf, _off, 8u);
-		_off = gremlin_varint_encode_at(_buf, _off, m->read_id);
-	}
+	/*@ assert _off + \at(normfs_ReadResponse_read_id_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
+	_off = normfs_ReadResponse_encode_read_id_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A0) + \at(normfs_ReadResponse_read_id_size(m), Pre); */
 	/*@ ghost _A1: ; */
-	if (m->result != 0) {
-		_off = gremlin_varint32_encode_at(_buf, _off, 16u);
-		_off = gremlin_varint_encode_at(_buf, _off, (uint64_t)(int64_t)m->result);
-	}
+	/*@ assert normfs_ReadResponse_own{Pre,Here}(m); */
+	/*@ assert _off + \at(normfs_ReadResponse_result_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
+	_off = normfs_ReadResponse_encode_result_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A1) + \at(normfs_ReadResponse_result_size(m), Pre); */
 	/*@ ghost _A2: ; */
+	/*@ assert normfs_ReadResponse_own{Pre,Here}(m); */
 	/*@ assert \at(normfs_ReadResponse_data_size(m), Pre) >= 0; */
 	/*@ assert \at(normfs_ReadResponse_data_source_size(m), Pre) >= 0; */
 	/*@ assert \at(normfs_ReadResponse_encoding_size(m), Pre) >= 0; */
 	/*@ assert _off + \at(normfs_ReadResponse_id_size(m), Pre) + \at(normfs_ReadResponse_data_size(m), Pre) + \at(normfs_ReadResponse_data_source_size(m), Pre) + \at(normfs_ReadResponse_encoding_size(m), Pre) == \at(_off, Pre) + \at(m->_size, Pre); */
 	/*@ assert _off + \at(normfs_ReadResponse_id_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
-	/*@ assert m->id != \null ==> normfs_Id_valid((normfs_Id *)m->id) && normfs_Id_sized((normfs_Id *)m->id); */
-	/*@ assert m->id != \null ==> normfs_ReadResponse_id_size(m) == 1 + varint_size(m->id->_size) + m->id->_size; */
-	/*@ assert m->id != \null ==> normfs_Id_bufsep((normfs_Id *)m->id, _buf, _off, \at(_off, Pre) + \at(m->_size, Pre) - 1); */
-	if (m->id != NULL) {
-		_off = gremlin_varint32_encode_at(_buf, _off, 82u);
-		_off = gremlin_varint_encode_at(_buf, _off, normfs_Id_cached_size(m->id));
-		/*@ assert _off == \at(_off, _A2) + 1 + varint_size(m->id->_size); */
-		/*@ assert _off + m->id->_size <= \at(_off, Pre) + \at(m->_size, Pre); */
-		/*@ assert normfs_Id_bufsep((normfs_Id *)m->id, _buf, _off, _off + m->id->_size - 1); */
-		_off = normfs_Id_encode_at(m->id, _buf, _off);
-	}
+	_off = normfs_ReadResponse_encode_id_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A2) + \at(normfs_ReadResponse_id_size(m), Pre); */
 	/*@ ghost _A3: ; */
-	if (m->data.len > 0) {
-		_off = gremlin_varint32_encode_at(_buf, _off, 90u);
-		_off = gremlin_varint_encode_at(_buf, _off, m->data.len);
-		_off = gremlin_write_bytes_at(_buf, _off, m->data.data, m->data.len);
-	}
+	/*@ assert normfs_ReadResponse_own{Pre,Here}(m); */
+	/*@ assert _off + \at(normfs_ReadResponse_data_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
+	_off = normfs_ReadResponse_encode_data_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A3) + \at(normfs_ReadResponse_data_size(m), Pre); */
 	/*@ ghost _A4: ; */
-	if (m->data_source != 0) {
-		_off = gremlin_varint32_encode_at(_buf, _off, 96u);
-		_off = gremlin_varint_encode_at(_buf, _off, (uint64_t)(int64_t)m->data_source);
-	}
+	/*@ assert normfs_ReadResponse_own{Pre,Here}(m); */
+	/*@ assert _off + \at(normfs_ReadResponse_data_source_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
+	_off = normfs_ReadResponse_encode_data_source_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A4) + \at(normfs_ReadResponse_data_source_size(m), Pre); */
 	/*@ ghost _A5: ; */
-	if (m->encoding != 0) {
-		_off = gremlin_varint32_encode_at(_buf, _off, 104u);
-		_off = gremlin_varint_encode_at(_buf, _off, (uint64_t)(int64_t)m->encoding);
-	}
+	/*@ assert normfs_ReadResponse_own{Pre,Here}(m); */
+	/*@ assert _off + \at(normfs_ReadResponse_encoding_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
+	_off = normfs_ReadResponse_encode_encoding_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A5) + \at(normfs_ReadResponse_encoding_size(m), Pre); */
-	/*@ ghost _A6: ; */
 	/*@ assert _off == \at(_off, Pre) + \at(normfs_ReadResponse_tsize(m), Pre); */
 	return _off;
 }
@@ -4908,10 +5862,14 @@ typedef struct normfs_ReadResponse_reader {
 	normfs_Encoding	encoding;
 } normfs_ReadResponse_reader;
 
+/*@ predicate normfs_ReadResponse_reader_spans{L}(normfs_ReadResponse_reader *r, uint8_t *s, integer n) =
+      (r->_has.id ==> gremlin_span_at((uint8_t *)r->id.data, r->id.len, s, n)) &&
+      (r->_has.data ==> gremlin_span_at((uint8_t *)r->data.data, r->data.len, s, n));
+*/
+
 /*@ predicate normfs_ReadResponse_reader_ok{L}(normfs_ReadResponse_reader *r, integer n) =
       r->src_len >= n &&
-      (r->_has.id ==> gremlin_span_in(r->id, (uint8_t *)r->src, n)) &&
-      (r->_has.data ==> gremlin_span_in(r->data, (uint8_t *)r->src, n));
+      normfs_ReadResponse_reader_spans(r, (uint8_t *)r->src, n);
 */
 
 /*@ requires \valid(r);
@@ -4930,9 +5888,9 @@ normfs_ReadResponse_reader_init(normfs_ReadResponse_reader *r, const uint8_t *sr
 {
 	*r = (normfs_ReadResponse_reader){ .src = src, .src_len = len };
 	size_t offset = 0;
-	/*@ loop invariant 0 <= offset <= len;
-	    loop invariant r->src == src && r->src_len == len;
-	    loop invariant normfs_ReadResponse_reader_ok(r, offset);
+	/*@ loop invariant offset_in: 0 <= offset <= len;
+	    loop invariant src_kept: r->src == src && r->src_len == len;
+	    loop invariant normfs_ReadResponse_reader_spans: normfs_ReadResponse_reader_spans(r, (uint8_t *)src, len);
 	    loop assigns offset, *r;
 	    loop variant len - offset;
 	*/
@@ -4961,19 +5919,23 @@ normfs_ReadResponse_reader_init(normfs_ReadResponse_reader *r, const uint8_t *sr
 		}
 		if (t.value == 82u /* field 10, GREMLIN_WIRE_LEN_PREFIX */) {
 			struct gremlin_bytes_decode_result d =
-				gremlin_bytes_decode(src + offset, len - offset);
+				gremlin_bytes_decode_at(src, offset, len);
 			if (d.error != GREMLIN_OK) return d.error;
 			offset += d.consumed;
-			r->id = d.bytes;
+			r->id.data = d.bytes.data;
+			r->id.len = d.bytes.len;
+			/*@ assert gremlin_span_at((uint8_t *)r->id.data, r->id.len, (uint8_t *)src, len); */
 			r->_has.id = 1;
 			continue;
 		}
 		if (t.value == 90u /* field 11, GREMLIN_WIRE_LEN_PREFIX */) {
 			struct gremlin_bytes_decode_result d =
-				gremlin_bytes_decode(src + offset, len - offset);
+				gremlin_bytes_decode_at(src, offset, len);
 			if (d.error != GREMLIN_OK) return d.error;
 			offset += d.consumed;
-			r->data = d.bytes;
+			r->data.data = d.bytes.data;
+			r->data.len = d.bytes.len;
+			/*@ assert gremlin_span_at((uint8_t *)r->data.data, r->data.len, (uint8_t *)src, len); */
 			r->_has.data = 1;
 			continue;
 		}
@@ -5010,6 +5972,7 @@ normfs_ReadResponse_reader_init(normfs_ReadResponse_reader *r, const uint8_t *sr
 /*@ requires r == \null || \valid_read(r);
     assigns \nothing;
     ensures r != \null && r->_has.read_id ==> \result == r->read_id;
+    ensures !(r != \null && r->_has.read_id) ==> \result == 0;
 */
 static inline uint64_t
 normfs_ReadResponse_reader_get_read_id(const normfs_ReadResponse_reader *r)
@@ -5021,6 +5984,7 @@ normfs_ReadResponse_reader_get_read_id(const normfs_ReadResponse_reader *r)
 /*@ requires r == \null || \valid_read(r);
     assigns \nothing;
     ensures r != \null && r->_has.result ==> \result == r->result;
+    ensures !(r != \null && r->_has.result) ==> \result == 0;
 */
 static inline normfs_ReadResponse_Result
 normfs_ReadResponse_reader_get_result(const normfs_ReadResponse_reader *r)
@@ -5033,8 +5997,12 @@ normfs_ReadResponse_reader_get_result(const normfs_ReadResponse_reader *r)
     requires r == \null || (\valid_read(r) && normfs_ReadResponse_reader_ok(r, r->src_len) &&
                (r->src_len == 0 ||
                 \valid_read(r->src + (0 .. r->src_len - 1))) &&
-               \separated(out, r, r->src + (0 .. r->src_len - 1)));
+               \separated(out, r) &&
+               \separated(out, r->src + (0 .. r->src_len - 1)));
     assigns *out;
+    ensures r != \null && r->_has.id ==>
+              out->src == r->id.data && out->src_len == r->id.len;
+    ensures r == \null || !r->_has.id ==> out->src_len == 0;
     ensures \result == GREMLIN_OK ==>
               normfs_Id_reader_ok(out, out->src_len) &&
               (out->src_len == 0 ||
@@ -5068,6 +6036,7 @@ normfs_ReadResponse_reader_get_data(const normfs_ReadResponse_reader *r)
 /*@ requires r == \null || \valid_read(r);
     assigns \nothing;
     ensures r != \null && r->_has.data_source ==> \result == r->data_source;
+    ensures !(r != \null && r->_has.data_source) ==> \result == 0;
 */
 static inline normfs_ReadResponse_DataSource
 normfs_ReadResponse_reader_get_data_source(const normfs_ReadResponse_reader *r)
@@ -5079,6 +6048,7 @@ normfs_ReadResponse_reader_get_data_source(const normfs_ReadResponse_reader *r)
 /*@ requires r == \null || \valid_read(r);
     assigns \nothing;
     ensures r != \null && r->_has.encoding ==> \result == r->encoding;
+    ensures !(r != \null && r->_has.encoding) ==> \result == 0;
 */
 static inline normfs_Encoding
 normfs_ReadResponse_reader_get_encoding(const normfs_ReadResponse_reader *r)
@@ -5105,35 +6075,47 @@ normfs_ServerResponse_cached_size(const normfs_ServerResponse *m)
 	return m->_size;
 }
 
-/*@ predicate normfs_PingRequest_avoid_normfs_ServerResponse{L}(normfs_PingRequest *m, normfs_ServerResponse *p) =
+/*@ axiomatic normfs_PingRequest_avoid_normfs_ServerResponse_ax {
+    predicate normfs_PingRequest_avoid_normfs_ServerResponse{L}(normfs_PingRequest *m, normfs_ServerResponse *p) =
       \separated(p, m);
+  }
 */
 
-/*@ predicate normfs_Id_avoid_normfs_ServerResponse{L}(normfs_Id *m, normfs_ServerResponse *p) =
+/*@ axiomatic normfs_Id_avoid_normfs_ServerResponse_ax {
+    predicate normfs_Id_avoid_normfs_ServerResponse{L}(normfs_Id *m, normfs_ServerResponse *p) =
       \separated(p, m);
+  }
 */
 
-/*@ predicate normfs_SetupResponse_avoid_normfs_ServerResponse{L}(normfs_SetupResponse *m, normfs_ServerResponse *p) =
+/*@ axiomatic normfs_SetupResponse_avoid_normfs_ServerResponse_ax {
+    predicate normfs_SetupResponse_avoid_normfs_ServerResponse{L}(normfs_SetupResponse *m, normfs_ServerResponse *p) =
       \separated(p, m);
+  }
 */
 
-/*@ predicate normfs_PingResponse_avoid_normfs_ServerResponse{L}(normfs_PingResponse *m, normfs_ServerResponse *p) =
+/*@ axiomatic normfs_PingResponse_avoid_normfs_ServerResponse_ax {
+    predicate normfs_PingResponse_avoid_normfs_ServerResponse{L}(normfs_PingResponse *m, normfs_ServerResponse *p) =
       \separated(p, m) &&
       (m->request != \null ==> normfs_PingRequest_avoid_normfs_ServerResponse((normfs_PingRequest *)m->request, p));
+  }
 */
 
-/*@ predicate normfs_WriteResponse_avoid_normfs_ServerResponse{L}(normfs_WriteResponse *m, normfs_ServerResponse *p) =
+/*@ axiomatic normfs_WriteResponse_avoid_normfs_ServerResponse_ax {
+    predicate normfs_WriteResponse_avoid_normfs_ServerResponse{L}(normfs_WriteResponse *m, normfs_ServerResponse *p) =
       \separated(p, m) &&
       (\forall integer k; 0 <= k < m->ids_count && m->ids[k] != \null ==>
          normfs_Id_avoid_normfs_ServerResponse((normfs_Id *)m->ids[k], p));
+  }
 */
 
-/*@ predicate normfs_ReadResponse_avoid_normfs_ServerResponse{L}(normfs_ReadResponse *m, normfs_ServerResponse *p) =
+/*@ axiomatic normfs_ReadResponse_avoid_normfs_ServerResponse_ax {
+    predicate normfs_ReadResponse_avoid_normfs_ServerResponse{L}(normfs_ReadResponse *m, normfs_ServerResponse *p) =
       \separated(p, m) &&
       (m->id != \null ==> normfs_Id_avoid_normfs_ServerResponse((normfs_Id *)m->id, p));
+  }
 */
 
-/*@
+/*@ axiomatic normfs_ServerResponse_tsize_ax {
     logic integer normfs_ServerResponse_setup_size{L}(normfs_ServerResponse *m) =
       m->setup != \null ?
         1 + varint_size(normfs_SetupResponse_tsize((normfs_SetupResponse *)m->setup)) + normfs_SetupResponse_tsize((normfs_SetupResponse *)m->setup) : 0;
@@ -5242,11 +6224,16 @@ normfs_ServerResponse_cached_size(const normfs_ServerResponse *m)
 
     lemma normfs_ServerResponse_bufsep_sub{L}: \forall normfs_ServerResponse *m, uint8_t *b, integer lo, hi, lo2, hi2;
       lo <= lo2 ==> hi2 <= hi ==> normfs_ServerResponse_bufsep(m, b, lo, hi) ==> normfs_ServerResponse_bufsep(m, b, lo2, hi2);
+  }
 */
 
 /*@ ghost
   /@ requires normfs_ServerResponse_valid(m);
      assigns \nothing;
+     ensures normfs_ServerResponse_setup_size(m) >= 0;
+     ensures normfs_ServerResponse_ping_size(m) >= 0;
+     ensures normfs_ServerResponse_write_size(m) >= 0;
+     ensures normfs_ServerResponse_read_size(m) >= 0;
      ensures m->setup != \null ==> normfs_SetupResponse_tsize((normfs_SetupResponse *)m->setup) >= 0;
      ensures m->ping != \null ==> normfs_PingResponse_tsize((normfs_PingResponse *)m->ping) >= 0;
      ensures m->write != \null ==> normfs_WriteResponse_tsize((normfs_WriteResponse *)m->write) >= 0;
@@ -5259,6 +6246,10 @@ normfs_ServerResponse_cached_size(const normfs_ServerResponse *m)
     if (m->ping) normfs_PingResponse_tsize_nonneg((normfs_PingResponse *)m->ping);
     if (m->write) normfs_WriteResponse_tsize_nonneg((normfs_WriteResponse *)m->write);
     if (m->read) normfs_ReadResponse_tsize_nonneg((normfs_ReadResponse *)m->read);
+    /@ assert normfs_ServerResponse_setup_size(m) >= 0; @/
+    /@ assert normfs_ServerResponse_ping_size(m) >= 0; @/
+    /@ assert normfs_ServerResponse_write_size(m) >= 0; @/
+    /@ assert normfs_ServerResponse_read_size(m) >= 0; @/
   }
 */
 
@@ -5690,7 +6681,6 @@ normfs_ServerResponse_size(const normfs_ServerResponse *m)
 	/*@ assert m->read != \null ==> normfs_ReadResponse_dsame{Pre,Here}((normfs_ReadResponse *)m->read); */
 	/*@ assert m->read != \null ==> normfs_ReadResponse_sized((normfs_ReadResponse *)m->read); */
 	/*@ assert s == \at(s, _A3) + \at(normfs_ServerResponse_read_size(m), Pre); */
-	/*@ ghost _A4: ; */
 	/*@ assert s == \at(normfs_ServerResponse_tsize(m), Pre); */
 	/*@ assert normfs_ServerResponse_dsame{Pre,Here}(m); */
 	/*@ assert m->setup != \null ==> \separated(m, m->setup); */
@@ -5702,7 +6692,8 @@ normfs_ServerResponse_size(const normfs_ServerResponse *m)
 	/*@ assert m->read != \null && m->read->id != \null ==> \separated(m, m->read->id); */
 	/*@ ghost _Aw: ; */
 	((normfs_ServerResponse *)m)->_size = s;
-	/*@ assert normfs_ServerResponse_own{_Aw,Here}(m); */
+	/*@ assert normfs_ServerResponse_nown{_Aw,Here}((normfs_ServerResponse *)m); */
+	/*@ assert normfs_ServerResponse_own{_Aw,Here}((normfs_ServerResponse *)m); */
 	/*@ assert m->setup != \null ==> \at(m->setup->_size, _Aw) == m->setup->_size; */
 	/*@ assert m->setup != \null ==> \at(m->setup->version, _Aw) == m->setup->version; */
 	/*@ assert m->setup != \null ==> \at(m->setup->instance_id_bytes.len, _Aw) == m->setup->instance_id_bytes.len; */
@@ -5762,6 +6753,110 @@ normfs_ServerResponse_size(const normfs_ServerResponse *m)
 }
 
 /*@ requires normfs_ServerResponse_valid(m) && normfs_ServerResponse_sized(m);
+    requires _off + normfs_ServerResponse_setup_size(m) <= 0x7fffffffffffffff;
+    requires normfs_ServerResponse_setup_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_ServerResponse_setup_size(m) - 1));
+    requires normfs_ServerResponse_bufsep(m, _buf, _off, _off + normfs_ServerResponse_setup_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_ServerResponse_setup_size(m) - 1];
+    ensures \result == \old(_off + normfs_ServerResponse_setup_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_ServerResponse_encode_setup_at(const normfs_ServerResponse *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_ServerResponse_tsize_nonneg((normfs_ServerResponse *)m); */
+	/*@ ghost _A0: ; */
+	/*@ assert m->setup != \null ==> normfs_SetupResponse_valid((normfs_SetupResponse *)m->setup) && normfs_SetupResponse_sized((normfs_SetupResponse *)m->setup); */
+	/*@ assert m->setup != \null ==> normfs_ServerResponse_setup_size(m) == 1 + varint_size(m->setup->_size) + m->setup->_size; */
+	/*@ assert m->setup != \null ==> normfs_SetupResponse_bufsep((normfs_SetupResponse *)m->setup, _buf, _off, _off + normfs_ServerResponse_setup_size(m) - 1); */
+	if (m->setup != NULL) {
+		_off = gremlin_varint32_encode_at(_buf, _off, 10u);
+		_off = gremlin_varint_encode_at(_buf, _off, normfs_SetupResponse_cached_size(m->setup));
+		/*@ assert _off == \at(_off, _A0) + 1 + varint_size(m->setup->_size); */
+		/*@ assert _off + m->setup->_size <= \at(_off, Pre) + \at(normfs_ServerResponse_setup_size(m), Pre); */
+		/*@ assert normfs_SetupResponse_bufsep((normfs_SetupResponse *)m->setup, _buf, _off, _off + m->setup->_size - 1); */
+		_off = normfs_SetupResponse_encode_at(m->setup, _buf, _off);
+	}
+	return _off;
+}
+
+/*@ requires normfs_ServerResponse_valid(m) && normfs_ServerResponse_sized(m);
+    requires _off + normfs_ServerResponse_ping_size(m) <= 0x7fffffffffffffff;
+    requires normfs_ServerResponse_ping_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_ServerResponse_ping_size(m) - 1));
+    requires normfs_ServerResponse_bufsep(m, _buf, _off, _off + normfs_ServerResponse_ping_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_ServerResponse_ping_size(m) - 1];
+    ensures \result == \old(_off + normfs_ServerResponse_ping_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_ServerResponse_encode_ping_at(const normfs_ServerResponse *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_ServerResponse_tsize_nonneg((normfs_ServerResponse *)m); */
+	/*@ ghost _A1: ; */
+	/*@ assert m->ping != \null ==> normfs_PingResponse_valid((normfs_PingResponse *)m->ping) && normfs_PingResponse_sized((normfs_PingResponse *)m->ping); */
+	/*@ assert m->ping != \null ==> normfs_ServerResponse_ping_size(m) == 1 + varint_size(m->ping->_size) + m->ping->_size; */
+	/*@ assert m->ping != \null ==> normfs_PingResponse_bufsep((normfs_PingResponse *)m->ping, _buf, _off, _off + normfs_ServerResponse_ping_size(m) - 1); */
+	if (m->ping != NULL) {
+		_off = gremlin_varint32_encode_at(_buf, _off, 18u);
+		_off = gremlin_varint_encode_at(_buf, _off, normfs_PingResponse_cached_size(m->ping));
+		/*@ assert _off == \at(_off, _A1) + 1 + varint_size(m->ping->_size); */
+		/*@ assert _off + m->ping->_size <= \at(_off, Pre) + \at(normfs_ServerResponse_ping_size(m), Pre); */
+		/*@ assert normfs_PingResponse_bufsep((normfs_PingResponse *)m->ping, _buf, _off, _off + m->ping->_size - 1); */
+		_off = normfs_PingResponse_encode_at(m->ping, _buf, _off);
+	}
+	return _off;
+}
+
+/*@ requires normfs_ServerResponse_valid(m) && normfs_ServerResponse_sized(m);
+    requires _off + normfs_ServerResponse_write_size(m) <= 0x7fffffffffffffff;
+    requires normfs_ServerResponse_write_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_ServerResponse_write_size(m) - 1));
+    requires normfs_ServerResponse_bufsep(m, _buf, _off, _off + normfs_ServerResponse_write_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_ServerResponse_write_size(m) - 1];
+    ensures \result == \old(_off + normfs_ServerResponse_write_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_ServerResponse_encode_write_at(const normfs_ServerResponse *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_ServerResponse_tsize_nonneg((normfs_ServerResponse *)m); */
+	/*@ ghost _A2: ; */
+	/*@ assert m->write != \null ==> normfs_WriteResponse_valid((normfs_WriteResponse *)m->write) && normfs_WriteResponse_sized((normfs_WriteResponse *)m->write); */
+	/*@ assert m->write != \null ==> normfs_ServerResponse_write_size(m) == 1 + varint_size(m->write->_size) + m->write->_size; */
+	/*@ assert m->write != \null ==> normfs_WriteResponse_bufsep((normfs_WriteResponse *)m->write, _buf, _off, _off + normfs_ServerResponse_write_size(m) - 1); */
+	if (m->write != NULL) {
+		_off = gremlin_varint32_encode_at(_buf, _off, 82u);
+		_off = gremlin_varint_encode_at(_buf, _off, normfs_WriteResponse_cached_size(m->write));
+		/*@ assert _off == \at(_off, _A2) + 1 + varint_size(m->write->_size); */
+		/*@ assert _off + m->write->_size <= \at(_off, Pre) + \at(normfs_ServerResponse_write_size(m), Pre); */
+		/*@ assert normfs_WriteResponse_bufsep((normfs_WriteResponse *)m->write, _buf, _off, _off + m->write->_size - 1); */
+		_off = normfs_WriteResponse_encode_at(m->write, _buf, _off);
+	}
+	return _off;
+}
+
+/*@ requires normfs_ServerResponse_valid(m) && normfs_ServerResponse_sized(m);
+    requires _off + normfs_ServerResponse_read_size(m) <= 0x7fffffffffffffff;
+    requires normfs_ServerResponse_read_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_ServerResponse_read_size(m) - 1));
+    requires normfs_ServerResponse_bufsep(m, _buf, _off, _off + normfs_ServerResponse_read_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_ServerResponse_read_size(m) - 1];
+    ensures \result == \old(_off + normfs_ServerResponse_read_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_ServerResponse_encode_read_at(const normfs_ServerResponse *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_ServerResponse_tsize_nonneg((normfs_ServerResponse *)m); */
+	/*@ ghost _A3: ; */
+	/*@ assert m->read != \null ==> normfs_ReadResponse_valid((normfs_ReadResponse *)m->read) && normfs_ReadResponse_sized((normfs_ReadResponse *)m->read); */
+	/*@ assert m->read != \null ==> normfs_ServerResponse_read_size(m) == 1 + varint_size(m->read->_size) + m->read->_size; */
+	/*@ assert m->read != \null ==> normfs_ReadResponse_bufsep((normfs_ReadResponse *)m->read, _buf, _off, _off + normfs_ServerResponse_read_size(m) - 1); */
+	if (m->read != NULL) {
+		_off = gremlin_varint32_encode_at(_buf, _off, 90u);
+		_off = gremlin_varint_encode_at(_buf, _off, normfs_ReadResponse_cached_size(m->read));
+		/*@ assert _off == \at(_off, _A3) + 1 + varint_size(m->read->_size); */
+		/*@ assert _off + m->read->_size <= \at(_off, Pre) + \at(normfs_ServerResponse_read_size(m), Pre); */
+		/*@ assert normfs_ReadResponse_bufsep((normfs_ReadResponse *)m->read, _buf, _off, _off + m->read->_size - 1); */
+		_off = normfs_ReadResponse_encode_at(m->read, _buf, _off);
+	}
+	return _off;
+}
+
+/*@ requires normfs_ServerResponse_valid(m) && normfs_ServerResponse_sized(m);
     requires _off + m->_size <= 0x7fffffffffffffff;
     requires m->_size == 0 || \valid(_buf + (_off .. _off + m->_size - 1));
     requires normfs_ServerResponse_bufsep(m, _buf, _off, _off + m->_size - 1);
@@ -5782,67 +6877,28 @@ normfs_ServerResponse_encode_at(const normfs_ServerResponse *m, uint8_t * __rest
 	/*@ assert \at(normfs_ServerResponse_read_size(m), Pre) >= 0; */
 	/*@ assert _off + \at(normfs_ServerResponse_setup_size(m), Pre) + \at(normfs_ServerResponse_ping_size(m), Pre) + \at(normfs_ServerResponse_write_size(m), Pre) + \at(normfs_ServerResponse_read_size(m), Pre) == \at(_off, Pre) + \at(m->_size, Pre); */
 	/*@ assert _off + \at(normfs_ServerResponse_setup_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
-	/*@ assert m->setup != \null ==> normfs_SetupResponse_valid((normfs_SetupResponse *)m->setup) && normfs_SetupResponse_sized((normfs_SetupResponse *)m->setup); */
-	/*@ assert m->setup != \null ==> normfs_ServerResponse_setup_size(m) == 1 + varint_size(m->setup->_size) + m->setup->_size; */
-	/*@ assert m->setup != \null ==> normfs_SetupResponse_bufsep((normfs_SetupResponse *)m->setup, _buf, _off, \at(_off, Pre) + \at(m->_size, Pre) - 1); */
-	if (m->setup != NULL) {
-		_off = gremlin_varint32_encode_at(_buf, _off, 10u);
-		_off = gremlin_varint_encode_at(_buf, _off, normfs_SetupResponse_cached_size(m->setup));
-		/*@ assert _off == \at(_off, _A0) + 1 + varint_size(m->setup->_size); */
-		/*@ assert _off + m->setup->_size <= \at(_off, Pre) + \at(m->_size, Pre); */
-		/*@ assert normfs_SetupResponse_bufsep((normfs_SetupResponse *)m->setup, _buf, _off, _off + m->setup->_size - 1); */
-		_off = normfs_SetupResponse_encode_at(m->setup, _buf, _off);
-	}
+	_off = normfs_ServerResponse_encode_setup_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A0) + \at(normfs_ServerResponse_setup_size(m), Pre); */
 	/*@ ghost _A1: ; */
+	/*@ assert normfs_ServerResponse_own{Pre,Here}(m); */
 	/*@ assert \at(normfs_ServerResponse_write_size(m), Pre) >= 0; */
 	/*@ assert \at(normfs_ServerResponse_read_size(m), Pre) >= 0; */
 	/*@ assert _off + \at(normfs_ServerResponse_ping_size(m), Pre) + \at(normfs_ServerResponse_write_size(m), Pre) + \at(normfs_ServerResponse_read_size(m), Pre) == \at(_off, Pre) + \at(m->_size, Pre); */
 	/*@ assert _off + \at(normfs_ServerResponse_ping_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
-	/*@ assert m->ping != \null ==> normfs_PingResponse_valid((normfs_PingResponse *)m->ping) && normfs_PingResponse_sized((normfs_PingResponse *)m->ping); */
-	/*@ assert m->ping != \null ==> normfs_ServerResponse_ping_size(m) == 1 + varint_size(m->ping->_size) + m->ping->_size; */
-	/*@ assert m->ping != \null ==> normfs_PingResponse_bufsep((normfs_PingResponse *)m->ping, _buf, _off, \at(_off, Pre) + \at(m->_size, Pre) - 1); */
-	if (m->ping != NULL) {
-		_off = gremlin_varint32_encode_at(_buf, _off, 18u);
-		_off = gremlin_varint_encode_at(_buf, _off, normfs_PingResponse_cached_size(m->ping));
-		/*@ assert _off == \at(_off, _A1) + 1 + varint_size(m->ping->_size); */
-		/*@ assert _off + m->ping->_size <= \at(_off, Pre) + \at(m->_size, Pre); */
-		/*@ assert normfs_PingResponse_bufsep((normfs_PingResponse *)m->ping, _buf, _off, _off + m->ping->_size - 1); */
-		_off = normfs_PingResponse_encode_at(m->ping, _buf, _off);
-	}
+	_off = normfs_ServerResponse_encode_ping_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A1) + \at(normfs_ServerResponse_ping_size(m), Pre); */
 	/*@ ghost _A2: ; */
+	/*@ assert normfs_ServerResponse_own{Pre,Here}(m); */
 	/*@ assert \at(normfs_ServerResponse_read_size(m), Pre) >= 0; */
 	/*@ assert _off + \at(normfs_ServerResponse_write_size(m), Pre) + \at(normfs_ServerResponse_read_size(m), Pre) == \at(_off, Pre) + \at(m->_size, Pre); */
 	/*@ assert _off + \at(normfs_ServerResponse_write_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
-	/*@ assert m->write != \null ==> normfs_WriteResponse_valid((normfs_WriteResponse *)m->write) && normfs_WriteResponse_sized((normfs_WriteResponse *)m->write); */
-	/*@ assert m->write != \null ==> normfs_ServerResponse_write_size(m) == 1 + varint_size(m->write->_size) + m->write->_size; */
-	/*@ assert m->write != \null ==> normfs_WriteResponse_bufsep((normfs_WriteResponse *)m->write, _buf, _off, \at(_off, Pre) + \at(m->_size, Pre) - 1); */
-	if (m->write != NULL) {
-		_off = gremlin_varint32_encode_at(_buf, _off, 82u);
-		_off = gremlin_varint_encode_at(_buf, _off, normfs_WriteResponse_cached_size(m->write));
-		/*@ assert _off == \at(_off, _A2) + 1 + varint_size(m->write->_size); */
-		/*@ assert _off + m->write->_size <= \at(_off, Pre) + \at(m->_size, Pre); */
-		/*@ assert normfs_WriteResponse_bufsep((normfs_WriteResponse *)m->write, _buf, _off, _off + m->write->_size - 1); */
-		_off = normfs_WriteResponse_encode_at(m->write, _buf, _off);
-	}
+	_off = normfs_ServerResponse_encode_write_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A2) + \at(normfs_ServerResponse_write_size(m), Pre); */
 	/*@ ghost _A3: ; */
+	/*@ assert normfs_ServerResponse_own{Pre,Here}(m); */
 	/*@ assert _off + \at(normfs_ServerResponse_read_size(m), Pre) == \at(_off, Pre) + \at(m->_size, Pre); */
-	/*@ assert _off + \at(normfs_ServerResponse_read_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
-	/*@ assert m->read != \null ==> normfs_ReadResponse_valid((normfs_ReadResponse *)m->read) && normfs_ReadResponse_sized((normfs_ReadResponse *)m->read); */
-	/*@ assert m->read != \null ==> normfs_ServerResponse_read_size(m) == 1 + varint_size(m->read->_size) + m->read->_size; */
-	/*@ assert m->read != \null ==> normfs_ReadResponse_bufsep((normfs_ReadResponse *)m->read, _buf, _off, \at(_off, Pre) + \at(m->_size, Pre) - 1); */
-	if (m->read != NULL) {
-		_off = gremlin_varint32_encode_at(_buf, _off, 90u);
-		_off = gremlin_varint_encode_at(_buf, _off, normfs_ReadResponse_cached_size(m->read));
-		/*@ assert _off == \at(_off, _A3) + 1 + varint_size(m->read->_size); */
-		/*@ assert _off + m->read->_size <= \at(_off, Pre) + \at(m->_size, Pre); */
-		/*@ assert normfs_ReadResponse_bufsep((normfs_ReadResponse *)m->read, _buf, _off, _off + m->read->_size - 1); */
-		_off = normfs_ReadResponse_encode_at(m->read, _buf, _off);
-	}
+	_off = normfs_ServerResponse_encode_read_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A3) + \at(normfs_ServerResponse_read_size(m), Pre); */
-	/*@ ghost _A4: ; */
 	/*@ assert _off == \at(_off, Pre) + \at(normfs_ServerResponse_tsize(m), Pre); */
 	return _off;
 }
@@ -5877,12 +6933,16 @@ typedef struct normfs_ServerResponse_reader {
 	struct gremlin_bytes	read;
 } normfs_ServerResponse_reader;
 
+/*@ predicate normfs_ServerResponse_reader_spans{L}(normfs_ServerResponse_reader *r, uint8_t *s, integer n) =
+      (r->_has.setup ==> gremlin_span_at((uint8_t *)r->setup.data, r->setup.len, s, n)) &&
+      (r->_has.ping ==> gremlin_span_at((uint8_t *)r->ping.data, r->ping.len, s, n)) &&
+      (r->_has.write ==> gremlin_span_at((uint8_t *)r->write.data, r->write.len, s, n)) &&
+      (r->_has.read ==> gremlin_span_at((uint8_t *)r->read.data, r->read.len, s, n));
+*/
+
 /*@ predicate normfs_ServerResponse_reader_ok{L}(normfs_ServerResponse_reader *r, integer n) =
       r->src_len >= n &&
-      (r->_has.setup ==> gremlin_span_in(r->setup, (uint8_t *)r->src, n)) &&
-      (r->_has.ping ==> gremlin_span_in(r->ping, (uint8_t *)r->src, n)) &&
-      (r->_has.write ==> gremlin_span_in(r->write, (uint8_t *)r->src, n)) &&
-      (r->_has.read ==> gremlin_span_in(r->read, (uint8_t *)r->src, n));
+      normfs_ServerResponse_reader_spans(r, (uint8_t *)r->src, n);
 */
 
 /*@ requires \valid(r);
@@ -5901,9 +6961,9 @@ normfs_ServerResponse_reader_init(normfs_ServerResponse_reader *r, const uint8_t
 {
 	*r = (normfs_ServerResponse_reader){ .src = src, .src_len = len };
 	size_t offset = 0;
-	/*@ loop invariant 0 <= offset <= len;
-	    loop invariant r->src == src && r->src_len == len;
-	    loop invariant normfs_ServerResponse_reader_ok(r, offset);
+	/*@ loop invariant offset_in: 0 <= offset <= len;
+	    loop invariant src_kept: r->src == src && r->src_len == len;
+	    loop invariant normfs_ServerResponse_reader_spans: normfs_ServerResponse_reader_spans(r, (uint8_t *)src, len);
 	    loop assigns offset, *r;
 	    loop variant len - offset;
 	*/
@@ -5914,37 +6974,45 @@ normfs_ServerResponse_reader_init(normfs_ServerResponse_reader *r, const uint8_t
 		offset += t.consumed;
 		if (t.value == 10u /* field 1, GREMLIN_WIRE_LEN_PREFIX */) {
 			struct gremlin_bytes_decode_result d =
-				gremlin_bytes_decode(src + offset, len - offset);
+				gremlin_bytes_decode_at(src, offset, len);
 			if (d.error != GREMLIN_OK) return d.error;
 			offset += d.consumed;
-			r->setup = d.bytes;
+			r->setup.data = d.bytes.data;
+			r->setup.len = d.bytes.len;
+			/*@ assert gremlin_span_at((uint8_t *)r->setup.data, r->setup.len, (uint8_t *)src, len); */
 			r->_has.setup = 1;
 			continue;
 		}
 		if (t.value == 18u /* field 2, GREMLIN_WIRE_LEN_PREFIX */) {
 			struct gremlin_bytes_decode_result d =
-				gremlin_bytes_decode(src + offset, len - offset);
+				gremlin_bytes_decode_at(src, offset, len);
 			if (d.error != GREMLIN_OK) return d.error;
 			offset += d.consumed;
-			r->ping = d.bytes;
+			r->ping.data = d.bytes.data;
+			r->ping.len = d.bytes.len;
+			/*@ assert gremlin_span_at((uint8_t *)r->ping.data, r->ping.len, (uint8_t *)src, len); */
 			r->_has.ping = 1;
 			continue;
 		}
 		if (t.value == 82u /* field 10, GREMLIN_WIRE_LEN_PREFIX */) {
 			struct gremlin_bytes_decode_result d =
-				gremlin_bytes_decode(src + offset, len - offset);
+				gremlin_bytes_decode_at(src, offset, len);
 			if (d.error != GREMLIN_OK) return d.error;
 			offset += d.consumed;
-			r->write = d.bytes;
+			r->write.data = d.bytes.data;
+			r->write.len = d.bytes.len;
+			/*@ assert gremlin_span_at((uint8_t *)r->write.data, r->write.len, (uint8_t *)src, len); */
 			r->_has.write = 1;
 			continue;
 		}
 		if (t.value == 90u /* field 11, GREMLIN_WIRE_LEN_PREFIX */) {
 			struct gremlin_bytes_decode_result d =
-				gremlin_bytes_decode(src + offset, len - offset);
+				gremlin_bytes_decode_at(src, offset, len);
 			if (d.error != GREMLIN_OK) return d.error;
 			offset += d.consumed;
-			r->read = d.bytes;
+			r->read.data = d.bytes.data;
+			r->read.len = d.bytes.len;
+			/*@ assert gremlin_span_at((uint8_t *)r->read.data, r->read.len, (uint8_t *)src, len); */
 			r->_has.read = 1;
 			continue;
 		}
@@ -5964,8 +7032,12 @@ normfs_ServerResponse_reader_init(normfs_ServerResponse_reader *r, const uint8_t
     requires r == \null || (\valid_read(r) && normfs_ServerResponse_reader_ok(r, r->src_len) &&
                (r->src_len == 0 ||
                 \valid_read(r->src + (0 .. r->src_len - 1))) &&
-               \separated(out, r, r->src + (0 .. r->src_len - 1)));
+               \separated(out, r) &&
+               \separated(out, r->src + (0 .. r->src_len - 1)));
     assigns *out;
+    ensures r != \null && r->_has.setup ==>
+              out->src == r->setup.data && out->src_len == r->setup.len;
+    ensures r == \null || !r->_has.setup ==> out->src_len == 0;
     ensures \result == GREMLIN_OK ==>
               normfs_SetupResponse_reader_ok(out, out->src_len) &&
               (out->src_len == 0 ||
@@ -5988,8 +7060,12 @@ normfs_ServerResponse_reader_get_setup(const normfs_ServerResponse_reader *r, no
     requires r == \null || (\valid_read(r) && normfs_ServerResponse_reader_ok(r, r->src_len) &&
                (r->src_len == 0 ||
                 \valid_read(r->src + (0 .. r->src_len - 1))) &&
-               \separated(out, r, r->src + (0 .. r->src_len - 1)));
+               \separated(out, r) &&
+               \separated(out, r->src + (0 .. r->src_len - 1)));
     assigns *out;
+    ensures r != \null && r->_has.ping ==>
+              out->src == r->ping.data && out->src_len == r->ping.len;
+    ensures r == \null || !r->_has.ping ==> out->src_len == 0;
     ensures \result == GREMLIN_OK ==>
               normfs_PingResponse_reader_ok(out, out->src_len) &&
               (out->src_len == 0 ||
@@ -6012,8 +7088,12 @@ normfs_ServerResponse_reader_get_ping(const normfs_ServerResponse_reader *r, nor
     requires r == \null || (\valid_read(r) && normfs_ServerResponse_reader_ok(r, r->src_len) &&
                (r->src_len == 0 ||
                 \valid_read(r->src + (0 .. r->src_len - 1))) &&
-               \separated(out, r, r->src + (0 .. r->src_len - 1)));
+               \separated(out, r) &&
+               \separated(out, r->src + (0 .. r->src_len - 1)));
     assigns *out;
+    ensures r != \null && r->_has.write ==>
+              out->src == r->write.data && out->src_len == r->write.len;
+    ensures r == \null || !r->_has.write ==> out->src_len == 0;
     ensures \result == GREMLIN_OK ==>
               normfs_WriteResponse_reader_ok(out, out->src_len) &&
               (out->src_len == 0 ||
@@ -6036,8 +7116,12 @@ normfs_ServerResponse_reader_get_write(const normfs_ServerResponse_reader *r, no
     requires r == \null || (\valid_read(r) && normfs_ServerResponse_reader_ok(r, r->src_len) &&
                (r->src_len == 0 ||
                 \valid_read(r->src + (0 .. r->src_len - 1))) &&
-               \separated(out, r, r->src + (0 .. r->src_len - 1)));
+               \separated(out, r) &&
+               \separated(out, r->src + (0 .. r->src_len - 1)));
     assigns *out;
+    ensures r != \null && r->_has.read ==>
+              out->src == r->read.data && out->src_len == r->read.len;
+    ensures r == \null || !r->_has.read ==> out->src_len == 0;
     ensures \result == GREMLIN_OK ==>
               normfs_ReadResponse_reader_ok(out, out->src_len) &&
               (out->src_len == 0 ||
@@ -6073,7 +7157,7 @@ normfs_Stamp_cached_size(const normfs_Stamp *m)
 	return m->_size;
 }
 
-/*@
+/*@ axiomatic normfs_Stamp_tsize_ax {
     logic integer normfs_Stamp_monotonic_stamp_ns_size{L}(normfs_Stamp *m) =
       m->monotonic_stamp_ns != 0 ? 1 + varint_size(m->monotonic_stamp_ns) : 0;
 
@@ -6133,15 +7217,22 @@ normfs_Stamp_cached_size(const normfs_Stamp *m)
 
     lemma normfs_Stamp_bufsep_sub{L}: \forall normfs_Stamp *m, uint8_t *b, integer lo, hi, lo2, hi2;
       lo <= lo2 ==> hi2 <= hi ==> normfs_Stamp_bufsep(m, b, lo, hi) ==> normfs_Stamp_bufsep(m, b, lo2, hi2);
+  }
 */
 
 /*@ ghost
   /@ requires normfs_Stamp_valid(m);
      assigns \nothing;
+     ensures normfs_Stamp_monotonic_stamp_ns_size(m) >= 0;
+     ensures normfs_Stamp_local_stamp_ns_size(m) >= 0;
+     ensures normfs_Stamp_app_start_id_size(m) >= 0;
      ensures normfs_Stamp_tsize(m) >= 0;
   @/
   void normfs_Stamp_tsize_nonneg(normfs_Stamp *m)
   {
+    /@ assert normfs_Stamp_monotonic_stamp_ns_size(m) >= 0; @/
+    /@ assert normfs_Stamp_local_stamp_ns_size(m) >= 0; @/
+    /@ assert normfs_Stamp_app_start_id_size(m) >= 0; @/
   }
 */
 
@@ -6158,33 +7249,96 @@ normfs_Stamp_size(const normfs_Stamp *m)
 	size_t s = 0;
 	/*@ ghost normfs_Stamp_tsize_nonneg((normfs_Stamp *)m); */
 	/*@ ghost _A0: ; */
+	/*@ assert s + \at(normfs_Stamp_monotonic_stamp_ns_size(m), Pre) <= \at(normfs_Stamp_tsize(m), Pre); */
 	if (m->monotonic_stamp_ns != 0) {
 		s += 1
 		   + gremlin_varint_size(m->monotonic_stamp_ns);
 	}
 	/*@ assert s == \at(s, _A0) + \at(normfs_Stamp_monotonic_stamp_ns_size(m), Pre); */
 	/*@ ghost _A1: ; */
+	/*@ assert s + \at(normfs_Stamp_local_stamp_ns_size(m), Pre) <= \at(normfs_Stamp_tsize(m), Pre); */
 	if (m->local_stamp_ns != 0) {
 		s += 1
 		   + gremlin_varint_size(m->local_stamp_ns);
 	}
 	/*@ assert s == \at(s, _A1) + \at(normfs_Stamp_local_stamp_ns_size(m), Pre); */
 	/*@ ghost _A2: ; */
+	/*@ assert s + \at(normfs_Stamp_app_start_id_size(m), Pre) <= \at(normfs_Stamp_tsize(m), Pre); */
 	if (m->app_start_id != 0) {
 		s += 1
 		   + gremlin_varint_size(m->app_start_id);
 	}
 	/*@ assert s == \at(s, _A2) + \at(normfs_Stamp_app_start_id_size(m), Pre); */
-	/*@ ghost _A3: ; */
 	/*@ assert s == \at(normfs_Stamp_tsize(m), Pre); */
 	/*@ assert normfs_Stamp_dsame{Pre,Here}(m); */
 	/*@ ghost _Aw: ; */
 	((normfs_Stamp *)m)->_size = s;
-	/*@ assert normfs_Stamp_own{_Aw,Here}(m); */
+	/*@ assert \at(m->monotonic_stamp_ns, _Aw) == m->monotonic_stamp_ns; */
+	/*@ assert \at(m->local_stamp_ns, _Aw) == m->local_stamp_ns; */
+	/*@ assert \at(m->app_start_id, _Aw) == m->app_start_id; */
+	/*@ assert normfs_Stamp_nown{_Aw,Here}((normfs_Stamp *)m); */
+	/*@ assert normfs_Stamp_own{_Aw,Here}((normfs_Stamp *)m); */
 	/*@ assert normfs_Stamp_dsame{_Aw,Here}(m); */
 	/*@ assert normfs_Stamp_dsame{Pre,Here}(m); */
 	/*@ assert normfs_Stamp_tsize(m) == \at(normfs_Stamp_tsize(m), Pre); */
 	return s;
+}
+
+/*@ requires normfs_Stamp_valid(m) && normfs_Stamp_sized(m);
+    requires _off + normfs_Stamp_monotonic_stamp_ns_size(m) <= 0x7fffffffffffffff;
+    requires normfs_Stamp_monotonic_stamp_ns_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_Stamp_monotonic_stamp_ns_size(m) - 1));
+    requires normfs_Stamp_bufsep(m, _buf, _off, _off + normfs_Stamp_monotonic_stamp_ns_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_Stamp_monotonic_stamp_ns_size(m) - 1];
+    ensures \result == \old(_off + normfs_Stamp_monotonic_stamp_ns_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_Stamp_encode_monotonic_stamp_ns_at(const normfs_Stamp *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_Stamp_tsize_nonneg((normfs_Stamp *)m); */
+	/*@ ghost _A0: ; */
+	if (m->monotonic_stamp_ns != 0) {
+		_off = gremlin_varint32_encode_at(_buf, _off, 8u);
+		_off = gremlin_varint_encode_at(_buf, _off, m->monotonic_stamp_ns);
+	}
+	return _off;
+}
+
+/*@ requires normfs_Stamp_valid(m) && normfs_Stamp_sized(m);
+    requires _off + normfs_Stamp_local_stamp_ns_size(m) <= 0x7fffffffffffffff;
+    requires normfs_Stamp_local_stamp_ns_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_Stamp_local_stamp_ns_size(m) - 1));
+    requires normfs_Stamp_bufsep(m, _buf, _off, _off + normfs_Stamp_local_stamp_ns_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_Stamp_local_stamp_ns_size(m) - 1];
+    ensures \result == \old(_off + normfs_Stamp_local_stamp_ns_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_Stamp_encode_local_stamp_ns_at(const normfs_Stamp *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_Stamp_tsize_nonneg((normfs_Stamp *)m); */
+	/*@ ghost _A1: ; */
+	if (m->local_stamp_ns != 0) {
+		_off = gremlin_varint32_encode_at(_buf, _off, 16u);
+		_off = gremlin_varint_encode_at(_buf, _off, m->local_stamp_ns);
+	}
+	return _off;
+}
+
+/*@ requires normfs_Stamp_valid(m) && normfs_Stamp_sized(m);
+    requires _off + normfs_Stamp_app_start_id_size(m) <= 0x7fffffffffffffff;
+    requires normfs_Stamp_app_start_id_size(m) == 0 || \valid(_buf + (_off .. _off + normfs_Stamp_app_start_id_size(m) - 1));
+    requires normfs_Stamp_bufsep(m, _buf, _off, _off + normfs_Stamp_app_start_id_size(m) - 1);
+    assigns _buf[_off .. _off + normfs_Stamp_app_start_id_size(m) - 1];
+    ensures \result == \old(_off + normfs_Stamp_app_start_id_size(m));
+*/
+static inline __attribute__((always_inline)) size_t
+normfs_Stamp_encode_app_start_id_at(const normfs_Stamp *m, uint8_t * __restrict__ _buf, size_t _off)
+{
+	/*@ ghost normfs_Stamp_tsize_nonneg((normfs_Stamp *)m); */
+	/*@ ghost _A2: ; */
+	if (m->app_start_id != 0) {
+		_off = gremlin_varint32_encode_at(_buf, _off, 24u);
+		_off = gremlin_varint_encode_at(_buf, _off, m->app_start_id);
+	}
+	return _off;
 }
 
 /*@ requires normfs_Stamp_valid(m) && normfs_Stamp_sized(m);
@@ -6199,24 +7353,19 @@ normfs_Stamp_encode_at(const normfs_Stamp *m, uint8_t * __restrict__ _buf, size_
 {
 	/*@ ghost normfs_Stamp_tsize_nonneg((normfs_Stamp *)m); */
 	/*@ ghost _A0: ; */
-	if (m->monotonic_stamp_ns != 0) {
-		_off = gremlin_varint32_encode_at(_buf, _off, 8u);
-		_off = gremlin_varint_encode_at(_buf, _off, m->monotonic_stamp_ns);
-	}
+	/*@ assert _off + \at(normfs_Stamp_monotonic_stamp_ns_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
+	_off = normfs_Stamp_encode_monotonic_stamp_ns_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A0) + \at(normfs_Stamp_monotonic_stamp_ns_size(m), Pre); */
 	/*@ ghost _A1: ; */
-	if (m->local_stamp_ns != 0) {
-		_off = gremlin_varint32_encode_at(_buf, _off, 16u);
-		_off = gremlin_varint_encode_at(_buf, _off, m->local_stamp_ns);
-	}
+	/*@ assert normfs_Stamp_own{Pre,Here}(m); */
+	/*@ assert _off + \at(normfs_Stamp_local_stamp_ns_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
+	_off = normfs_Stamp_encode_local_stamp_ns_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A1) + \at(normfs_Stamp_local_stamp_ns_size(m), Pre); */
 	/*@ ghost _A2: ; */
-	if (m->app_start_id != 0) {
-		_off = gremlin_varint32_encode_at(_buf, _off, 24u);
-		_off = gremlin_varint_encode_at(_buf, _off, m->app_start_id);
-	}
+	/*@ assert normfs_Stamp_own{Pre,Here}(m); */
+	/*@ assert _off + \at(normfs_Stamp_app_start_id_size(m), Pre) <= \at(_off, Pre) + \at(m->_size, Pre); */
+	_off = normfs_Stamp_encode_app_start_id_at(m, _buf, _off);
 	/*@ assert _off == \at(_off, _A2) + \at(normfs_Stamp_app_start_id_size(m), Pre); */
-	/*@ ghost _A3: ; */
 	/*@ assert _off == \at(_off, Pre) + \at(normfs_Stamp_tsize(m), Pre); */
 	return _off;
 }
@@ -6269,9 +7418,8 @@ normfs_Stamp_reader_init(normfs_Stamp_reader *r, const uint8_t *src, size_t len)
 {
 	*r = (normfs_Stamp_reader){ .src = src, .src_len = len };
 	size_t offset = 0;
-	/*@ loop invariant 0 <= offset <= len;
-	    loop invariant r->src == src && r->src_len == len;
-	    loop invariant normfs_Stamp_reader_ok(r, offset);
+	/*@ loop invariant offset_in: 0 <= offset <= len;
+	    loop invariant src_kept: r->src == src && r->src_len == len;
 	    loop assigns offset, *r;
 	    loop variant len - offset;
 	*/
@@ -6322,6 +7470,7 @@ normfs_Stamp_reader_init(normfs_Stamp_reader *r, const uint8_t *src, size_t len)
 /*@ requires r == \null || \valid_read(r);
     assigns \nothing;
     ensures r != \null && r->_has.monotonic_stamp_ns ==> \result == r->monotonic_stamp_ns;
+    ensures !(r != \null && r->_has.monotonic_stamp_ns) ==> \result == 0;
 */
 static inline uint64_t
 normfs_Stamp_reader_get_monotonic_stamp_ns(const normfs_Stamp_reader *r)
@@ -6333,6 +7482,7 @@ normfs_Stamp_reader_get_monotonic_stamp_ns(const normfs_Stamp_reader *r)
 /*@ requires r == \null || \valid_read(r);
     assigns \nothing;
     ensures r != \null && r->_has.local_stamp_ns ==> \result == r->local_stamp_ns;
+    ensures !(r != \null && r->_has.local_stamp_ns) ==> \result == 0;
 */
 static inline uint64_t
 normfs_Stamp_reader_get_local_stamp_ns(const normfs_Stamp_reader *r)
@@ -6344,6 +7494,7 @@ normfs_Stamp_reader_get_local_stamp_ns(const normfs_Stamp_reader *r)
 /*@ requires r == \null || \valid_read(r);
     assigns \nothing;
     ensures r != \null && r->_has.app_start_id ==> \result == r->app_start_id;
+    ensures !(r != \null && r->_has.app_start_id) ==> \result == 0;
 */
 static inline uint64_t
 normfs_Stamp_reader_get_app_start_id(const normfs_Stamp_reader *r)

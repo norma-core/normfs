@@ -5,7 +5,7 @@ use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::{OnceCell, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Notify, OnceCell, OwnedSemaphorePermit, Semaphore};
 use uintn::UintN;
 
 /// Long enough for a page of neighbouring reads to land in the same file.
@@ -56,6 +56,7 @@ pub(crate) struct ColdFiles {
     loading: Loading,
     recent: Arc<Mutex<Recent>>,
     waiting: AtomicUsize,
+    contention: Notify,
 }
 
 impl ColdFiles {
@@ -65,6 +66,7 @@ impl ColdFiles {
             loading: Mutex::new(BTreeMap::new()),
             recent: Arc::new(Mutex::new(Recent::default())),
             waiting: AtomicUsize::new(0),
+            contention: Notify::new(),
         }
     }
 
@@ -142,6 +144,7 @@ impl ColdFiles {
             return None;
         }
         let _waiting = Waiting::start(&self.waiting);
+        self.contention.notify_waiters();
         // The kept file may be what holds the slot.
         self.recent.lock().unwrap().file = None;
         let permit = match tokio::time::timeout(SLOW_SLOT, self.slots.clone().acquire_owned()).await
@@ -155,6 +158,21 @@ impl ColdFiles {
             }
         };
         Some(permit.expect("the semaphore is never closed"))
+    }
+
+    /// Whether a read is waiting for a slot.
+    pub(crate) fn contended(&self) -> bool {
+        self.waiting.load(Ordering::SeqCst) > 0
+    }
+
+    /// Completes when a read starts waiting for a slot.
+    pub(crate) async fn contention(&self) {
+        let notified = self.contention.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if !self.contended() {
+            notified.await;
+        }
     }
 
     #[cfg(test)]
