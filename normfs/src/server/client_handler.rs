@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 use super::command_processor::{CommandProcessor, ResponseSender};
 use super::frame::{self, FRAME_HEADER_SIZE, FRAME_MAX_PAYLOAD};
 use super::net::{Conn, FrameReader, NetError};
+use super::request;
 use crate::proto::{ClientRequest, ServerResponse};
 use crate::NormFS;
 
@@ -173,7 +174,7 @@ impl ClientHandler {
             }
 
             // Parse protobuf message
-            match ClientRequest::decode(&payload[..]) {
+            match request::decode_request(&payload) {
                 Ok(request) => {
                     if incoming_tx.send(request).await.is_err() {
                         debug!(
