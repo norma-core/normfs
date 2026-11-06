@@ -4,6 +4,13 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* A descriptor on Unix and a HANDLE on Windows, so a Rust File passes as is. */
+#if defined(_WIN32)
+typedef intptr_t normfs_fs_fd;
+#else
+typedef int normfs_fs_fd;
+#endif
+
 /*
  * The kernel, as the planner in normfs/fs_plan.h sees it.
  *
@@ -208,7 +215,7 @@ void normfs_fs_world_unlink_ok(const char *path, size_t path_len);
     ensures \result >= 0 ==> *os_error == 0 && *ino > 0;
     ensures \result == -1 ==> *os_error > 0;
 */
-int normfs_fs_sys_open_create(const char *path, size_t path_len, int mode,
+normfs_fs_fd normfs_fs_sys_open_create(const char *path, size_t path_len, int mode,
     uint64_t *ino, int *os_error);
 
 struct normfs_fs_iov {
@@ -227,7 +234,7 @@ struct normfs_fs_iov {
     ensures \result == 0 ==> *os_error == 0;
     ensures \result == -1 ==> *os_error > 0;
 */
-int normfs_fs_sys_pwritev_all(int fd, const struct normfs_fs_iov *iov,
+int normfs_fs_sys_pwritev_all(normfs_fs_fd fd, const struct normfs_fs_iov *iov,
     size_t cnt, uint64_t off, int *os_error);
 
 /*@ requires \valid(os_error);
@@ -236,7 +243,7 @@ int normfs_fs_sys_pwritev_all(int fd, const struct normfs_fs_iov *iov,
     ensures \result == 0 ==> *os_error == 0;
     ensures \result == -1 ==> *os_error > 0;
 */
-int normfs_fs_sys_fsync(int fd, int *os_error);
+int normfs_fs_sys_fsync(normfs_fs_fd fd, int *os_error);
 
 /* Not retried on EINTR: Linux releases the descriptor regardless, so a
  * retry could close one already handed to another thread. */
@@ -246,7 +253,7 @@ int normfs_fs_sys_fsync(int fd, int *os_error);
     ensures \result == 0 ==> *os_error == 0;
     ensures \result == -1 ==> *os_error > 0;
 */
-int normfs_fs_sys_close(int fd, int *os_error);
+int normfs_fs_sys_close(normfs_fs_fd fd, int *os_error);
 
 /* lstat(2): 1 with the length of a regular file, 0 when the name is absent,
  * -1 on any other failure. A name that is present but not a regular file is
@@ -300,7 +307,7 @@ int normfs_fs_sys_fsync_parent(const char *path, size_t path_len,
     ensures \result == 0 ==> *os_error == 0;
     ensures \result == -1 ==> *os_error > 0;
 */
-int normfs_fs_sys_ftruncate(int fd, uint64_t len, int *os_error);
+int normfs_fs_sys_ftruncate(normfs_fs_fd fd, uint64_t len, int *os_error);
 
 /* unlink(2): 0 removed, 1 already absent, -1 on any other failure. */
 /*@ requires path_len < NORMFS_FS_PATH_MAX;

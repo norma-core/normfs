@@ -32,6 +32,28 @@ jobs:
       # relocked) fails here rather than at `cargo publish`.
       - run: cargo test --workspace --locked
 
+  windows:
+    name: cargo test --workspace (${{ matrix.target }})
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # cl is what a Windows user gets by default; mingw gcc builds the
+        # same C under the flags the Unix jobs use.
+        target: [x86_64-pc-windows-msvc, x86_64-pc-windows-gnu]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      # From GitHub releases: the Chocolatey feed has timed out on these runners.
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - run: cargo test --workspace --locked --target ${{ matrix.target }}
+
   build:
     name: build + test C (c99, -Werror)
     runs-on: ubuntu-latest

@@ -25,9 +25,10 @@ impl Stamp {
 
 #[cfg(target_os = "linux")]
 const MONOTONIC: libc::clockid_t = libc::CLOCK_BOOTTIME;
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 const MONOTONIC: libc::clockid_t = libc::CLOCK_MONOTONIC_RAW;
 
+#[cfg(unix)]
 pub fn monotonic_stamp_ns() -> u64 {
     let mut ts = libc::timespec {
         tv_sec: 0,
@@ -40,6 +41,16 @@ pub fn monotonic_stamp_ns() -> u64 {
     (ts.tv_sec as u64)
         .saturating_mul(1_000_000_000)
         .saturating_add(ts.tv_nsec as u64)
+}
+
+/// Interrupt time counts through sleep, as CLOCK_BOOTTIME does on Linux.
+#[cfg(windows)]
+pub fn monotonic_stamp_ns() -> u64 {
+    use windows_sys::Win32::System::WindowsProgramming::QueryInterruptTimePrecise;
+    let mut ticks = 0u64;
+    // SAFETY: ticks is a valid, exclusively borrowed u64 for the call.
+    unsafe { QueryInterruptTimePrecise(&mut ticks) };
+    ticks.saturating_mul(100)
 }
 
 pub fn local_stamp_ns() -> u64 {

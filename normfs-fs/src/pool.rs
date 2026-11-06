@@ -2,14 +2,13 @@
 
 use std::ffi::CStr;
 use std::fs::File;
-use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::raw::{c_char, c_int};
-use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::Path;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
 use crate::executor::{Executor, Finished, Job, PlanJob, Resources, Task};
+use crate::os::{self, OwnedSysFd, SysFd};
 use crate::plan::{Kind, Op, Plan, PlanError};
 use crate::{FsError, PublishReport};
 
@@ -26,16 +25,16 @@ unsafe extern "C" {
         mode: c_int,
         ino: *mut u64,
         os_error: *mut c_int,
-    ) -> c_int;
+    ) -> SysFd;
     fn normfs_fs_sys_pwritev_all(
-        fd: c_int,
+        fd: SysFd,
         iov: *const Iov,
         cnt: usize,
         off: u64,
         os_error: *mut c_int,
     ) -> c_int;
-    fn normfs_fs_sys_fsync(fd: c_int, os_error: *mut c_int) -> c_int;
-    fn normfs_fs_sys_close(fd: c_int, os_error: *mut c_int) -> c_int;
+    fn normfs_fs_sys_fsync(fd: SysFd, os_error: *mut c_int) -> c_int;
+    fn normfs_fs_sys_close(fd: SysFd, os_error: *mut c_int) -> c_int;
     fn normfs_fs_sys_file_len(
         path: *const c_char,
         path_len: usize,
@@ -54,7 +53,7 @@ unsafe extern "C" {
         path_len: usize,
         os_error: *mut c_int,
     ) -> c_int;
-    fn normfs_fs_sys_ftruncate(fd: c_int, len: u64, os_error: *mut c_int) -> c_int;
+    fn normfs_fs_sys_ftruncate(fd: SysFd, len: u64, os_error: *mut c_int) -> c_int;
     fn normfs_fs_sys_unlink(path: *const c_char, path_len: usize, os_error: *mut c_int) -> c_int;
 }
 
@@ -120,8 +119,7 @@ impl Errno {
 }
 
 fn path_of(c: &CStr) -> &Path {
-    use std::os::unix::ffi::OsStrExt;
-    Path::new(std::ffi::OsStr::from_bytes(c.to_bytes()))
+    os::path_of(c)
 }
 
 fn run_plan(job: PlanJob) {
@@ -181,15 +179,15 @@ fn drive(plan: &mut Plan, res: &Resources) -> Result<Driven, FsError> {
         );
     }
     let sync = res.sync;
-    let mut owned: Option<OwnedFd> = None;
+    let mut owned: Option<OwnedSysFd> = None;
     let mut absent = false;
     let mut opened = false;
     let mut renamed = false;
-    let fd_of = |owned: &Option<OwnedFd>| -> RawFd {
+    let fd_of = |owned: &Option<OwnedSysFd>| -> SysFd {
         match (owned, &res.file) {
-            (Some(fd), _) => fd.as_raw_fd(),
-            (None, Some(f)) => f.as_raw_fd(),
-            (None, None) => -1,
+            (Some(fd), _) => os::raw(fd),
+            (None, Some(f)) => os::raw(f.as_ref()),
+            (None, None) => os::NO_FD,
         }
     };
 
@@ -222,7 +220,7 @@ fn drive(plan: &mut Plan, res: &Resources) -> Result<Driven, FsError> {
                 if fd >= 0 {
                     opened = true;
                     // SAFETY: fd is a fresh descriptor the shim returned to us.
-                    owned = Some(unsafe { OwnedFd::from_raw_fd(fd) });
+                    owned = Some(unsafe { os::own(fd) });
                     plan.ok(ino)?;
                 } else {
                     plan.err(e.0)?;
@@ -232,7 +230,7 @@ fn drive(plan: &mut Plan, res: &Resources) -> Result<Driven, FsError> {
                 let fd = fd_of(&owned);
                 let (iov, n) = tail_iovs(&res.runs, plan.written());
                 if iov.is_empty() {
-                    plan.err(libc::EIO)?;
+                    plan.err(os::EIO)?;
                     continue;
                 }
                 let off = plan.at() + plan.written();
@@ -250,7 +248,7 @@ fn drive(plan: &mut Plan, res: &Resources) -> Result<Driven, FsError> {
                 // Fail after writing to exercise rollback; a fault armed before
                 // file creation must affect the append, not the creation sync.
                 if plan.kind() == Kind::Append && crate::fault::take_failure(path_of(plan.dst())) {
-                    plan.err(libc::EIO)?;
+                    plan.err(os::EIO)?;
                     continue;
                 }
                 if !sync {
@@ -269,7 +267,7 @@ fn drive(plan: &mut Plan, res: &Resources) -> Result<Driven, FsError> {
                 let rc = match owned.take() {
                     // SAFETY: we own the descriptor and forget it after.
                     Some(fd) => unsafe {
-                        let raw = fd.as_raw_fd();
+                        let raw = os::raw(&fd);
                         std::mem::forget(fd);
                         normfs_fs_sys_close(raw, &mut e.0)
                     },
@@ -330,7 +328,7 @@ fn drive(plan: &mut Plan, res: &Resources) -> Result<Driven, FsError> {
                     match rc {
                         0 => 0,
                         _ if e.0 > 0 => e.0,
-                        _ => libc::EIO,
+                        _ => os::EIO,
                     }
                 });
                 if err == 0 {
@@ -341,7 +339,7 @@ fn drive(plan: &mut Plan, res: &Resources) -> Result<Driven, FsError> {
             }
             Op::TruncateBack => {
                 if crate::fault::take_truncate_failure(path_of(plan.dst())) {
-                    plan.err(libc::EIO)?;
+                    plan.err(os::EIO)?;
                     continue;
                 }
                 // SAFETY: fd is open; e is valid for writes.

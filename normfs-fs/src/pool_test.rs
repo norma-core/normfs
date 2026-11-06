@@ -61,6 +61,57 @@ async fn publish_lands_the_bytes_and_leaves_no_temp() {
 }
 
 #[tokio::test]
+async fn publish_replaces_a_file_a_reader_holds_open() {
+    use std::io::Read;
+
+    let dir = tempfile::tempdir().unwrap();
+    let fs = fs();
+    let tmp = dir.path().join("a.tmp");
+    let dst = dir.path().join("a.store");
+    let spec = |body: &[u8]| PublishSpec {
+        tmp: tmp.clone(),
+        dst: dst.clone(),
+        runs: runs(&[body]),
+        tmp_mode: TmpMode::Excl,
+        sync: true,
+    };
+    fs.publish(spec(b"old"), None).await.unwrap();
+    let mut reader = fs::File::open(&dst).unwrap();
+
+    fs.publish(spec(b"new"), None).await.unwrap();
+    assert_eq!(fs::read(&dst).unwrap(), b"new");
+    let mut held = Vec::new();
+    reader.read_to_end(&mut held).unwrap();
+    assert_eq!(held, b"old");
+}
+
+#[tokio::test]
+async fn publish_lands_below_a_path_past_the_windows_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let fs = fs();
+    let mut deep = dir.path().to_path_buf();
+    for _ in 0..6 {
+        deep.push("d".repeat(50));
+    }
+    fs::create_dir_all(&deep).unwrap();
+    let dst = deep.join("a.store");
+    assert!(dst.as_os_str().len() > 300);
+    fs.publish(
+        PublishSpec {
+            tmp: deep.join("a.tmp"),
+            dst: dst.clone(),
+            runs: runs(&[b"deep"]),
+            tmp_mode: TmpMode::Excl,
+            sync: true,
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(fs::read(&dst).unwrap(), b"deep");
+}
+
+#[tokio::test]
 async fn publish_failure_reports_errno_and_cleans_up() {
     let dir = tempfile::tempdir().unwrap();
     let fs = fs();
@@ -145,7 +196,7 @@ async fn append_commits_whole_batches_and_cuts_back_on_failure() {
     match out {
         AppendOutcome::Failed { err, restored } => {
             assert!(restored);
-            assert_eq!(err.raw_os_error(), Some(libc::EIO));
+            assert_eq!(err.raw_os_error(), Some(crate::os::EIO));
         }
         AppendOutcome::Committed => panic!("committed through an injected failure"),
     }
@@ -365,6 +416,7 @@ async fn bounded_admission_waits_and_cancellation_does_not_submit() {
     assert!(!ran.load(std::sync::atomic::Ordering::SeqCst));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn publish_rejects_a_dangling_temp_symlink_to_the_destination() {
     let dir = tempfile::tempdir().unwrap();
@@ -422,8 +474,7 @@ async fn cached_inode_append_submits_exactly_one_job() {
         .await
         .unwrap();
     let file = Arc::new(file);
-    use std::os::unix::fs::MetadataExt;
-    assert_eq!(inode, fs.metadata(file.clone()).await.unwrap().ino());
+    assert_eq!(inode, crate::os::inode(&file).unwrap());
     submissions.store(0, Ordering::SeqCst);
     assert!(matches!(
         fs.append_sync_with_inode(file, inode, &path, 6, runs(&[b"batch"]), true)

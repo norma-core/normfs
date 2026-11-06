@@ -121,6 +121,12 @@ impl ClientHandler {
                     debug!("Client disconnected (EOF) (client_addr: {})", addr);
                     break;
                 }
+                // Windows closes a socket with unread data by reset, which is
+                // how most of its clients disconnect.
+                Ok(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionReset => {
+                    debug!("Client disconnected (reset) (client_addr: {})", addr);
+                    break;
+                }
                 Ok(Err(e)) => {
                     error!(
                         "Error reading message size (client_addr: {}, error: {})",

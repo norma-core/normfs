@@ -695,6 +695,7 @@ async fn files_far_apart_are_found_without_a_look_at_every_id_between() {
     .await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn files_in_a_directory_the_scan_cannot_read_are_moved_once_it_can() {
     use std::os::unix::fs::PermissionsExt;
