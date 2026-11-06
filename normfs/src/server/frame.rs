@@ -35,17 +35,8 @@ struct CEncodeResult {
     status: c_int,
 }
 
-#[repr(C)]
-struct CDecodeResult {
-    payload_len: u64,
-    consumed: usize,
-    status: c_int,
-}
-
 unsafe extern "C" {
     fn normfs_frame_header_encode(payload_len: u64, out: *mut u8, out_len: usize) -> CEncodeResult;
-
-    fn normfs_frame_header_decode(buf: *const u8, len: usize) -> CDecodeResult;
 }
 
 fn map_status(status: c_int, payload_len: u64) -> Result<(), FrameError> {
@@ -63,11 +54,4 @@ pub(crate) fn encode_header(payload_len: u64) -> Result<[u8; FRAME_HEADER_SIZE],
     let r = unsafe { normfs_frame_header_encode(payload_len, out.as_mut_ptr(), out.len()) };
     map_status(r.status, payload_len)?;
     Ok(out)
-}
-
-pub(crate) fn decode_header(buf: &[u8; FRAME_HEADER_SIZE]) -> Result<u64, FrameError> {
-    // SAFETY: buf is FRAME_HEADER_SIZE readable bytes and the C reads at most len of them.
-    let r = unsafe { normfs_frame_header_decode(buf.as_ptr(), buf.len()) };
-    map_status(r.status, r.payload_len)?;
-    Ok(r.payload_len)
 }
