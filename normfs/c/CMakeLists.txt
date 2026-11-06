@@ -273,6 +273,7 @@ if(FRAMAC)
     # gremlin.c's verify-runtime.
     set(NORMFS_RESPONSE_WP_FCTS
         normfs_Id_tsize_nonneg
+        normfs_Id_tsize_pos
         normfs_SetupResponse_tsize_nonneg
         normfs_PingRequest_tsize_nonneg
         normfs_PingResponse_tsize_nonneg
