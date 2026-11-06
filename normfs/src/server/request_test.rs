@@ -199,7 +199,7 @@ fn test_differs_from_prost() {
     assert!(ClientRequest::decode(&wide_key[..]).is_err());
     assert_eq!(decode_request(&wide_key).unwrap().setup.unwrap().version, 1);
 
-    // packed blocks [1], [] and [0]
+    // packed blocks [1], [] and [0]: both read [1, 0] since gremlin.c skips empty blocks
     let gap = [0x5a, 0x08, 0x22, 0x01, 0x01, 0x22, 0x00, 0x22, 0x01, 0x00];
     assert_eq!(
         ClientRequest::decode(&gap[..])
@@ -209,7 +209,10 @@ fn test_differs_from_prost() {
             .accept_encodings,
         [1, 0]
     );
-    assert_eq!(decode_request(&gap), Err(RequestError::Truncated));
+    assert_eq!(
+        decode_request(&gap).unwrap().read.unwrap().accept_encodings,
+        [1, 0]
+    );
 
     // group 95 closed by an end for field 94: prost refuses it, gremlin skips it
     let crossed = [0xfb, 0x05, 0xf4, 0x05];

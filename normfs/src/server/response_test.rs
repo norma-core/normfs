@@ -100,8 +100,8 @@ fn test_negative_enum_decodes_to_the_same_value() {
         ..Default::default()
     };
     let out = encode_response(&resp, 0, u64::MAX).unwrap();
-    // five byte varint instead of prost's ten, the same i32 once decoded
-    assert_eq!(out.len() + 5, resp.encoded_len());
+    // sign-extended to ten bytes, as prost writes it
+    assert_eq!(&out[..], &resp.encode_to_vec()[..]);
     assert_eq!(ServerResponse::decode(&out[..]).unwrap(), resp);
 }
 

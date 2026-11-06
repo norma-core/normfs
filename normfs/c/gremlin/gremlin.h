@@ -4,6 +4,15 @@
 #include <stdint.h>
 #include <stddef.h>
 
+/* cl knows no GNU attributes. The ones here and in generated code only steer
+ * inlining and mark functions that may go unused, so under cl they go, and
+ * so does the warning that unused static functions get there. */
+#if defined(_MSC_VER) && !defined(__clang__)
+#define __attribute__(x)
+#define __restrict__ __restrict
+#pragma warning(disable : 4505)
+#endif
+
 /*
  *               .'\   /`.
  *             .'.-.`-'.-.`.
@@ -119,6 +128,24 @@ gremlin_writer_init(struct gremlin_writer *w, uint8_t *buf, size_t cap)
         10;
     }
 */
+
+/* An enum value as protobuf puts it on the wire: an int32, sign-extended. */
+/*@ logic integer enum_wire(integer v) =
+      v < 0 ? v + 18446744073709551616 :
+      v >= 2147483648 ? v + 18446744069414584320 : v;
+*/
+
+/* int64_t holds an enum of either C type unchanged; the casts are proved here
+ * once instead of in every encoder that writes an enum. */
+/*@ requires -2147483648 <= v <= 4294967295;
+    assigns \nothing;
+    ensures \result == enum_wire(v);
+*/
+static inline __attribute__((always_inline)) uint64_t
+gremlin_enum_wire(int64_t v)
+{
+	return (uint64_t)(int64_t)(int32_t)v;
+}
 
 /*
  * Byte-level spec: the k-th byte the canonical LEB128 encoder writes
@@ -818,6 +845,8 @@ gremlin_fixed64_encode_at(uint8_t * __restrict__ buf, size_t off, uint64_t v)
 /*@ requires off + src_len <= 0x7fffffffffffffff;
     requires src_len == 0 || \valid_read(src + (0 .. src_len - 1));
     requires src_len == 0 || \valid(buf + (off .. off + src_len - 1));
+    requires src_len == 0 ||
+             \separated(buf + (off .. off + src_len - 1), src + (0 .. src_len - 1));
     assigns  buf[off .. off + src_len - 1];
     ensures  \result == off + src_len;
 */
@@ -920,6 +949,8 @@ struct gremlin_bytes {
 /*@ requires valid_writer(w);
     requires src_len == 0 || \valid_read(src + (0 .. src_len - 1));
     requires w->offset + src_len <= w->cap;
+    requires src_len == 0 ||
+             \separated(w->buf + (w->offset .. w->offset + src_len - 1), src + (0 .. src_len - 1));
     assigns  w->offset,
              w->buf[\at(w->offset, Pre) .. \at(w->offset, Pre) + src_len - 1];
     ensures  valid_writer(w);
@@ -962,10 +993,11 @@ struct gremlin_bytes_decode_result {
 };
 
 /*@ // b lies inside src[0 .. n): what generated readers promise about every
-    // bytes, string and message span they keep.
+    // bytes, string and message span they keep, stated on the two members.
+    predicate gremlin_span_at(uint8_t *p, integer l, uint8_t *src, integer n) =
+      \base_addr(p) == \base_addr(src) && src <= p && p + l <= src + n;
     predicate gremlin_span_in(struct gremlin_bytes b, uint8_t *src, integer n) =
-      \base_addr(b.data) == \base_addr(src) &&
-      src <= b.data && b.data + b.len <= src + n;
+      gremlin_span_at((uint8_t *)b.data, b.len, src, n);
 */
 
 /*@ requires len == 0 || \valid_read(buf + (0 .. len - 1));
@@ -1006,6 +1038,27 @@ gremlin_bytes_decode(const uint8_t *buf, size_t len)
 	r.bytes.len = (size_t)d.value;
 	r.consumed = d.consumed + (size_t)d.value;
 	return r;
+}
+
+/*@ // The span relative to src, proved once here instead of in every arm
+    // of a reader loop.
+    requires off <= len;
+    requires len == 0 || \valid_read(src + (0 .. len - 1));
+    assigns  \nothing;
+    ensures  \result.error == GREMLIN_OK ||
+             \result.error == GREMLIN_ERROR_TRUNCATED ||
+             \result.error == GREMLIN_ERROR_OVERFLOW;
+    ensures  \result.error == GREMLIN_OK ==>
+               0 < \result.consumed <= len - off &&
+               gremlin_span_at((uint8_t *)\result.bytes.data, \result.bytes.len,
+                               (uint8_t *)src, len);
+*/
+static inline __attribute__((always_inline)) struct gremlin_bytes_decode_result
+gremlin_bytes_decode_at(const uint8_t *src, size_t off, size_t len)
+{
+	/* src may be NULL when len is 0, and NULL + 0 is undefined. */
+	if (off == len) return gremlin_bytes_decode(src, 0);
+	return gremlin_bytes_decode(src + off, len - off);
 }
 
 /* ========================================================================
@@ -1110,18 +1163,18 @@ gremlin_skip_data(const uint8_t *buf, size_t len, enum gremlin_wire_type wt)
 			}
 			offset += t.consumed;
 
-			unsigned wt = (unsigned)(t.value % 8u);
-			if (wt == 6u || wt == 7u) {
+			unsigned inner_wt = (unsigned)(t.value % 8u);
+			if (inner_wt == 6u || inner_wt == 7u) {
 				r.error = GREMLIN_ERROR_INVALID_WIRE_TYPE;
 				r.consumed = 0;
 				return r;
 			}
 
-			if (wt == GREMLIN_WIRE_SGROUP) {
+			if (inner_wt == GREMLIN_WIRE_SGROUP) {
 				depth++;
 				continue;
 			}
-			if (wt == GREMLIN_WIRE_EGROUP) {
+			if (inner_wt == GREMLIN_WIRE_EGROUP) {
 				depth--;
 				continue;
 			}
@@ -1131,15 +1184,15 @@ gremlin_skip_data(const uint8_t *buf, size_t len, enum gremlin_wire_type wt)
 			 * cleaner but complicates WP termination; the duplication
 			 * is small and obviously bounded. */
 			size_t remain = len - offset;
-			if (wt == GREMLIN_WIRE_VARINT) {
+			if (inner_wt == GREMLIN_WIRE_VARINT) {
 				struct gremlin_varint_decode_result d =
 					gremlin_varint_decode(buf + offset, remain);
 				if (d.error != GREMLIN_OK) { r.error = d.error; r.consumed = 0; return r; }
 				offset += d.consumed;
-			} else if (wt == GREMLIN_WIRE_FIXED32) {
+			} else if (inner_wt == GREMLIN_WIRE_FIXED32) {
 				if (remain < 4) { r.error = GREMLIN_ERROR_TRUNCATED; r.consumed = 0; return r; }
 				offset += 4;
-			} else if (wt == GREMLIN_WIRE_FIXED64) {
+			} else if (inner_wt == GREMLIN_WIRE_FIXED64) {
 				if (remain < 8) { r.error = GREMLIN_ERROR_TRUNCATED; r.consumed = 0; return r; }
 				offset += 8;
 			} else {
