@@ -11,6 +11,7 @@ const NORMFS_REQUEST_ERR_OVERFLOW: c_int = 2;
 const NORMFS_REQUEST_ERR_BAD_WIRE_TYPE: c_int = 3;
 const NORMFS_REQUEST_ERR_BAD_FIELD_NUM: c_int = 4;
 const NORMFS_REQUEST_ERR_NO_SPACE: c_int = 5;
+const NORMFS_REQUEST_ERR_REPEATED: c_int = 6;
 
 const PACKETS_CAP: usize = 64;
 const ENCODINGS_CAP: usize = 8;
@@ -22,6 +23,7 @@ pub(crate) enum RequestError {
     BadWireType,
     BadFieldNum,
     NoSpace,
+    Repeated,
     InvalidUtf8,
     SpanOutOfBounds { off: usize, len: usize },
     UnknownStatus(c_int),
@@ -35,6 +37,9 @@ impl std::fmt::Display for RequestError {
             RequestError::BadWireType => write!(f, "Invalid wire type in client request"),
             RequestError::BadFieldNum => write!(f, "Invalid field number in client request"),
             RequestError::NoSpace => write!(f, "Client request outgrew its decode buffers"),
+            RequestError::Repeated => {
+                write!(f, "Client request gives a setup, ping, write or read twice")
+            }
             RequestError::InvalidUtf8 => write!(f, "Queue id is not valid UTF-8"),
             RequestError::SpanOutOfBounds { off, len } => {
                 write!(f, "Client request field out of bounds: {}+{}", off, len)
@@ -103,6 +108,7 @@ fn map_status(status: c_int) -> Result<(), RequestError> {
         NORMFS_REQUEST_ERR_BAD_WIRE_TYPE => Err(RequestError::BadWireType),
         NORMFS_REQUEST_ERR_BAD_FIELD_NUM => Err(RequestError::BadFieldNum),
         NORMFS_REQUEST_ERR_NO_SPACE => Err(RequestError::NoSpace),
+        NORMFS_REQUEST_ERR_REPEATED => Err(RequestError::Repeated),
         other => Err(RequestError::UnknownStatus(other)),
     }
 }
