@@ -97,6 +97,8 @@ enum Command {
     },
     Ack(u32),
     Release,
+    /// A fatal error: what is still queued is dropped rather than drained.
+    Abort,
 }
 
 /// TCP-specific implementation of ResponseSender
@@ -111,7 +113,7 @@ pub struct TcpResponseSender {
 impl TcpResponseSender {
     fn fail(&self) {
         self.closed.store(true, Ordering::Release);
-        let _ = self.commands.send(Command::Release);
+        let _ = self.commands.send(Command::Abort);
     }
 }
 
@@ -345,6 +347,7 @@ impl ClientHandler {
             frames: HashMap::new(),
             next_cookie: 0,
             released: false,
+            aborted: false,
             write_closed: false,
             start,
         };
@@ -357,6 +360,10 @@ impl ClientHandler {
             // Nothing read can be answered any more.
             if state.write_closed {
                 state.release();
+            }
+            // A client that stopped reading would hold the queued frames forever.
+            if state.aborted {
+                break;
             }
             let (want, deadline) = state.wants();
             if state.released && want & WANT_READ == 0 && state.drained() {
@@ -408,7 +415,7 @@ impl ClientHandler {
             }
         }
         // The peer may still be reading; end the stream as dropping tokio's write half did.
-        if !state.write_closed {
+        if !state.write_closed && !state.aborted {
             conn.shutdown_write();
         }
     }
@@ -423,6 +430,7 @@ struct Driver {
     frames: HashMap<u64, (Vec<u8>, OwnedSemaphorePermit)>,
     next_cookie: u64,
     released: bool,
+    aborted: bool,
     write_closed: bool,
     start: Instant,
 }
@@ -528,6 +536,11 @@ impl Driver {
                 }
             }
             Command::Release => self.release(),
+            Command::Abort => {
+                self.closed.store(true, Ordering::Release);
+                self.aborted = true;
+                self.release();
+            }
         }
     }
 
