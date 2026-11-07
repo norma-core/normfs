@@ -94,9 +94,16 @@ impl Server {
     }
 }
 
+#[cfg(unix)]
 fn out_of_resources(e: &std::io::Error) -> bool {
     matches!(
         e.raw_os_error(),
         Some(libc::EMFILE | libc::ENFILE | libc::ENOBUFS | libc::ENOMEM | libc::ENOSPC)
     )
+}
+
+/// WSAEMFILE, WSAENOBUFS and ERROR_NOT_ENOUGH_MEMORY.
+#[cfg(windows)]
+fn out_of_resources(e: &std::io::Error) -> bool {
+    matches!(e.raw_os_error(), Some(10024 | 10055 | 8))
 }

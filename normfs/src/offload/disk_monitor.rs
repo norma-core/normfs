@@ -1,7 +1,6 @@
 use std::ffi::CString;
 use std::io;
 use std::os::raw::{c_char, c_int};
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -183,7 +182,17 @@ fn map_status(r: CDiskResult) -> io::Result<()> {
 }
 
 fn c_dir(dir: &Path) -> io::Result<CString> {
-    CString::new(dir.as_os_str().as_bytes()).map_err(|_| {
+    #[cfg(unix)]
+    let bytes = std::os::unix::ffi::OsStrExt::as_bytes(dir.as_os_str());
+    // The Windows C layer takes UTF-8 and widens it for the wide-char calls.
+    #[cfg(windows)]
+    let bytes = dir.to_str().map(str::as_bytes).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "queue directory path is not valid UTF-8",
+        )
+    })?;
+    CString::new(bytes).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             "queue directory path contains an interior NUL",
@@ -219,8 +228,6 @@ fn from_c_id(id: &CDiskId) -> io::Result<UintN> {
 
 #[cfg(test)]
 pub(crate) fn file_path(dir: &Path, kind: FileKind, id: &UintN) -> io::Result<PathBuf> {
-    use std::os::unix::ffi::OsStringExt;
-
     let dir_c = c_dir(dir)?;
     let id_c = c_id(id)?;
     let mut out = vec![0u8; 4096];
@@ -241,7 +248,9 @@ pub(crate) fn file_path(dir: &Path, kind: FileKind, id: &UintN) -> io::Result<Pa
     };
     map_status(r)?;
     out.truncate(used);
-    Ok(PathBuf::from(std::ffi::OsString::from_vec(out)))
+    Ok(PathBuf::from(String::from_utf8(out).map_err(|e| {
+        io::Error::new(io::ErrorKind::InvalidData, e)
+    })?))
 }
 
 pub(crate) struct DirScan {

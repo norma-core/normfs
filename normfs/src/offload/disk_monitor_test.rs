@@ -366,6 +366,7 @@ async fn a_cursor_left_on_a_gap_is_moved_to_the_oldest_file() {
     assert_eq!(*monitor.cursor.lock().unwrap(), Some(UintN::from(6u64)));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_file_that_cannot_be_deleted_holds_cleanup_at_its_id() {
     use std::os::unix::fs::PermissionsExt;
@@ -466,6 +467,7 @@ async fn each_deleted_file_is_recorded_with_the_size_left() {
     assert_eq!(recorded.take(), vec![evicted(1, 300), evicted(2, 200)]);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_held_cleanup_is_reported_once_until_it_moves() {
     use std::os::unix::fs::PermissionsExt;

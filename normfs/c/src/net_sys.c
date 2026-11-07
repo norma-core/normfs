@@ -65,7 +65,7 @@ normfs_net_sys_peer_failed(int e)
 }
 
 long
-normfs_net_sys_read(int fd, uint8_t *buf, size_t off, size_t len, int *os_error)
+normfs_net_sys_read(normfs_net_fd fd, uint8_t *buf, size_t off, size_t len, int *os_error)
 {
 	ssize_t n;
 
@@ -84,7 +84,7 @@ normfs_net_sys_read(int fd, uint8_t *buf, size_t off, size_t len, int *os_error)
 }
 
 long
-normfs_net_sys_write(int fd, const uint8_t *buf, size_t off, size_t len,
+normfs_net_sys_write(normfs_net_fd fd, const uint8_t *buf, size_t off, size_t len,
     int *os_error)
 {
 	ssize_t n;
@@ -274,13 +274,13 @@ normfs_net_sys_accept(int fd, struct normfs_net_sys_accepted *out, int *os_error
 }
 
 void
-normfs_net_sys_shutdown_write(int fd)
+normfs_net_sys_shutdown_write(normfs_net_fd fd)
 {
 	(void)shutdown(fd, SHUT_WR);
 }
 
 void
-normfs_net_sys_close(int fd)
+normfs_net_sys_close(normfs_net_fd fd)
 {
 	/* Not retried on EINTR: the descriptor is released either way. */
 	(void)close(fd);

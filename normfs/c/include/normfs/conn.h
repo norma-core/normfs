@@ -86,7 +86,7 @@ struct normfs_conn_rx {
 	uint64_t cap;
 	uint64_t token;
 	int64_t deadline_ms;
-	int fd;
+	normfs_net_fd fd;
 	uint16_t pending;
 	int8_t reading;
 	int8_t want_buffer;
@@ -109,7 +109,7 @@ struct normfs_conn_tx {
 	struct normfs_conn_queue q[2];
 	uint64_t token;
 	size_t woff;
-	int fd;
+	normfs_net_fd fd;
 	int8_t wclass;
 	int8_t write_open;
 };
@@ -173,7 +173,7 @@ struct normfs_conn_tx {
       \separated(out, t) && \separated(out->ev + (0 .. out->cap - 1), t, out);
 */
 
-void normfs_conn_rx_init(struct normfs_conn_rx *r, int fd, uint64_t token, int64_t now);
+void normfs_conn_rx_init(struct normfs_conn_rx *r, normfs_net_fd fd, uint64_t token, int64_t now);
 int normfs_conn_read(struct normfs_conn_rx *r, struct normfs_conn_events *out, int64_t now);
 void normfs_conn_give_buffer(struct normfs_conn_rx *r, uint8_t *buf, int64_t now);
 void normfs_conn_ack(struct normfs_conn_rx *r, int64_t now);
@@ -182,7 +182,7 @@ void normfs_conn_stop(struct normfs_conn_rx *r, struct normfs_conn_events *out);
 int normfs_conn_rx_interest(const struct normfs_conn_rx *r);
 int64_t normfs_conn_deadline(const struct normfs_conn_rx *r);
 
-void normfs_conn_tx_init(struct normfs_conn_tx *t, int fd, uint64_t token);
+void normfs_conn_tx_init(struct normfs_conn_tx *t, normfs_net_fd fd, uint64_t token);
 int normfs_conn_submit(struct normfs_conn_tx *t, struct normfs_conn_events *out, int cls,
     const uint8_t *buf, size_t len, uint64_t cookie);
 int normfs_conn_write(struct normfs_conn_tx *t, struct normfs_conn_events *out);
