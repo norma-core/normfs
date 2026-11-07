@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::ffi::CString;
 use std::io;
 use std::os::raw::{c_char, c_int};
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -52,7 +51,7 @@ pub(crate) fn mkdir_all(path: &Path) -> io::Result<()> {
                 None => Ok(()),
             };
         }
-        Ok(_) => return Err(io::Error::from_raw_os_error(libc::ENOTDIR)),
+        Ok(_) => return Err(io::Error::from_raw_os_error(crate::os::ENOTDIR)),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => return Err(e),
     }
@@ -63,7 +62,7 @@ pub(crate) fn mkdir_all(path: &Path) -> io::Result<()> {
     mkdir_all(parent)?;
     let canonical = std::fs::canonicalize(parent)?.join(
         path.file_name()
-            .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?,
+            .ok_or_else(|| io::Error::from_raw_os_error(crate::os::EINVAL))?,
     );
     let entry = {
         let mut pending = PENDING.get_or_init(Mutex::default).lock().unwrap();
@@ -113,10 +112,11 @@ fn finish(path: &Path, entry: Arc<Mutex<c_int>>) -> io::Result<()> {
 }
 
 fn sync_created(path: &Path, stage: &mut c_int) -> io::Result<()> {
-    let cpath = CString::new(path.as_os_str().as_bytes())
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let bytes = crate::os::path_bytes(path)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path is not valid UTF-8"))?;
+    let cpath = CString::new(bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     if cpath.as_bytes().len() >= 4096 {
-        return Err(io::Error::from_raw_os_error(libc::ENAMETOOLONG));
+        return Err(io::Error::from_raw_os_error(crate::os::ENAMETOOLONG));
     }
     // SAFETY: the owned NUL-terminated path is bounded and disjoint from the retained stage.
     let status =

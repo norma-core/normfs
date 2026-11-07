@@ -23,6 +23,7 @@ mod dir_sync;
 mod directory;
 mod executor;
 pub mod fault;
+mod os;
 mod plan;
 mod pool;
 mod read;
@@ -437,6 +438,12 @@ impl Fs {
         self.run_blocking(move || file.metadata()).await
     }
 
+    /// The identity `*_with_inode` checks a file against: the inode on Unix,
+    /// the file index on Windows.
+    pub async fn inode(&self, file: Arc<File>) -> Result<u64, FsError> {
+        self.run_blocking(move || inode(&file)).await
+    }
+
     pub async fn directory_size(&self, path: &Path) -> Result<u64, FsError> {
         let root = path.to_path_buf();
         self.run_blocking(move || {
@@ -570,8 +577,23 @@ impl Fs {
 }
 
 fn inode(file: &File) -> io::Result<u64> {
-    use std::os::unix::fs::MetadataExt;
-    Ok(file.metadata()?.ino())
+    os::inode(file)
+}
+
+/// Fills `buf` from `offset` without moving a cursor anyone relies on.
+pub fn read_exact_at(file: &File, mut buf: &mut [u8], mut offset: u64) -> io::Result<()> {
+    while !buf.is_empty() {
+        match os::read_at(file, buf, offset) {
+            Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
+            Ok(n) => {
+                buf = &mut buf[n..];
+                offset += n as u64;
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
 fn finished(plan: &Plan) -> Result<(), FsError> {

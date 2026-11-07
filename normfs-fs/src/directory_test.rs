@@ -1,18 +1,25 @@
 use std::fs;
 use std::future::Future;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
 
-use crate::{Fs, FsConfig, PublishSpec, TmpMode};
+use crate::{Fs, FsConfig};
+#[cfg(unix)]
+use crate::{PublishSpec, TmpMode};
 
+#[cfg(unix)]
 struct RestorePermissions(PathBuf);
 
+#[cfg(unix)]
 impl Drop for RestorePermissions {
     fn drop(&mut self) {
         fs::set_permissions(&self.0, fs::Permissions::from_mode(0o700)).unwrap();
     }
 }
 
+#[cfg(unix)]
 fn permissions(path: &Path, mode: u32) -> RestorePermissions {
     fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
     RestorePermissions(path.to_owned())
@@ -26,6 +33,8 @@ fn fs() -> Fs {
     .unwrap()
 }
 
+// chmod of an ancestor is how these reach the failure paths.
+#[cfg(unix)]
 #[tokio::test]
 async fn publication_below_a_search_only_ancestor() {
     let root = tempfile::tempdir().unwrap();
@@ -56,6 +65,7 @@ async fn publication_below_a_search_only_ancestor() {
     assert_eq!(fs.read_whole(&dst).await.unwrap(), b"committed"[..]);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_failed_parent_sync_is_retried_across_fs_instances() {
     let root = tempfile::tempdir().unwrap();
@@ -76,6 +86,7 @@ async fn a_failed_parent_sync_is_retried_across_fs_instances() {
     second.mkdir_all(&leaf).await.unwrap();
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_removal_after_a_failed_parent_sync_restarts_creation() {
     let root = tempfile::tempdir().unwrap();

@@ -61,6 +61,57 @@ async fn publish_lands_the_bytes_and_leaves_no_temp() {
 }
 
 #[tokio::test]
+async fn publish_replaces_a_file_a_reader_holds_open() {
+    use std::io::Read;
+
+    let dir = tempfile::tempdir().unwrap();
+    let fs = fs();
+    let tmp = dir.path().join("a.tmp");
+    let dst = dir.path().join("a.store");
+    let spec = |body: &[u8]| PublishSpec {
+        tmp: tmp.clone(),
+        dst: dst.clone(),
+        runs: runs(&[body]),
+        tmp_mode: TmpMode::Excl,
+        sync: true,
+    };
+    fs.publish(spec(b"old"), None).await.unwrap();
+    let mut reader = fs::File::open(&dst).unwrap();
+
+    fs.publish(spec(b"new"), None).await.unwrap();
+    assert_eq!(fs::read(&dst).unwrap(), b"new");
+    let mut held = Vec::new();
+    reader.read_to_end(&mut held).unwrap();
+    assert_eq!(held, b"old");
+}
+
+#[tokio::test]
+async fn publish_lands_below_a_path_past_the_windows_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let fs = fs();
+    let mut deep = dir.path().to_path_buf();
+    for _ in 0..6 {
+        deep.push("d".repeat(50));
+    }
+    fs::create_dir_all(&deep).unwrap();
+    let dst = deep.join("a.store");
+    assert!(dst.as_os_str().len() > 300);
+    fs.publish(
+        PublishSpec {
+            tmp: deep.join("a.tmp"),
+            dst: dst.clone(),
+            runs: runs(&[b"deep"]),
+            tmp_mode: TmpMode::Excl,
+            sync: true,
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(fs::read(&dst).unwrap(), b"deep");
+}
+
+#[tokio::test]
 async fn publish_failure_reports_errno_and_cleans_up() {
     let dir = tempfile::tempdir().unwrap();
     let fs = fs();
@@ -145,7 +196,7 @@ async fn append_commits_whole_batches_and_cuts_back_on_failure() {
     match out {
         AppendOutcome::Failed { err, restored } => {
             assert!(restored);
-            assert_eq!(err.raw_os_error(), Some(libc::EIO));
+            assert_eq!(err.raw_os_error(), Some(crate::os::EIO));
         }
         AppendOutcome::Committed => panic!("committed through an injected failure"),
     }
@@ -365,6 +416,7 @@ async fn bounded_admission_waits_and_cancellation_does_not_submit() {
     assert!(!ran.load(std::sync::atomic::Ordering::SeqCst));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn publish_rejects_a_dangling_temp_symlink_to_the_destination() {
     let dir = tempfile::tempdir().unwrap();
@@ -422,8 +474,7 @@ async fn cached_inode_append_submits_exactly_one_job() {
         .await
         .unwrap();
     let file = Arc::new(file);
-    use std::os::unix::fs::MetadataExt;
-    assert_eq!(inode, fs.metadata(file.clone()).await.unwrap().ino());
+    assert_eq!(inode, crate::os::inode(&file).unwrap());
     submissions.store(0, Ordering::SeqCst);
     assert!(matches!(
         fs.append_sync_with_inode(file, inode, &path, 6, runs(&[b"batch"]), true)
@@ -433,4 +484,55 @@ async fn cached_inode_append_submits_exactly_one_job() {
     ));
     assert_eq!(submissions.load(Ordering::SeqCst), 1);
     assert_eq!(std::fs::read(&path).unwrap(), b"headerbatch");
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn publish_refuses_a_temp_symlink_and_leaves_its_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let tmp = dir.path().join("link");
+    let target = dir.path().join("target");
+    let dst = dir.path().join("destination");
+    std::fs::write(&target, b"keep").unwrap();
+    // Creating a symlink needs the privilege or Developer Mode; CI runners have it.
+    if let Err(e) = std::os::windows::fs::symlink_file(&target, &tmp) {
+        assert_eq!(e.raw_os_error(), Some(1314), "{e}");
+        return;
+    }
+    let error = fs()
+        .publish(
+            PublishSpec {
+                tmp: tmp.clone(),
+                dst: dst.clone(),
+                runs: runs(&[b"data"]),
+                tmp_mode: TmpMode::Trunc,
+                sync: true,
+            },
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(std::io::Error::from(error).raw_os_error(), Some(1921));
+    assert_eq!(std::fs::read(&target).unwrap(), b"keep");
+    assert!(!dst.exists());
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn remove_frees_the_name_while_a_reader_holds_the_file() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("held");
+    std::fs::write(&path, b"old").unwrap();
+    let reader = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(7)
+        .open(&path)
+        .unwrap();
+    fs().remove_durable(&path, true).await.unwrap();
+    assert!(!path.exists());
+    std::fs::write(&path, b"new").unwrap();
+    drop(reader);
+    assert_eq!(std::fs::read(&path).unwrap(), b"new");
 }
