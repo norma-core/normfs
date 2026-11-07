@@ -183,6 +183,7 @@ int normfs_conn_tx_drained(const struct normfs_conn_tx *t);
 size_t normfs_conn_rx_size(void);
 size_t normfs_conn_tx_size(void);
 size_t normfs_conn_events_room(void);
+size_t normfs_conn_frame_max(void);
 size_t normfs_conn_pending_max(void);
 
 #endif /* NORMFS_CONN_H */

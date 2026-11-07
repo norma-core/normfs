@@ -67,6 +67,7 @@ unsafe extern "C" {
     fn normfs_conn_tx_size() -> usize;
     fn normfs_conn_events_room() -> usize;
     fn normfs_conn_pending_max() -> usize;
+    fn normfs_conn_frame_max() -> usize;
     fn normfs_conn_rx_init(r: *mut u8, fd: c_int, token: u64, now: i64);
     fn normfs_conn_read(r: *mut u8, out: *mut CEvents, now: i64) -> c_int;
     fn normfs_conn_give_buffer(r: *mut u8, buf: *mut u8, now: i64);
@@ -239,8 +240,10 @@ impl ClientHandler {
             reads: Arc::new(Semaphore::new(QUEUED)),
             closed: closed.clone(),
         });
-        // SAFETY: a plain constant query.
-        let pending = unsafe { normfs_conn_pending_max() };
+        // SAFETY: plain constant queries.
+        let (pending, frame_max) = unsafe { (normfs_conn_pending_max(), normfs_conn_frame_max()) };
+        // normfs_conn_submit requires every frame within the C's bound.
+        assert!(FRAME_HEADER_SIZE as u64 + FRAME_MAX_PAYLOAD <= frame_max as u64);
         let process = tokio::spawn(Self::process_loop(
             self.normfs.clone(),
             incoming,
@@ -516,8 +519,8 @@ impl Driver {
                 let tx = self.sides.tx();
                 let mut out = self.sides.out();
                 // SAFETY: the frame stays in self.frames, unmoved, until its SENT event, and
-                // encode_response keeps it far below NORMFS_CONN_FRAME_MAX; the class
-                // semaphore keeps the queue below its sixteen.
+                // is within normfs_conn_frame_max (checked at connect); the class semaphore
+                // keeps the queue below its sixteen.
                 if unsafe { normfs_conn_submit(tx, &mut out, class, ptr, len, cookie) } != 0 {
                     error!("Response queue full (client_addr: {})", self.addr);
                     self.frames.remove(&cookie);
