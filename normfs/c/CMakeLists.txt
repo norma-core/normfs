@@ -134,7 +134,8 @@ if(FRAMAC)
         normfs_net_result
         normfs_net_read_header
         normfs_net_read_payload
-        normfs_net_write)
+        normfs_net_write
+        normfs_net_accept)
     string(REPLACE ";" "," NORMFS_NET_WP_FCTS_ARG "${NORMFS_NET_WP_FCTS}")
 
     add_custom_target(verify-net

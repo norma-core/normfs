@@ -6,13 +6,14 @@ use normfs::proto::{
     read_response, ClientRequest, PingRequest, ReadRequest, ServerResponse, WriteRequest,
 };
 use normfs::server::Server;
-use normfs::{NormFS, NormFsSettings, QueueSettings, UintN};
+use normfs::{NormFS, NormFsSettings, QueueSettings, ReadPosition, UintN};
 use prost::Message;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::sync::mpsc;
 
 async fn connect(fs: Arc<NormFS>) -> TcpStream {
     let server = Server::new("127.0.0.1:0".parse().unwrap(), fs)
@@ -73,6 +74,49 @@ async fn writes_from_one_connection_land_in_order() {
     assert_eq!(got.len(), N as usize);
     if let Some(i) = (0..N).position(|i| got[i as usize] != i) {
         panic!("entry {i} holds write {}", got[i]);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_request_bigger_than_the_first_buffer_arrives_whole() {
+    let dir = TempDir::new().unwrap();
+    let fs = Arc::new(
+        NormFS::new(dir.path().to_path_buf(), NormFsSettings::default())
+            .await
+            .unwrap(),
+    );
+    let mut stream = connect(fs.clone()).await;
+
+    const N: u64 = 100;
+    let packet = |i: u64| Bytes::from(i.to_le_bytes().repeat(256));
+    let request = ClientRequest {
+        write: Some(WriteRequest {
+            write_id: 1,
+            queue_id: "big".into(),
+            packets: (0..N).map(packet).collect(),
+        }),
+        ..Default::default()
+    };
+    let bytes = message(&request);
+    assert!(bytes.len() > 3 * 65536);
+    for chunk in bytes.chunks(7000) {
+        stream.write_all(chunk).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    assert_eq!(read_response(&mut stream).await.write.unwrap().result, 0);
+
+    let (tx, mut rx) = mpsc::channel(N as usize + 1);
+    fs.read(
+        &fs.resolve("big"),
+        ReadPosition::Absolute(UintN::zero()),
+        N,
+        1,
+        tx,
+    )
+    .await
+    .unwrap();
+    for i in 0..N {
+        assert_eq!(rx.recv().await.unwrap().data, packet(i), "entry {i}");
     }
 }
 

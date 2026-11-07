@@ -29,7 +29,7 @@ const _: () = assert!(std::mem::size_of::<CAccepted>() == 36);
 unsafe extern "C" {
     fn normfs_net_sys_listen(addr: *const CAddr, os_error: *mut c_int) -> c_int;
     fn normfs_net_sys_local_addr(fd: c_int, addr: *mut CAddr, os_error: *mut c_int) -> c_int;
-    fn normfs_net_sys_accept(fd: c_int, out: *mut CAccepted, os_error: *mut c_int) -> c_int;
+    fn normfs_net_accept(fd: c_int, out: *mut CAccepted, os_error: *mut c_int) -> c_int;
     fn normfs_net_sys_shutdown_write(fd: c_int);
     fn normfs_net_sys_close(fd: c_int);
 }
@@ -131,7 +131,7 @@ impl Listener {
             let mut out = CAccepted::default();
             let mut err = 0;
             // SAFETY: out and err are live for the call, and the descriptor is open.
-            let rc = unsafe { normfs_net_sys_accept(self.fd.as_raw_fd(), &mut out, &mut err) };
+            let rc = unsafe { normfs_net_accept(self.fd.as_raw_fd(), &mut out, &mut err) };
             if rc < 0 {
                 return Err(os_error(err));
             }
