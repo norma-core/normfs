@@ -318,20 +318,53 @@ normfs_disk_sys_file_size(const char *path, size_t path_len, uint64_t *size,
 	return 1;
 }
 
+#if !defined(FILE_DISPOSITION_FLAG_DELETE)
+#define FILE_DISPOSITION_FLAG_DELETE 0x00000001
+#endif
+#if !defined(FILE_DISPOSITION_FLAG_POSIX_SEMANTICS)
+#define FILE_DISPOSITION_FLAG_POSIX_SEMANTICS 0x00000002
+#endif
+#define NORMFS_DISK_DISPOSITION_INFO_EX ((FILE_INFO_BY_HANDLE_CLASS)21)
+
+/* An evicted file a reader still holds loses its name at once, as with
+ * unlink; FAT and exFAT fall back to the plain delete. */
 int
 normfs_disk_sys_unlink(const char *path, size_t path_len, int *os_error)
 {
+	FILE_DISPOSITION_INFO plain;
 	wchar_t *wide;
+	DWORD flags;
+	HANDLE h;
+	int ok;
 
 	*os_error = 0;
 	wide = normfs_disk_sys_wpath(path, path_len, 0u, os_error);
 	if (wide == NULL)
 		return -1;
-	if (!DeleteFileW(wide)) {
-		(void)normfs_disk_sys_fail(os_error);
-		free(wide);
-		return -1;
-	}
+	h = CreateFileW(wide, DELETE,
+	    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+	    FILE_FLAG_OPEN_REPARSE_POINT, NULL);
 	free(wide);
-	return 0;
+	if (h == INVALID_HANDLE_VALUE)
+		return normfs_disk_sys_fail(os_error);
+
+	flags = FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS;
+	ok = SetFileInformationByHandle(h, NORMFS_DISK_DISPOSITION_INFO_EX, &flags,
+	    sizeof(flags));
+	if (!ok) {
+		DWORD e = GetLastError();
+
+		if (e == ERROR_INVALID_PARAMETER || e == ERROR_NOT_SUPPORTED ||
+		    e == ERROR_INVALID_FUNCTION) {
+			plain.DeleteFile = TRUE;
+			ok = SetFileInformationByHandle(h, FileDispositionInfo, &plain,
+			    sizeof(plain));
+		} else {
+			SetLastError(e);
+		}
+	}
+	if (!ok)
+		(void)normfs_disk_sys_fail(os_error);
+	(void)CloseHandle(h);
+	return ok ? 0 : -1;
 }
