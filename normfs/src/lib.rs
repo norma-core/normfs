@@ -15,6 +15,7 @@ mod memory_pointers;
 #[cfg(test)]
 mod memory_pointers_test;
 mod offload;
+mod queue_name;
 pub(crate) mod reader_fsm;
 mod system;
 
@@ -133,6 +134,10 @@ pub enum Error {
     /// The queue is NormFS's own ([`SYSTEM_QUEUE`]): it can be read, but
     /// only NormFS writes or closes it.
     ReservedQueue,
+    /// The queue's name would put its directory outside the data directory:
+    /// a `.` or `..` segment, a NUL, or on Windows a drive, a backslash or a
+    /// trailing dot or space.
+    BadQueueName(String),
     /// [`NormFS::close`] has begun: no more writes are taken.
     Closing,
     /// `max_memory_usage` cannot hold the two pages a single queue needs to
@@ -181,6 +186,9 @@ impl std::fmt::Display for Error {
             Error::NotInFile => write!(f, "Record would not join the file the caller saw"),
             Error::QueueClosed => write!(f, "Queue is closed and accepts no more writes"),
             Error::ReservedQueue => write!(f, "Queue is written by NormFS itself"),
+            Error::BadQueueName(name) => {
+                write!(f, "Queue name leaves the data directory: {name:?}")
+            }
             Error::Closing => write!(f, "NormFS is closing and accepts no more writes"),
             Error::MemoryBelowFloor {
                 max_memory_usage,
@@ -221,12 +229,20 @@ impl std::error::Error for Error {
             Error::NotInFile => None,
             Error::QueueClosed => None,
             Error::ReservedQueue => None,
+            Error::BadQueueName(_) => None,
             Error::Closing => None,
             Error::MemoryBelowFloor { .. } => None,
             Error::BucketUnreachable { .. } => None,
             Error::PageBelowMinimum { .. } => None,
         }
     }
+}
+
+fn refuse_bad_name(queue: &QueueId) -> Result<(), Error> {
+    if !queue_name::queue_name_ok(queue) {
+        return Err(Error::BadQueueName(queue.as_str().to_string()));
+    }
+    Ok(())
 }
 
 /// Writes in progress, and whether [`NormFS::close`] has begun.
@@ -868,6 +884,7 @@ impl NormFS {
     }
 
     pub async fn ensure_queue_exists_for_read(&self, queue: &QueueId) -> Result<(), Error> {
+        refuse_bad_name(queue)?;
         let queue_lock = self.queue_init_lock(queue);
         let _guard = queue_lock.lock().await;
 
@@ -884,6 +901,7 @@ impl NormFS {
     }
 
     pub async fn ensure_queue_exists_for_write(&self, queue: &QueueId) -> Result<(), Error> {
+        refuse_bad_name(queue)?;
         let _write = self.writes.enter()?;
         let queue_lock = self.queue_init_lock(queue);
         let _guard = queue_lock.lock().await;
@@ -2051,6 +2069,7 @@ impl NormFS {
         step: u64,
         sender: tokio::sync::mpsc::Sender<ReadEntry>,
     ) -> Result<bool, Error> {
+        refuse_bad_name(queue)?;
         log::debug!(target: "normfs",
             "Reading entries - Queue: '{}', Position: {:?}, Limit: {}, Step: {}",
             queue.short(), position, limit, step);
@@ -2066,6 +2085,7 @@ impl NormFS {
     /// and complete the file, then the marker, so a marker on disk implies
     /// the data reached it. Memory is released last.
     pub async fn close_queue(&self, queue: &QueueId) -> Result<(), Error> {
+        refuse_bad_name(queue)?;
         self.refuse_reserved(queue)?;
         let _write = self.writes.enter()?;
         let queue_lock = self.queue_init_lock(queue);
