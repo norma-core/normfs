@@ -52,7 +52,7 @@
     ensures net_rcalls(fd) == \old(net_rcalls(fd)) + 1;
     ensures net_opos(fd) == \old(net_opos(fd)) && net_wlast(fd) == \old(net_wlast(fd)) &&
             net_wcalls(fd) == \old(net_wcalls(fd));
-    ensures \forall integer i; net_out(fd, i) == \old(net_out(fd, i));
+    ensures \forall integer g, i; net_out(g, i) == \old(net_out(g, i));
     ensures \forall integer g; g != fd ==>
               net_pos(g) == \old(net_pos(g)) && net_rlast(g) == \old(net_rlast(g)) &&
               net_rcalls(g) == \old(net_rcalls(g)) && net_opos(g) == \old(net_opos(g)) &&
@@ -82,6 +82,7 @@ long normfs_net_sys_read(int fd, uint8_t *buf, size_t off, size_t len,
     ensures net_wcalls(fd) == \old(net_wcalls(fd)) + 1;
     ensures net_pos(fd) == \old(net_pos(fd)) && net_rlast(fd) == \old(net_rlast(fd)) &&
             net_rcalls(fd) == \old(net_rcalls(fd));
+    ensures \forall integer g, i; g != fd ==> net_out(g, i) == \old(net_out(g, i));
     ensures \forall integer g; g != fd ==>
               net_pos(g) == \old(net_pos(g)) && net_rlast(g) == \old(net_rlast(g)) &&
               net_rcalls(g) == \old(net_rcalls(g)) && net_opos(g) == \old(net_opos(g)) &&

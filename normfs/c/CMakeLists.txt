@@ -187,6 +187,7 @@ if(FRAMAC)
         normfs_conn_rx_size
         normfs_conn_tx_size
         normfs_conn_events_room
+        normfs_conn_frame_max
         normfs_conn_pending_max)
     string(REPLACE ";" "," NORMFS_CONN_WP_FCTS_ARG "${NORMFS_CONN_WP_FCTS}")
 
