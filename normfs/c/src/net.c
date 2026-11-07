@@ -1,29 +1,6 @@
 #include "normfs/net.h"
 #include "normfs/net_sys.h"
 
-/*@ predicate normfs_net_reader_ok(struct normfs_net_reader *r) =
-      r->header_have <= NORMFS_FRAME_HEADER_SIZE &&
-      r->payload_len <= NORMFS_FRAME_MAX_PAYLOAD &&
-      r->payload_have <= r->payload_len &&
-      (r->in_payload == 0 || r->in_payload == 1) &&
-      (r->in_payload == 1 ==> r->header_have == 0) &&
-      (r->in_payload == 0 ==> r->payload_have == 0);
-
-    predicate normfs_net_header_read{L}(struct normfs_net_reader *r, integer fd) =
-      \forall integer i; 0 <= i < r->header_have ==>
-        r->header[i] == net_in(fd, net_pos(fd) - r->header_have + i);
-
-    predicate normfs_net_payload_read{L}(uint8_t *buf, integer have, integer fd) =
-      \forall integer i; 0 <= i < have ==>
-        buf[i] == net_in(fd, net_pos(fd) - have + i);
-
-    predicate normfs_net_reported(struct normfs_net_result res, integer last) =
-      (res.status == NORMFS_NET_WOULD_BLOCK ==> last == NORMFS_NET_SYS_WOULD_BLOCK) &&
-      (res.status == NORMFS_NET_EOF ==> last == 0) &&
-      (res.status == NORMFS_NET_ERR_IO ==> last == -1 && res.os_error > 0) &&
-      (res.status != NORMFS_NET_ERR_IO ==> res.os_error == 0);
-*/
-
 /*@ requires \valid(r);
     assigns *r;
     ensures normfs_net_reader_ok(r);
@@ -94,7 +71,12 @@ normfs_net_result(int status, int os_error, uint64_t value)
               net_pos(fd) - \old(net_pos(fd)) == r->header_have - \old(r->header_have);
     ensures net_rcalls(fd) - \old(net_rcalls(fd)) <= NORMFS_FRAME_HEADER_SIZE;
     ensures \forall integer g; g != fd ==> net_pos(g) == \old(net_pos(g));
+    // A read leaves every output stream as it was, so the write side's facts hold across it.
+    ensures \forall integer g; net_opos(g) == \old(net_opos(g));
+    ensures \forall integer g, i; net_out(g, i) == \old(net_out(g, i));
     ensures \old(r->in_payload) == 1 <==> \result.status == NORMFS_NET_ERR_BAD_LENGTH;
+    ensures \result.status != NORMFS_NET_OK && \result.status != NORMFS_NET_ERR_BAD_LENGTH ==>
+              r->in_payload == 0;
     ensures \result.status == NORMFS_NET_ERR_BAD_LENGTH ==>
               r->in_payload == 1 && r->payload_len == \old(r->payload_len) &&
               r->payload_have == \old(r->payload_have);
@@ -117,6 +99,8 @@ normfs_net_read_header(struct normfs_net_reader *r, int fd)
 	    loop invariant net_rcalls(fd) - \at(net_rcalls(fd), Pre) <=
 	                   r->header_have - \at(r->header_have, Pre);
 	    loop invariant \forall integer g; g != fd ==> net_pos(g) == \at(net_pos(g), Pre);
+	    loop invariant \forall integer g; net_opos(g) == \at(net_opos(g), Pre);
+	    loop invariant \forall integer g, i; net_out(g, i) == \at(net_out(g, i), Pre);
 	    loop invariant os_error == 0;
 	    loop assigns n, os_error, normfs_net_sys_world,
 	                 r->header[0 .. NORMFS_FRAME_HEADER_SIZE - 1], r->header_have;
@@ -148,33 +132,41 @@ normfs_net_read_header(struct normfs_net_reader *r, int fd)
     requires normfs_net_reader_ok(r);
     requires len == 0 || \valid(buf + (0 .. len - 1));
     requires \separated(r, buf + (0 .. len - 1));
-    requires r->in_payload == 1 && len == r->payload_len ==>
+    requires r->in_payload == 1 && r->payload_have <= len <= r->payload_len ==>
                normfs_net_payload_read(buf, r->payload_have, fd);
     assigns *r, buf[0 .. len - 1], normfs_net_sys_world;
     ensures normfs_net_reader_ok(r);
     ensures normfs_net_reported(\result, net_rlast(fd));
     ensures \result.status == NORMFS_NET_OK || \result.status == NORMFS_NET_WOULD_BLOCK ||
             \result.status == NORMFS_NET_EOF || \result.status == NORMFS_NET_ERR_IO ||
-            \result.status == NORMFS_NET_ERR_BAD_LENGTH || \result.status == NORMFS_NET_YIELD;
-    ensures (\old(r->in_payload) == 0 || len != \old(r->payload_len)) <==>
+            \result.status == NORMFS_NET_ERR_BAD_LENGTH || \result.status == NORMFS_NET_YIELD ||
+            \result.status == NORMFS_NET_FULL;
+    ensures (\old(r->in_payload) == 0 || len < \old(r->payload_have) ||
+             len > \old(r->payload_len)) <==>
               \result.status == NORMFS_NET_ERR_BAD_LENGTH;
     ensures \result.status == NORMFS_NET_ERR_BAD_LENGTH ==>
               r->in_payload == \old(r->in_payload) &&
               r->payload_len == \old(r->payload_len) &&
               r->payload_have == \old(r->payload_have);
     ensures \result.status != NORMFS_NET_ERR_BAD_LENGTH && \result.status != NORMFS_NET_OK ==>
-              r->in_payload == 1 && r->payload_len == len &&
+              r->in_payload == 1 && r->payload_len == \old(r->payload_len) &&
+              \old(r->payload_have) <= r->payload_have <= len &&
               normfs_net_payload_read(buf, r->payload_have, fd);
+    ensures \result.status == NORMFS_NET_FULL <==>
+              \result.status != NORMFS_NET_ERR_BAD_LENGTH && r->in_payload == 1 &&
+              r->payload_have == len && len < r->payload_len;
     ensures \result.status == NORMFS_NET_YIELD ==>
               r->payload_have >= \old(r->payload_have) + NORMFS_NET_BATCH;
     ensures net_rcalls(fd) - \old(net_rcalls(fd)) <= NORMFS_NET_BATCH;
     ensures \forall integer g; g != fd ==> net_pos(g) == \old(net_pos(g));
+    ensures \forall integer g; net_opos(g) == \old(net_opos(g));
+    ensures \forall integer g, i; net_out(g, i) == \old(net_out(g, i));
     ensures \result.status == NORMFS_NET_OK ==>
               net_pos(fd) == \old(net_pos(fd)) + (len - \old(r->payload_have));
     ensures \result.status != NORMFS_NET_OK ==>
               net_pos(fd) - \old(net_pos(fd)) == r->payload_have - \old(r->payload_have);
     ensures \result.status == NORMFS_NET_OK ==>
-              \result.value == len && r->in_payload == 0 &&
+              len == \old(r->payload_len) && \result.value == len && r->in_payload == 0 &&
               r->payload_have == 0 && r->payload_len == 0 && r->header_have == 0 &&
               normfs_net_payload_read(buf, len, fd);
 */
@@ -186,12 +178,12 @@ normfs_net_read_payload(struct normfs_net_reader *r, int fd, uint8_t *buf,
 	int calls = 0;
 	long n;
 
-	if (!r->in_payload || len != r->payload_len)
+	if (!r->in_payload || len < r->payload_have || len > r->payload_len)
 		return normfs_net_result(NORMFS_NET_ERR_BAD_LENGTH, 0, 0u);
 
 	/*@ loop invariant normfs_net_reader_ok(r);
-	    loop invariant r->in_payload == 1 && r->payload_len == len;
-	    loop invariant \at(r->payload_have, Pre) <= r->payload_have;
+	    loop invariant r->in_payload == 1 && r->payload_len == \at(r->payload_len, Pre);
+	    loop invariant \at(r->payload_have, Pre) <= r->payload_have <= len;
 	    loop invariant normfs_net_payload_read(buf, r->payload_have, fd);
 	    loop invariant net_pos(fd) - \at(net_pos(fd), Pre) ==
 	                   r->payload_have - \at(r->payload_have, Pre);
@@ -199,6 +191,8 @@ normfs_net_read_payload(struct normfs_net_reader *r, int fd, uint8_t *buf,
 	    loop invariant r->payload_have - \at(r->payload_have, Pre) >= calls;
 	    loop invariant net_rcalls(fd) - \at(net_rcalls(fd), Pre) == calls;
 	    loop invariant \forall integer g; g != fd ==> net_pos(g) == \at(net_pos(g), Pre);
+	    loop invariant \forall integer g; net_opos(g) == \at(net_opos(g), Pre);
+	    loop invariant \forall integer g, i; net_out(g, i) == \at(net_out(g, i), Pre);
 	    loop invariant os_error == 0;
 	    loop assigns n, os_error, calls, r->payload_have, buf[0 .. len - 1],
 	                 normfs_net_sys_world;
@@ -218,6 +212,8 @@ normfs_net_read_payload(struct normfs_net_reader *r, int fd, uint8_t *buf,
 		r->payload_have += (uint64_t)n;
 		calls++;
 	}
+	if (len < r->payload_len)
+		return normfs_net_result(NORMFS_NET_FULL, 0, 0u);
 
 	r->in_payload = 0;
 	r->payload_have = 0u;
@@ -244,6 +240,8 @@ normfs_net_read_payload(struct normfs_net_reader *r, int fd, uint8_t *buf,
               net_out(fd, \old(net_opos(fd)) + (k - \old(*off))) == buf[k];
     ensures \forall integer i; i < \old(net_opos(fd)) ==>
               net_out(fd, i) == \old(net_out(fd, i));
+    ensures \forall integer g; g != fd ==> net_opos(g) == \old(net_opos(g));
+    ensures \forall integer g, i; g != fd ==> net_out(g, i) == \old(net_out(g, i));
 */
 struct normfs_net_result
 normfs_net_write(int fd, const uint8_t *buf, size_t len, size_t *off)
@@ -263,6 +261,9 @@ normfs_net_write(int fd, const uint8_t *buf, size_t len, size_t *off)
 	      net_out(fd, \at(net_opos(fd), Pre) + (k - \at(*off, Pre))) == buf[k];
 	    loop invariant \forall integer i; i < \at(net_opos(fd), Pre) ==>
 	      net_out(fd, i) == \at(net_out(fd, i), Pre);
+	    loop invariant \forall integer g; g != fd ==> net_opos(g) == \at(net_opos(g), Pre);
+	    loop invariant \forall integer g, i; g != fd ==>
+	      net_out(g, i) == \at(net_out(g, i), Pre);
 	    loop assigns n, os_error, calls, *off, normfs_net_sys_world;
 	    loop variant len - *off;
 	*/
@@ -278,4 +279,31 @@ normfs_net_write(int fd, const uint8_t *buf, size_t len, size_t *off)
 		calls++;
 	}
 	return normfs_net_result(NORMFS_NET_OK, 0, 0u);
+}
+
+/*@ requires \valid(out) && \valid(os_error) && \separated(out, os_error);
+    assigns *out, *os_error, normfs_net_sys_world;
+    ensures -1 <= \result <= 2;
+    ensures \result == -1 ==> *os_error > 0;
+    ensures \result != -1 ==> *os_error == 0;
+    ensures \result == 1 ==> out->fd >= 0;
+    ensures \result != 1 ==> out->fd == -1;
+*/
+int
+normfs_net_accept(int fd, struct normfs_net_sys_accepted *out, int *os_error)
+{
+	int tries;
+	int rc;
+
+	/*@ loop invariant 0 <= tries <= NORMFS_NET_ACCEPT_TRIES;
+	    loop invariant tries > 0 ==> *os_error == 0 && out->fd == -1;
+	    loop assigns tries, rc, *out, *os_error, normfs_net_sys_world;
+	    loop variant NORMFS_NET_ACCEPT_TRIES - tries;
+	*/
+	for (tries = 0; tries < NORMFS_NET_ACCEPT_TRIES; tries++) {
+		rc = normfs_net_sys_accept(fd, out, os_error);
+		if (rc != 2)
+			return rc;
+	}
+	return 2;
 }

@@ -52,7 +52,7 @@
     ensures net_rcalls(fd) == \old(net_rcalls(fd)) + 1;
     ensures net_opos(fd) == \old(net_opos(fd)) && net_wlast(fd) == \old(net_wlast(fd)) &&
             net_wcalls(fd) == \old(net_wcalls(fd));
-    ensures \forall integer i; net_out(fd, i) == \old(net_out(fd, i));
+    ensures \forall integer g, i; net_out(g, i) == \old(net_out(g, i));
     ensures \forall integer g; g != fd ==>
               net_pos(g) == \old(net_pos(g)) && net_rlast(g) == \old(net_rlast(g)) &&
               net_rcalls(g) == \old(net_rcalls(g)) && net_opos(g) == \old(net_opos(g)) &&
@@ -82,6 +82,7 @@ long normfs_net_sys_read(int fd, uint8_t *buf, size_t off, size_t len,
     ensures net_wcalls(fd) == \old(net_wcalls(fd)) + 1;
     ensures net_pos(fd) == \old(net_pos(fd)) && net_rlast(fd) == \old(net_rlast(fd)) &&
             net_rcalls(fd) == \old(net_rcalls(fd));
+    ensures \forall integer g, i; g != fd ==> net_out(g, i) == \old(net_out(g, i));
     ensures \forall integer g; g != fd ==>
               net_pos(g) == \old(net_pos(g)) && net_rlast(g) == \old(net_rlast(g)) &&
               net_rcalls(g) == \old(net_rcalls(g)) && net_opos(g) == \old(net_opos(g)) &&
@@ -114,8 +115,16 @@ int normfs_net_sys_listen(const struct normfs_net_sys_addr *addr, int *os_error)
 /* The address a listening socket is bound to, port 0 resolved. 0 or -1. */
 int normfs_net_sys_local_addr(int fd, struct normfs_net_sys_addr *addr, int *os_error);
 
-/* 1 with a connection, 0 when none is pending, 2 after a run of connections
- * that failed while more may wait, -1 with os_error. */
+/* One accept, EINTR retried: 1 with a connection, 0 when none is pending, 2
+ * when the pending one failed and left the queue, -1 with os_error. */
+/*@ requires \valid(out) && \valid(os_error) && \separated(out, os_error);
+    assigns *out, *os_error, normfs_net_sys_world;
+    ensures -1 <= \result <= 2;
+    ensures \result == -1 ==> *os_error > 0;
+    ensures \result != -1 ==> *os_error == 0;
+    ensures \result == 1 ==> out->fd >= 0;
+    ensures \result != 1 ==> out->fd == -1;
+*/
 int normfs_net_sys_accept(int fd, struct normfs_net_sys_accepted *out, int *os_error);
 
 /* shutdown(SHUT_WR); errors are ignored, the peer may already be gone. */

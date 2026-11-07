@@ -28,12 +28,14 @@ fn main() -> Result<()> {
     let gremlin_dir = manifest_dir.join("c/gremlin");
     let uintn_include_dir = uintn_include_dir(&manifest_dir);
     let sources = [
+        manifest_dir.join("c/src/conn.c"),
         manifest_dir.join("c/src/disk_monitor.c"),
         manifest_dir.join("c/src/disk_monitor_sys.c"),
         manifest_dir.join("c/src/frame.c"),
         manifest_dir.join("c/src/net.c"),
         manifest_dir.join("c/src/net_sys.c"),
         manifest_dir.join("c/src/request.c"),
+        manifest_dir.join("c/src/response.c"),
         manifest_dir.join("c/src/walk.c"),
     ];
 
