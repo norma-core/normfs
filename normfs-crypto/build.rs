@@ -15,6 +15,7 @@ fn main() {
     ];
     if windows {
         println!("cargo:rustc-link-lib=bcrypt");
+        println!("cargo:rustc-link-lib=advapi32");
     }
 
     println!("cargo:rerun-if-changed={}", include_dir.display());

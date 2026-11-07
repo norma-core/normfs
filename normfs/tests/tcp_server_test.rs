@@ -6,13 +6,14 @@ use normfs::proto::{
     read_response, ClientRequest, PingRequest, ReadRequest, ServerResponse, WriteRequest,
 };
 use normfs::server::Server;
-use normfs::{NormFS, NormFsSettings, QueueSettings, UintN};
+use normfs::{NormFS, NormFsSettings, QueueSettings, ReadPosition, UintN};
 use prost::Message;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::sync::mpsc;
 
 async fn connect(fs: Arc<NormFS>) -> TcpStream {
     let server = Server::new("127.0.0.1:0".parse().unwrap(), fs)
@@ -73,6 +74,49 @@ async fn writes_from_one_connection_land_in_order() {
     assert_eq!(got.len(), N as usize);
     if let Some(i) = (0..N).position(|i| got[i as usize] != i) {
         panic!("entry {i} holds write {}", got[i]);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_request_bigger_than_the_first_buffer_arrives_whole() {
+    let dir = TempDir::new().unwrap();
+    let fs = Arc::new(
+        NormFS::new(dir.path().to_path_buf(), NormFsSettings::default())
+            .await
+            .unwrap(),
+    );
+    let mut stream = connect(fs.clone()).await;
+
+    const N: u64 = 100;
+    let packet = |i: u64| Bytes::from(i.to_le_bytes().repeat(256));
+    let request = ClientRequest {
+        write: Some(WriteRequest {
+            write_id: 1,
+            queue_id: "big".into(),
+            packets: (0..N).map(packet).collect(),
+        }),
+        ..Default::default()
+    };
+    let bytes = message(&request);
+    assert!(bytes.len() > 3 * 65536);
+    for chunk in bytes.chunks(7000) {
+        stream.write_all(chunk).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    assert_eq!(read_response(&mut stream).await.write.unwrap().result, 0);
+
+    let (tx, mut rx) = mpsc::channel(N as usize + 1);
+    fs.read(
+        &fs.resolve("big"),
+        ReadPosition::Absolute(UintN::zero()),
+        N,
+        1,
+        tx,
+    )
+    .await
+    .unwrap();
+    for i in 0..N {
+        assert_eq!(rx.recv().await.unwrap().data, packet(i), "entry {i}");
     }
 }
 
@@ -168,4 +212,170 @@ async fn a_follow_past_the_limit_is_refused() {
     })
     .await
     .expect("the extra follow was not refused or the ping went unanswered");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_bad_request_closes_the_connection_a_follow_holds() {
+    let dir = TempDir::new().unwrap();
+    let fs = memory_fs(&dir, QueueSettings::default()).await;
+    let mut stream = connect(fs).await;
+    stream
+        .write_all(&message(&write_request(0, "follow", vec![1])))
+        .await
+        .unwrap();
+    assert_eq!(read_response(&mut stream).await.write.unwrap().result, 0);
+    let follow = ClientRequest {
+        read: Some(ReadRequest {
+            read_id: 1,
+            queue_id: "follow".into(),
+            step: 1,
+            offset: None,
+            limit: 0,
+            accept_encodings: Vec::new(),
+        }),
+        ..Default::default()
+    };
+    stream.write_all(&message(&follow)).await.unwrap();
+    // field number 0, which no decoder accepts
+    stream
+        .write_all(&[2, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+        .await
+        .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut sink = Vec::new();
+        stream.read_to_end(&mut sink).await
+    })
+    .await
+    .expect("the connection stayed open")
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_bad_request_drops_replies_a_stalled_client_never_read() {
+    const RECORD: usize = 1024 * 1024;
+    const RECORDS: u64 = 32;
+    let dir = TempDir::new().unwrap();
+    let settings = NormFsSettings {
+        mem_page_size: 4 * 1024 * 1024,
+        max_memory_usage: 256 * 1024 * 1024,
+        queue_settings: QueueSettings::all_active().with_default_persist(normfs::Persist::MEMORY),
+        ..NormFsSettings::default()
+    };
+    let fs = Arc::new(
+        NormFS::new(dir.path().to_path_buf(), settings)
+            .await
+            .unwrap(),
+    );
+    let server = Server::new("127.0.0.1:0".parse().unwrap(), fs)
+        .await
+        .unwrap();
+    let addr = server.local_addr().unwrap();
+    tokio::spawn(async move { server.run().await });
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.set_recv_buffer_size(32 * 1024).unwrap();
+    let mut stream = socket.connect(addr).await.unwrap();
+    for i in 0..RECORDS {
+        stream
+            .write_all(&message(&write_request(i, "big", vec![7; RECORD])))
+            .await
+            .unwrap();
+        assert_eq!(read_response(&mut stream).await.write.unwrap().result, 0);
+    }
+    let read = ClientRequest {
+        read: Some(ReadRequest {
+            read_id: 1,
+            queue_id: "big".into(),
+            step: 1,
+            offset: None,
+            limit: RECORDS,
+            accept_encodings: Vec::new(),
+        }),
+        ..Default::default()
+    };
+    stream.write_all(&message(&read)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    stream
+        .write_all(&[2, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // A drain would deliver every queued reply; an abort leaves only what the
+    // kernels already held.
+    let mut got = 0;
+    let mut buf = vec![0; 64 * 1024];
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Ok(n @ 1..) = stream.read(&mut buf).await {
+            got += n;
+        }
+    })
+    .await
+    .expect("the connection stayed open");
+    assert!(
+        got < 1024 * 1024,
+        "{got} bytes reached a client that stopped reading"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replies_go_out_while_the_client_keeps_sending() {
+    let dir = TempDir::new().unwrap();
+    let fs = Arc::new(
+        NormFS::new(dir.path().to_path_buf(), NormFsSettings::default())
+            .await
+            .unwrap(),
+    );
+    let (mut rd, mut wr) = connect(fs).await.into_split();
+
+    const ENTRIES: u64 = 1000;
+    let request = ClientRequest {
+        write: Some(WriteRequest {
+            write_id: 1,
+            queue_id: "big".into(),
+            packets: (0..ENTRIES).map(|_| Bytes::from(vec![7u8; 4000])).collect(),
+        }),
+        ..Default::default()
+    };
+    wr.write_all(&message(&request)).await.unwrap();
+    assert_eq!(read_response(&mut rd).await.write.unwrap().result, 0);
+    let read = ClientRequest {
+        read: Some(ReadRequest {
+            read_id: 1,
+            queue_id: "big".into(),
+            step: 1,
+            offset: None,
+            limit: ENTRIES,
+            accept_encodings: Vec::new(),
+        }),
+        ..Default::default()
+    };
+    wr.write_all(&message(&read)).await.unwrap();
+
+    // Empty frames, the keepalives, for as long as the socket takes them.
+    let keepalives = tokio::spawn(async move {
+        let zeros = vec![0u8; 1 << 20];
+        for _ in 0..200 {
+            wr.write_all(&zeros).await.unwrap();
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let replies = async {
+        let mut entries = 0;
+        while entries < ENTRIES {
+            if read_response(&mut rd).await.read.unwrap().result
+                == read_response::Result::RrEntry as i32
+            {
+                entries += 1;
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(60), replies)
+        .await
+        .expect("the replies never came");
+    if keepalives.is_finished() {
+        keepalives.await.expect("the keepalives failed");
+        panic!("the read waited for the keepalives to end");
+    }
+    keepalives.abort();
 }
