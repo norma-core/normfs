@@ -107,9 +107,9 @@ impl Listener {
         if fd < 0 {
             return Err(os_error(err));
         }
-        Ok(Listener {
-            fd: AsyncFd::new(Socket(fd))?,
-        })
+        // SAFETY: the Socket owns fd, keeps it open until it drops, and always returns it.
+        let fd = unsafe { AsyncFd::register(Socket(fd)) }?;
+        Ok(Listener { fd })
     }
 
     pub(crate) fn local_addr(&self) -> io::Result<SocketAddr> {
@@ -143,10 +143,11 @@ impl Listener {
             if rc == 2 {
                 continue;
             }
-            let socket = Socket(out.fd);
+            // SAFETY: as in bind; the Socket owns out.fd from here on.
+            let fd = unsafe { AsyncFd::register(Socket(out.fd)) }?;
             let opt = |e: c_int| (e != 0).then(|| os_error(e));
             return Ok(Accepted {
-                conn: Conn(AsyncFd::new(socket)?),
+                conn: Conn(fd),
                 peer: from_c_addr(&out.peer),
                 nodelay_error: opt(out.nodelay_error),
                 unsent_error: opt(out.unsent_error),
