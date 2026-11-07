@@ -691,6 +691,8 @@ normfs_conn_sent_head(struct normfs_conn_tx *t, struct normfs_conn_events *out)
     ensures \forall integer g; net_pos(g) == \old(net_pos(g));
     ensures \forall integer g; g != t->fd ==> net_opos(g) == \old(net_opos(g));
     ensures \forall integer g, i; g != t->fd ==> net_out(g, i) == \old(net_out(g, i));
+    ensures \forall integer i; i < \old(net_opos(t->fd)) ==>
+              net_out(t->fd, i) == \old(net_out(t->fd, i));
     ensures \forall integer k; 0 <= k < \old(out->n) ==>
               out->ev[k].kind == \old(out->ev[k].kind) &&
               out->ev[k].value == \old(out->ev[k].value) &&
@@ -785,6 +787,9 @@ normfs_conn_write(struct normfs_conn_tx *t, struct normfs_conn_events *out)
 	    loop invariant \forall integer g; g != t->fd ==> net_opos(g) == \at(net_opos(g), Pre);
 	    loop invariant \forall integer g, i; g != t->fd ==>
 	                     net_out(g, i) == \at(net_out(g, i), Pre);
+	    loop invariant \forall integer i; i < \at(net_opos(t->fd), Pre) ==>
+	                     net_out(t->fd, i) == \at(net_out(t->fd, i), Pre);
+	    loop invariant net_opos(t->fd) >= \at(net_opos(t->fd), Pre);
 	    loop invariant \forall integer k; 0 <= k < \at(out->n, Pre) ==>
 	                     out->ev[k].kind == \at(out->ev[k].kind, Pre) &&
 	                     out->ev[k].value == \at(out->ev[k].value, Pre) &&
