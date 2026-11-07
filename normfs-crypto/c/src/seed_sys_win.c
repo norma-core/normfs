@@ -6,6 +6,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <bcrypt.h>
+#include <sddl.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <io.h>
@@ -120,11 +121,66 @@ normfs_seed_sys_open(const char *path, size_t path_len, int flags, int *os_error
 	return fd;
 }
 
+static int
+normfs_seed_sys_last_error(void)
+{
+	DWORD e = GetLastError();
+
+	return (e > 0u && e <= 0x7FFFFFFFu) ? (int)e : ERROR_GEN_FAILURE;
+}
+
+/*
+ * The seed gets a protected DACL granting only its owner, the 0600 of the
+ * Unix side; the CRT open would leave it whatever the directory hands down.
+ * A link at the path is not followed, as O_EXCL does not on Unix.
+ */
 int
 normfs_seed_sys_create_excl(const char *path, size_t path_len, int *os_error)
 {
-	return normfs_seed_sys_open(path, path_len,
-	    _O_WRONLY | _O_CREAT | _O_EXCL | _O_BINARY | _O_NOINHERIT, os_error);
+	SECURITY_ATTRIBUTES sa;
+	PSECURITY_DESCRIPTOR sd = NULL;
+	wchar_t *wide;
+	HANDLE h;
+	int fd;
+
+	*os_error = 0;
+	wide = normfs_seed_sys_wpath(path, path_len);
+	if (wide == NULL) {
+		*os_error = ERROR_INVALID_NAME;
+		return -1;
+	}
+	if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;FA;;;OW)",
+	    SDDL_REVISION_1, &sd, NULL)) {
+		*os_error = normfs_seed_sys_last_error();
+		free(wide);
+		return -1;
+	}
+
+	sa.nLength = sizeof(sa);
+	sa.lpSecurityDescriptor = sd;
+	sa.bInheritHandle = FALSE;
+	h = CreateFileW(wide, GENERIC_WRITE | DELETE,
+	    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &sa, CREATE_NEW,
+	    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+	if (h == INVALID_HANDLE_VALUE)
+		*os_error = normfs_seed_sys_last_error();
+	LocalFree(sd);
+	free(wide);
+	if (h == INVALID_HANDLE_VALUE)
+		return -1;
+
+	fd = _open_osfhandle((intptr_t)h, _O_WRONLY | _O_BINARY);
+	if (fd < 0) {
+		FILE_DISPOSITION_INFO gone;
+
+		/* An empty seed left behind would refuse every later start. */
+		gone.DeleteFile = TRUE;
+		(void)SetFileInformationByHandle(h, FileDispositionInfo, &gone, sizeof(gone));
+		*os_error = ERROR_TOO_MANY_OPEN_FILES;
+		CloseHandle(h);
+		return -1;
+	}
+	return fd;
 }
 
 int

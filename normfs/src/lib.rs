@@ -28,9 +28,10 @@ use normfs_types::events::{EventSink, SystemEvent};
 use normfs_types::CompressionType;
 use normfs_wal::{WalFile, WalSettings, WalStore};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::RwLock;
 use std::{path::Path, sync::Arc};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 
 pub use lookup::LookupError;
@@ -103,6 +104,7 @@ pub struct NormFS {
     system_queue: QueueId,
     events: EventSink,
     system_writer: system::Writer,
+    writes: WriteGate,
 }
 
 #[derive(Debug)]
@@ -131,6 +133,8 @@ pub enum Error {
     /// The queue is NormFS's own ([`SYSTEM_QUEUE`]): it can be read, but
     /// only NormFS writes or closes it.
     ReservedQueue,
+    /// [`NormFS::close`] has begun: no more writes are taken.
+    Closing,
     /// `max_memory_usage` cannot hold the two pages a single queue needs to
     /// work. Refused at construction rather than rounded up: rounding up would
     /// mean the process quietly using more memory than it was configured for.
@@ -177,6 +181,7 @@ impl std::fmt::Display for Error {
             Error::NotInFile => write!(f, "Record would not join the file the caller saw"),
             Error::QueueClosed => write!(f, "Queue is closed and accepts no more writes"),
             Error::ReservedQueue => write!(f, "Queue is written by NormFS itself"),
+            Error::Closing => write!(f, "NormFS is closing and accepts no more writes"),
             Error::MemoryBelowFloor {
                 max_memory_usage,
                 page_size,
@@ -216,9 +221,55 @@ impl std::error::Error for Error {
             Error::NotInFile => None,
             Error::QueueClosed => None,
             Error::ReservedQueue => None,
+            Error::Closing => None,
             Error::MemoryBelowFloor { .. } => None,
             Error::BucketUnreachable { .. } => None,
             Error::PageBelowMinimum { .. } => None,
+        }
+    }
+}
+
+/// Writes in progress, and whether [`NormFS::close`] has begun.
+#[derive(Default)]
+struct WriteGate {
+    closing: AtomicBool,
+    writes: AtomicUsize,
+    drained: Notify,
+}
+
+struct WriteTicket<'a>(&'a WriteGate);
+
+impl WriteGate {
+    fn enter(&self) -> Result<WriteTicket<'_>, Error> {
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        let ticket = WriteTicket(self);
+        if self.closing.load(Ordering::SeqCst) {
+            return Err(Error::Closing);
+        }
+        Ok(ticket)
+    }
+
+    /// Refuses new writes and waits for those already in.
+    async fn close(&self) {
+        self.closing.store(true, Ordering::SeqCst);
+        loop {
+            let drained = self.drained.notified();
+            tokio::pin!(drained);
+            drained.as_mut().enable();
+            if self.writes.load(Ordering::SeqCst) == 0 {
+                return;
+            }
+            drained.await;
+        }
+    }
+}
+
+impl Drop for WriteTicket<'_> {
+    fn drop(&mut self) {
+        if self.0.writes.fetch_sub(1, Ordering::SeqCst) == 1
+            && self.0.closing.load(Ordering::SeqCst)
+        {
+            self.0.drained.notify_waiters();
         }
     }
 }
@@ -744,6 +795,7 @@ impl NormFS {
             system_queue: system.queue().clone(),
             events,
             system_writer: system::Writer::idle(),
+            writes: WriteGate::default(),
         };
         if normfs.settings.system_queue {
             let queue = &normfs.system_queue;
@@ -832,6 +884,7 @@ impl NormFS {
     }
 
     pub async fn ensure_queue_exists_for_write(&self, queue: &QueueId) -> Result<(), Error> {
+        let _write = self.writes.enter()?;
         let queue_lock = self.queue_init_lock(queue);
         let _guard = queue_lock.lock().await;
 
@@ -1799,6 +1852,7 @@ impl NormFS {
     /// run ahead of the disk rather than dropping what it already took.
     pub async fn enqueue(&self, queue: &QueueId, data: Bytes) -> Result<UintN, Error> {
         self.refuse_reserved(queue)?;
+        let _write = self.writes.enter()?;
         if self.mem.is_closed(queue) {
             return Err(Error::QueueClosed);
         }
@@ -1856,6 +1910,7 @@ impl NormFS {
         within: Option<normfs_wal::FileMark>,
     ) -> Result<UintN, Error> {
         self.refuse_reserved(queue)?;
+        let _write = self.writes.enter()?;
         if self.mem.is_closed(queue) {
             return Err(Error::QueueClosed);
         }
@@ -1901,6 +1956,7 @@ impl NormFS {
         data: Vec<Bytes>,
     ) -> Result<Vec<UintN>, Error> {
         self.refuse_reserved(queue)?;
+        let _write = self.writes.enter()?;
         if data.is_empty() {
             return Ok(Vec::new());
         }
@@ -2011,6 +2067,7 @@ impl NormFS {
     /// the data reached it. Memory is released last.
     pub async fn close_queue(&self, queue: &QueueId) -> Result<(), Error> {
         self.refuse_reserved(queue)?;
+        let _write = self.writes.enter()?;
         let queue_lock = self.queue_init_lock(queue);
         let _guard = queue_lock.lock().await;
 
@@ -2082,6 +2139,9 @@ impl NormFS {
 
         // Before the store closes, so what it holds lands with the rest.
         self.system_writer.stop().await;
+        // The store closes the queues it has now; a write after this point
+        // could start one it never flushes.
+        self.writes.close().await;
 
         // Store first: page writers land their tails, and the migration
         // workers must outlive the WAL writers' last rotation.

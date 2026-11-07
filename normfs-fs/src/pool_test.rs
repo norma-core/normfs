@@ -485,3 +485,54 @@ async fn cached_inode_append_submits_exactly_one_job() {
     assert_eq!(submissions.load(Ordering::SeqCst), 1);
     assert_eq!(std::fs::read(&path).unwrap(), b"headerbatch");
 }
+
+#[cfg(windows)]
+#[tokio::test]
+async fn publish_refuses_a_temp_symlink_and_leaves_its_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let tmp = dir.path().join("link");
+    let target = dir.path().join("target");
+    let dst = dir.path().join("destination");
+    std::fs::write(&target, b"keep").unwrap();
+    // Creating a symlink needs the privilege or Developer Mode; CI runners have it.
+    if let Err(e) = std::os::windows::fs::symlink_file(&target, &tmp) {
+        assert_eq!(e.raw_os_error(), Some(1314), "{e}");
+        return;
+    }
+    let error = fs()
+        .publish(
+            PublishSpec {
+                tmp: tmp.clone(),
+                dst: dst.clone(),
+                runs: runs(&[b"data"]),
+                tmp_mode: TmpMode::Trunc,
+                sync: true,
+            },
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(std::io::Error::from(error).raw_os_error(), Some(1921));
+    assert_eq!(std::fs::read(&target).unwrap(), b"keep");
+    assert!(!dst.exists());
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn remove_frees_the_name_while_a_reader_holds_the_file() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("held");
+    std::fs::write(&path, b"old").unwrap();
+    let reader = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(7)
+        .open(&path)
+        .unwrap();
+    fs().remove_durable(&path, true).await.unwrap();
+    assert!(!path.exists());
+    std::fs::write(&path, b"new").unwrap();
+    drop(reader);
+    assert_eq!(std::fs::read(&path).unwrap(), b"new");
+}

@@ -25,8 +25,10 @@ fn main() -> Result<()> {
 
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let include_dir = manifest_dir.join("c/include");
+    let gremlin_dir = manifest_dir.join("c/gremlin");
     let uintn_include_dir = uintn_include_dir(&manifest_dir);
     let sources = [
+        manifest_dir.join("c/src/conn.c"),
         manifest_dir.join("c/src/disk_monitor.c"),
         manifest_dir.join(
             if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
@@ -36,6 +38,11 @@ fn main() -> Result<()> {
             },
         ),
         manifest_dir.join("c/src/frame.c"),
+        manifest_dir.join("c/src/net.c"),
+        manifest_dir.join("c/src/net_sys.c"),
+        manifest_dir.join("c/src/request.c"),
+        manifest_dir.join("c/src/response.c"),
+        manifest_dir.join("c/src/walk.c"),
     ];
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         println!("cargo:rustc-link-lib=ntdll");
@@ -43,6 +50,7 @@ fn main() -> Result<()> {
 
     println!("cargo:rerun-if-changed={}", include_dir.display());
     println!("cargo:rerun-if-changed={}", uintn_include_dir.display());
+    println!("cargo:rerun-if-changed={}", gremlin_dir.display());
     for source in &sources {
         println!("cargo:rerun-if-changed={}", source.display());
     }
@@ -51,6 +59,7 @@ fn main() -> Result<()> {
         .files(&sources)
         .include(&include_dir)
         .include(&uintn_include_dir)
+        .include(&gremlin_dir)
         .opt_level(3)
         .compile("normfs_c");
 

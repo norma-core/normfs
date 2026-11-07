@@ -180,15 +180,16 @@ normfs_fs_sys_is_link(const wchar_t *path, DWORD attrs)
 }
 
 /* FILE_SHARE_DELETE lets a later publish replace, or a cleanup remove, a
- * file a reader still has open, as on Unix. A link already at the path is
- * refused, checked just before the open rather than by it as O_NOFOLLOW is. */
+ * file a reader still has open, as on Unix. The open does not follow a link,
+ * as O_NOFOLLOW does not, and truncation waits until the handle is known not
+ * to be one. */
 normfs_fs_fd
 normfs_fs_sys_open_create(const char *path, size_t path_len, int mode,
 	uint64_t *ino, int *os_error)
 {
 	BY_HANDLE_FILE_INFORMATION info;
+	FILE_END_OF_FILE_INFO eof;
 	wchar_t *wide;
-	DWORD attrs;
 	HANDLE h;
 
 	*os_error = 0;
@@ -197,26 +198,34 @@ normfs_fs_sys_open_create(const char *path, size_t path_len, int mode,
 	if (wide == NULL)
 		return -1;
 
-	attrs = GetFileAttributesW(wide);
-	if (attrs != INVALID_FILE_ATTRIBUTES && normfs_fs_sys_is_link(wide, attrs)) {
-		free(wide);
-		*os_error = ERROR_CANT_RESOLVE_FILENAME;
-		return -1;
-	}
 	h = CreateFileW(wide, GENERIC_WRITE,
 	    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
-	    mode == NORMFS_FS_TMP_TRUNC ? CREATE_ALWAYS : CREATE_NEW,
-	    FILE_ATTRIBUTE_NORMAL, NULL);
+	    mode == NORMFS_FS_TMP_TRUNC ? OPEN_ALWAYS : CREATE_NEW,
+	    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+	free(wide);
 	if (h == INVALID_HANDLE_VALUE) {
 		(void)normfs_fs_sys_fail(os_error);
-		free(wide);
 		return -1;
 	}
-	free(wide);
 	if (!GetFileInformationByHandle(h, &info)) {
 		(void)normfs_fs_sys_fail(os_error);
 		(void)CloseHandle(h);
 		return -1;
+	}
+	/* Opened unfollowed, any reparse point here is the point itself, not a
+	 * file to write; a temporary file normfs made is never one. */
+	if (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+		*os_error = ERROR_CANT_RESOLVE_FILENAME;
+		(void)CloseHandle(h);
+		return -1;
+	}
+	if (mode == NORMFS_FS_TMP_TRUNC) {
+		eof.EndOfFile.QuadPart = 0;
+		if (!SetFileInformationByHandle(h, FileEndOfFileInfo, &eof, sizeof(eof))) {
+			(void)normfs_fs_sys_fail(os_error);
+			(void)CloseHandle(h);
+			return -1;
+		}
 	}
 	*ino = ((uint64_t)info.nFileIndexHigh << 32) | info.nFileIndexLow;
 	if (*ino == 0u) {
@@ -454,26 +463,65 @@ normfs_fs_sys_ftruncate(normfs_fs_fd fd, uint64_t len, int *os_error)
 	return 0;
 }
 
+#if !defined(FILE_DISPOSITION_FLAG_DELETE)
+#define FILE_DISPOSITION_FLAG_DELETE 0x00000001
+#endif
+#if !defined(FILE_DISPOSITION_FLAG_POSIX_SEMANTICS)
+#define FILE_DISPOSITION_FLAG_POSIX_SEMANTICS 0x00000002
+#endif
+/* FileDispositionInfoEx, missing from older headers. */
+#define NORMFS_FS_DISPOSITION_INFO_EX ((FILE_INFO_BY_HANDLE_CLASS)21)
+
+/*
+ * POSIX delete: the name goes at once even while a reader holds the file,
+ * where DeleteFileW leaves it pending and a new file of that name fails.
+ * FAT and exFAT lack the flag and fall back to the plain delete.
+ */
 int
 normfs_fs_sys_unlink(const char *path, size_t path_len, int *os_error)
 {
+	FILE_DISPOSITION_INFO plain;
 	wchar_t *wide;
+	DWORD flags;
+	HANDLE h;
+	int ok;
 
 	*os_error = 0;
 	wide = normfs_fs_sys_wpath(path, path_len, os_error);
 	if (wide == NULL)
 		return -1;
-	if (!DeleteFileW(wide)) {
+	h = CreateFileW(wide, DELETE,
+	    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+	    FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+	free(wide);
+	if (h == INVALID_HANDLE_VALUE) {
 		DWORD e = GetLastError();
 
-		free(wide);
 		if (normfs_fs_sys_absent(e))
 			return 1;
 		*os_error = (e > 0u && e <= 0x7FFFFFFFu) ? (int)e : ERROR_GEN_FAILURE;
 		return -1;
 	}
-	free(wide);
-	return 0;
+
+	flags = FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS;
+	ok = SetFileInformationByHandle(h, NORMFS_FS_DISPOSITION_INFO_EX, &flags,
+	    sizeof(flags));
+	if (!ok) {
+		DWORD e = GetLastError();
+
+		if (e == ERROR_INVALID_PARAMETER || e == ERROR_NOT_SUPPORTED ||
+		    e == ERROR_INVALID_FUNCTION) {
+			plain.DeleteFile = TRUE;
+			ok = SetFileInformationByHandle(h, FileDispositionInfo, &plain,
+			    sizeof(plain));
+		} else {
+			SetLastError(e);
+		}
+	}
+	if (!ok)
+		(void)normfs_fs_sys_fail(os_error);
+	(void)CloseHandle(h);
+	return ok ? 0 : -1;
 }
 
 int
