@@ -179,6 +179,7 @@ if(FRAMAC)
         normfs_conn_close_write
         normfs_conn_pop
         normfs_conn_pick
+        normfs_conn_sent_head
         normfs_conn_write
         normfs_conn_tx_interest
         normfs_conn_tx_drained
