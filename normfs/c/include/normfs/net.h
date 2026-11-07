@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "normfs/frame.h"
+#include "normfs/net_sys.h"
 
 enum normfs_net_status {
 	NORMFS_NET_OK = 0,
@@ -34,6 +35,29 @@ struct normfs_net_reader {
 	uint64_t payload_have;
 	int in_payload;
 };
+
+/*@ predicate normfs_net_reader_ok(struct normfs_net_reader *r) =
+      r->header_have <= NORMFS_FRAME_HEADER_SIZE &&
+      r->payload_len <= NORMFS_FRAME_MAX_PAYLOAD &&
+      r->payload_have <= r->payload_len &&
+      (r->in_payload == 0 || r->in_payload == 1) &&
+      (r->in_payload == 1 ==> r->header_have == 0) &&
+      (r->in_payload == 0 ==> r->payload_have == 0);
+
+    predicate normfs_net_header_read{L}(struct normfs_net_reader *r, integer fd) =
+      \forall integer i; 0 <= i < r->header_have ==>
+        r->header[i] == net_in(fd, net_pos(fd) - r->header_have + i);
+
+    predicate normfs_net_payload_read{L}(uint8_t *buf, integer have, integer fd) =
+      \forall integer i; 0 <= i < have ==>
+        buf[i] == net_in(fd, net_pos(fd) - have + i);
+
+    predicate normfs_net_reported(struct normfs_net_result res, integer last) =
+      (res.status == NORMFS_NET_WOULD_BLOCK ==> last == NORMFS_NET_SYS_WOULD_BLOCK) &&
+      (res.status == NORMFS_NET_EOF ==> last == 0) &&
+      (res.status == NORMFS_NET_ERR_IO ==> last == -1 && res.os_error > 0) &&
+      (res.status != NORMFS_NET_ERR_IO ==> res.os_error == 0);
+*/
 
 void normfs_net_reader_init(struct normfs_net_reader *r);
 
