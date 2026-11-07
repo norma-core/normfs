@@ -15,6 +15,7 @@ add_library(normfs_wal_c STATIC
     src/crc32c.c
     src/wal_entry.c
     src/wal_page.c
+    src/wal_scan.c
     src/wal_pool.c
     src/wal_ring.c
 )
@@ -84,6 +85,9 @@ if(FRAMAC)
         normfs_wal_entry_v1_decode
         normfs_wal_entry_v1_id
         normfs_wal_entry_v1_iter_next)
+
+    set(NORMFS_WAL_SCAN_WP_FCTS
+        normfs_wal_scan_count_v1)
 
     set(NORMFS_WAL_PAGE_WP_FCTS
         normfs_uintn_le32_read
@@ -176,6 +180,8 @@ if(FRAMAC)
         "${NORMFS_WAL_HEADER_WP_FCTS}" "WP: normfs V1 WAL header")
     normfs_add_wp_target(verify-wal-entry src/wal_entry.c
         "${NORMFS_WAL_ENTRY_WP_FCTS}" "WP: normfs V1 WAL entry")
+    normfs_add_wp_target(verify-wal-scan "src/wal_scan.c;src/wal_entry.c"
+        "${NORMFS_WAL_SCAN_WP_FCTS}" "WP: normfs V1 WAL scan")
     normfs_add_wp_target(verify-wal-page "src/wal_page.c;src/wal_entry.c"
         "${NORMFS_WAL_PAGE_WP_FCTS}" "WP: normfs V1 WAL page")
     normfs_add_wp_target(verify-wal-pool "src/wal_pool.c;src/wal_page.c;src/wal_entry.c"
@@ -184,6 +190,6 @@ if(FRAMAC)
         "${NORMFS_WAL_RING_WP_FCTS}" "WP: normfs V1 WAL ring")
 
     add_custom_target(verify)
-    add_dependencies(verify verify-wal-header verify-wal-entry
+    add_dependencies(verify verify-wal-header verify-wal-entry verify-wal-scan
         verify-wal-page verify-wal-pool verify-wal-ring)
 endif()
