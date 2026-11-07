@@ -85,8 +85,7 @@ fn get_monotonic_stamp_ns() -> u64 {
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd")))]
 fn get_monotonic_stamp_ns() -> u64 {
-    // Fallback for unsupported platforms
-    get_local_stamp_ns()
+    normfs_time::monotonic_stamp_ns()
 }
 
 type Encoded = (Bytes, Encoding);

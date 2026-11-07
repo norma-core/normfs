@@ -24,7 +24,7 @@ homepage = "https://normacore.dev"
 
 [workspace.dependencies]
 # Shared dependencies across workspace
-tokio = { version = "1.49", features = ["full"] }
+tokio = { version = "1.54.1", features = ["full"] }
 bytes = "1.11"
 prost = "0.12"
 log = "0.4.28"

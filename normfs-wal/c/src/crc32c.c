@@ -10,9 +10,12 @@
  */
 #if defined(__FRAMAC__)
 #define NORMFS_CRC32C_HW 1
-#elif defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#elif (defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__) || \
+    defined(_MSC_VER)
 
-#if defined(__aarch64__) && defined(__ARM_FEATURE_CRC32)
+#if defined(_WIN32) && (defined(_M_ARM64) || defined(__aarch64__))
+#error "Windows on arm64 is not a supported target"
+#elif defined(__aarch64__) && defined(__ARM_FEATURE_CRC32)
 #define NORMFS_CRC32C_ARM 1
 #define NORMFS_CRC32C_HW 1
 #define NORMFS_CRC32C_HW_TARGET
@@ -41,6 +44,15 @@
 #if !defined(__SSE4_2__)
 #error "x86_64 builds of crc32c.c require -msse4.2"
 #endif
+#define NORMFS_CRC32C_X86 1
+#define NORMFS_CRC32C_HW 1
+#define NORMFS_CRC32C_HW_TARGET
+#define NORMFS_CRC32C_STEP8(c, w) ((uint32_t)_mm_crc32_u64((uint64_t)(c), (w)))
+#define NORMFS_CRC32C_STEP1(c, b) ((uint32_t)_mm_crc32_u8((c), (b)))
+#include <nmmintrin.h>
+#include <string.h>
+/* cl needs no -msse4.2 for the CRC32 intrinsics; every Windows target is little-endian. */
+#elif defined(_MSC_VER) && defined(_M_X64)
 #define NORMFS_CRC32C_X86 1
 #define NORMFS_CRC32C_HW 1
 #define NORMFS_CRC32C_HW_TARGET
