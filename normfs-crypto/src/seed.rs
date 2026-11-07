@@ -1,7 +1,6 @@
 use std::ffi::CString;
 use std::io;
 use std::os::raw::{c_char, c_int};
-use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 /// Must agree with NORMFS_SEED_SIZE in `c/include/normfs/seed.h`; the C layer
@@ -115,7 +114,17 @@ fn map_status(r: CSeedResult) -> Result<(), SeedError> {
 }
 
 fn c_dir(data_dir: &Path) -> Result<CString, SeedError> {
-    CString::new(data_dir.as_os_str().as_bytes()).map_err(|_| {
+    #[cfg(unix)]
+    let bytes = std::os::unix::ffi::OsStrExt::as_bytes(data_dir.as_os_str());
+    // The Windows C layer takes UTF-8 and widens it for the wide-char calls.
+    #[cfg(windows)]
+    let bytes = data_dir.to_str().map(str::as_bytes).ok_or_else(|| {
+        SeedError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "data directory path is not valid UTF-8",
+        ))
+    })?;
+    CString::new(bytes).map_err(|_| {
         SeedError::Io(io::Error::new(
             io::ErrorKind::InvalidInput,
             "data directory path contains an interior NUL",
@@ -279,6 +288,7 @@ mod tests {
         assert_eq!(bytes1, bytes2);
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_seed_file_permissions() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -292,6 +302,43 @@ mod tests {
         let mode = metadata.permissions().mode();
 
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_seed_file_acl() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let seed = Seed::generate().unwrap();
+        seed.save(temp_dir.path()).unwrap();
+
+        // /save writes SDDL, which names SIDs rather than localized account names.
+        let saved = temp_dir.path().join("acl");
+        let out = std::process::Command::new("icacls")
+            .arg(temp_dir.path().join(SEED_FILE_NAME))
+            .arg("/save")
+            .arg(&saved)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        let raw = fs::read(&saved).unwrap();
+        let units: Vec<u16> = raw
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        let text = String::from_utf16_lossy(&units);
+        let dacl = text
+            .split("D:")
+            .nth(1)
+            .unwrap_or_else(|| panic!("{text}"))
+            .trim();
+
+        assert!(dacl.split('(').next().unwrap().contains('P'), "{text}");
+        assert_eq!(dacl.matches('(').count(), 1, "{text}");
+        assert!(dacl.contains("(A;;FA;;;OW)"), "{text}");
     }
 
     #[test]
