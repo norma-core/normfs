@@ -9,6 +9,10 @@
 /* Frames of one class a connection holds before Rust must wait. */
 #define NORMFS_CONN_QUEUE 16
 
+/* Larger than any frame Rust queues (a 5 GiB payload and its header), so the
+ * bytes of a call's frames add up within 64 bits. */
+#define NORMFS_CONN_FRAME_MAX ((uint64_t)1 << 40)
+
 /* Requests handed to Rust and not yet taken before reading pauses. */
 #define NORMFS_CONN_PENDING 10
 
@@ -113,7 +117,8 @@ struct normfs_conn_tx {
 /*@ predicate normfs_conn_queue_ok{L}(struct normfs_conn_queue *q, struct normfs_conn_tx *t) =
       q->count <= NORMFS_CONN_QUEUE &&
       \forall integer j; 0 <= j < q->count ==>
-        q->f[j].len >= 1 && \valid_read(q->f[j].buf + (0 .. q->f[j].len - 1)) &&
+        1 <= q->f[j].len <= NORMFS_CONN_FRAME_MAX &&
+        \valid_read(q->f[j].buf + (0 .. q->f[j].len - 1)) &&
         \separated(t, q->f[j].buf + (0 .. q->f[j].len - 1));
 
     predicate normfs_conn_tx_flags_ok{L}(struct normfs_conn_tx *t) =
@@ -156,6 +161,11 @@ struct normfs_conn_tx {
       \separated(out, r) && \separated(out->ev + (0 .. out->cap - 1), r, out) &&
       (r->payload != \null ==>
          \separated(out->ev + (0 .. out->cap - 1), r->payload + (0 .. r->cap - 1)));
+
+    predicate normfs_conn_tx_stream_ok{L}(struct normfs_conn_tx *t) =
+      t->wclass != -1 ==>
+        \forall integer b; 0 <= b < t->woff ==>
+          net_out(t->fd, net_opos(t->fd) - t->woff + b) == t->q[t->wclass].f[0].buf[b];
 
     predicate normfs_conn_tx_events_ok{L}(struct normfs_conn_events *out,
                                           struct normfs_conn_tx *t) =

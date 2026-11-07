@@ -515,8 +515,9 @@ impl Driver {
                 self.frames.insert(cookie, (frame, permit));
                 let tx = self.sides.tx();
                 let mut out = self.sides.out();
-                // SAFETY: the frame stays in self.frames, unmoved, until its SENT event;
-                // the class semaphore keeps the queue below its sixteen.
+                // SAFETY: the frame stays in self.frames, unmoved, until its SENT event, and
+                // encode_response keeps it far below NORMFS_CONN_FRAME_MAX; the class
+                // semaphore keeps the queue below its sixteen.
                 if unsafe { normfs_conn_submit(tx, &mut out, class, ptr, len, cookie) } != 0 {
                     error!("Response queue full (client_addr: {})", self.addr);
                     self.frames.remove(&cookie);

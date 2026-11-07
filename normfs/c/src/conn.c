@@ -19,6 +19,13 @@ typedef char normfs_conn_event_size_ok[
       out->cap - out->n >= k;
 */
 
+/* The i-th frame normfs_conn_write sent whole: its class and index as the call found
+ * the queues, and the byte past it, counted from where the call's first frame began. */
+//@ ghost int normfs_conn_g_sent;
+//@ ghost int normfs_conn_g_cls[2 * NORMFS_CONN_QUEUE + 1];
+//@ ghost uint32_t normfs_conn_g_idx[2 * NORMFS_CONN_QUEUE + 1];
+//@ ghost uint64_t normfs_conn_g_end[2 * NORMFS_CONN_QUEUE + 1];
+
 /*@ requires \valid(out) && out->n < out->cap && \valid(out->ev + out->n);
     requires \separated(out, out->ev + out->n);
     assigns out->ev[out->n], out->n;
@@ -347,6 +354,7 @@ normfs_conn_deadline(const struct normfs_conn_rx *r)
     ensures NORMFS_CONN_TX_OK(t);
     ensures t->fd == fd && t->token == token && t->write_open == 1;
     ensures t->q[0].count == 0 && t->q[1].count == 0 && t->wclass == -1;
+    ensures normfs_conn_tx_stream_ok(t);
 */
 void
 normfs_conn_tx_init(struct normfs_conn_tx *t, int fd, uint64_t token)
@@ -364,13 +372,13 @@ normfs_conn_tx_init(struct normfs_conn_tx *t, int fd, uint64_t token)
  * Queues a frame of class cls. With the write side closed the frame comes
  * straight back as SENT with status 0. -1 when the class's queue is full.
  */
-/*@ requires \valid(t) && NORMFS_CONN_TX_OK(t);
+/*@ requires \valid(t) && NORMFS_CONN_TX_OK(t) && normfs_conn_tx_stream_ok(t);
     requires \valid(out) && normfs_conn_tx_events_ok(out, t) && normfs_conn_room(out, 1);
     requires cls == NORMFS_CONN_REPLY || cls == NORMFS_CONN_READ;
-    requires len >= 1 && \valid_read(buf + (0 .. len - 1));
+    requires 1 <= len <= NORMFS_CONN_FRAME_MAX && \valid_read(buf + (0 .. len - 1));
     requires \separated(t, buf + (0 .. len - 1));
     assigns t->q[cls], out->n, out->ev[out->n];
-    ensures NORMFS_CONN_TX_OK(t);
+    ensures NORMFS_CONN_TX_OK(t) && normfs_conn_tx_stream_ok(t);
     ensures \result == 0 || \result == -1;
     ensures \result == -1 <==> t->write_open == 1 &&
                                \old(t->q[cls].count) == NORMFS_CONN_QUEUE;
@@ -418,7 +426,7 @@ normfs_conn_submit(struct normfs_conn_tx *t, struct normfs_conn_events *out, int
     ensures t->write_open == 0;
     ensures out->n == \old(out->n) + \old(t->q[0].count) + \old(t->q[1].count) + 1;
     ensures \forall integer j; \old(out->n) <= j < out->n - 1 ==>
-              out->ev[j].kind == NORMFS_CONN_EV_SENT;
+              out->ev[j].kind == NORMFS_CONN_EV_SENT && out->ev[j].status == 0;
     ensures \forall integer j; 0 <= j < \old(t->q[0].count) ==>
               out->ev[\old(out->n) + j].value == \old(t->q[0].f[j].cookie);
     ensures \forall integer j; 0 <= j < \old(t->q[1].count) ==>
@@ -429,6 +437,7 @@ normfs_conn_submit(struct normfs_conn_tx *t, struct normfs_conn_events *out, int
     ensures \forall integer k; 0 <= k < \old(out->n) ==>
               out->ev[k].kind == \old(out->ev[k].kind) &&
               out->ev[k].value == \old(out->ev[k].value) &&
+              out->ev[k].status == \old(out->ev[k].status) &&
               out->ev[k].conn == \old(out->ev[k].conn);
 */
 static void
@@ -452,16 +461,19 @@ normfs_conn_close_write(struct normfs_conn_tx *t, struct normfs_conn_events *out
 	    loop invariant \forall integer m; 0 <= m < \at(out->n, Pre) ==>
 	                     out->ev[m].kind == \at(out->ev[m].kind, Pre) &&
 	                     out->ev[m].value == \at(out->ev[m].value, Pre) &&
+	                     out->ev[m].status == \at(out->ev[m].status, Pre) &&
 	                     out->ev[m].conn == \at(out->ev[m].conn, Pre);
 	    loop invariant \forall integer m; \at(out->n, Pre) <= m < out->n ==>
 	                     out->ev[m].conn == t->token;
 	    loop invariant k > 0 ==> \forall integer j; 0 <= j < \at(t->q[0].count, Pre) ==>
-	                     out->ev[\at(out->n, Pre) + j].kind == NORMFS_CONN_EV_SENT;
+	                     out->ev[\at(out->n, Pre) + j].kind == NORMFS_CONN_EV_SENT &&
+	                     out->ev[\at(out->n, Pre) + j].status == 0;
 	    loop invariant k > 0 ==> \forall integer j; 0 <= j < \at(t->q[0].count, Pre) ==>
 	                     out->ev[\at(out->n, Pre) + j].value == \at(t->q[0].f[j].cookie, Pre);
 	    loop invariant k > 1 ==> \forall integer j; 0 <= j < \at(t->q[1].count, Pre) ==>
 	                     out->ev[\at(out->n, Pre) + \at(t->q[0].count, Pre) + j].kind ==
-	                       NORMFS_CONN_EV_SENT;
+	                       NORMFS_CONN_EV_SENT &&
+	                     out->ev[\at(out->n, Pre) + \at(t->q[0].count, Pre) + j].status == 0;
 	    loop invariant k > 1 ==> \forall integer j; 0 <= j < \at(t->q[1].count, Pre) ==>
 	                     out->ev[\at(out->n, Pre) + \at(t->q[0].count, Pre) + j].value ==
 	                       \at(t->q[1].f[j].cookie, Pre);
@@ -477,11 +489,13 @@ normfs_conn_close_write(struct normfs_conn_tx *t, struct normfs_conn_events *out
 		    loop invariant \forall integer m; 0 <= m < \at(out->n, LoopEntry) ==>
 		                     out->ev[m].kind == \at(out->ev[m].kind, LoopEntry) &&
 		                     out->ev[m].value == \at(out->ev[m].value, LoopEntry) &&
+		                     out->ev[m].status == \at(out->ev[m].status, LoopEntry) &&
 		                     out->ev[m].conn == \at(out->ev[m].conn, LoopEntry);
 		    loop invariant \forall integer m; \at(out->n, Pre) <= m < out->n ==>
 		                     out->ev[m].conn == t->token;
 		    loop invariant \forall integer m; 0 <= m < i ==>
-		                     out->ev[\at(out->n, LoopEntry) + m].kind == NORMFS_CONN_EV_SENT;
+		                     out->ev[\at(out->n, LoopEntry) + m].kind == NORMFS_CONN_EV_SENT &&
+		                     out->ev[\at(out->n, LoopEntry) + m].status == 0;
 		    loop invariant \forall integer m; 0 <= m < i ==>
 		                     out->ev[\at(out->n, LoopEntry) + m].value == t->q[k].f[m].cookie;
 		    loop assigns i, out->n, \at(out->ev, Pre)[0 .. \at(out->cap, Pre) - 1];
@@ -497,15 +511,21 @@ normfs_conn_close_write(struct normfs_conn_tx *t, struct normfs_conn_events *out
 	    os_error, 0);
 }
 
+/*@ predicate normfs_conn_same_frame{L1,L2}(struct normfs_conn_frame *a,
+                                           struct normfs_conn_frame *b) =
+      \at(a->buf, L1) == \at(b->buf, L2) && \at(a->len, L1) == \at(b->len, L2) &&
+      \at(a->cookie, L1) == \at(b->cookie, L2);
+*/
+
 /* Drops the oldest frame of class cls, which has been written. */
-/*@ requires \valid(t) && NORMFS_CONN_TX_OK(t);
+/*@ requires pop_tx: \valid(t) && NORMFS_CONN_TX_OK(t);
     requires cls == 0 || cls == 1;
     requires t->q[cls].count > 0;
     assigns t->q[cls].f[0 .. NORMFS_CONN_QUEUE - 2], t->q[cls].count;
     ensures normfs_conn_queue_ok(&t->q[cls], t);
     ensures t->q[cls].count == \old(t->q[cls].count) - 1;
     ensures \forall integer j; 0 <= j < t->q[cls].count ==>
-              t->q[cls].f[j] == \old(t->q[cls].f[j + 1]);
+              normfs_conn_same_frame{Post,Pre}(&t->q[cls].f[j], &t->q[cls].f[j + 1]);
 */
 static void
 normfs_conn_pop(struct normfs_conn_tx *t, int cls)
@@ -544,18 +564,117 @@ normfs_conn_pick(const struct normfs_conn_tx *t)
 	return -1;
 }
 
+/* Reports the frame just written whole and takes it off the front of its queue. */
+/*@ requires \valid(t) && NORMFS_CONN_TX_OK(t) && normfs_conn_tx_stream_ok(t);
+    requires t->write_open == 1 && (t->wclass == 0 || t->wclass == 1);
+    requires t->woff == t->q[t->wclass].f[0].len;
+    requires \valid(out) && normfs_conn_tx_events_ok(out, t) && normfs_conn_room(out, 1);
+    assigns t->q[0 .. 1], t->wclass, t->woff, out->n, out->ev[out->n];
+    ensures NORMFS_CONN_TX_OK(t) && normfs_conn_tx_stream_ok(t);
+    ensures t->wclass == -1 && t->woff == 0 && t->write_open == 1;
+    ensures out->n == \old(out->n) + 1;
+    ensures out->ev[\old(out->n)].kind == NORMFS_CONN_EV_SENT &&
+            out->ev[\old(out->n)].status == 1 &&
+            out->ev[\old(out->n)].conn == t->token &&
+            out->ev[\old(out->n)].value == \old(t->q[t->wclass].f[0].cookie);
+    ensures \forall integer k; 0 <= k < \old(out->n) ==>
+              out->ev[k].kind == \old(out->ev[k].kind) &&
+              out->ev[k].value == \old(out->ev[k].value) &&
+              out->ev[k].status == \old(out->ev[k].status) &&
+              out->ev[k].conn == \old(out->ev[k].conn);
+    ensures \forall integer b; 0 <= b < \old(t->q[t->wclass].f[0].len) ==>
+              net_out(t->fd, net_opos(t->fd) - \old(t->q[t->wclass].f[0].len) + b) ==
+                \old(t->q[t->wclass].f[0].buf[b]);
+    ensures \old(t->wclass) == 0 ==>
+              t->q[0].count == \old(t->q[0].count) - 1 && t->q[1].count == \old(t->q[1].count);
+    ensures \old(t->wclass) == 0 ==> \forall integer m; 0 <= m < t->q[0].count ==>
+              t->q[0].f[m].buf == \old(t->q[0].f[m + 1].buf);
+    ensures \old(t->wclass) == 0 ==> \forall integer m; 0 <= m < t->q[1].count ==>
+              t->q[1].f[m].buf == \old(t->q[1].f[m].buf);
+    ensures \old(t->wclass) == 0 ==> \forall integer m; 0 <= m < t->q[0].count ==>
+              t->q[0].f[m].len == \old(t->q[0].f[m + 1].len);
+    ensures \old(t->wclass) == 0 ==> \forall integer m; 0 <= m < t->q[1].count ==>
+              t->q[1].f[m].len == \old(t->q[1].f[m].len);
+    ensures \old(t->wclass) == 0 ==> \forall integer m; 0 <= m < t->q[0].count ==>
+              t->q[0].f[m].cookie == \old(t->q[0].f[m + 1].cookie);
+    ensures \old(t->wclass) == 0 ==> \forall integer m; 0 <= m < t->q[1].count ==>
+              t->q[1].f[m].cookie == \old(t->q[1].f[m].cookie);
+    ensures \old(t->wclass) == 1 ==>
+              t->q[1].count == \old(t->q[1].count) - 1 && t->q[0].count == \old(t->q[0].count);
+    ensures \old(t->wclass) == 1 ==> \forall integer m; 0 <= m < t->q[1].count ==>
+              t->q[1].f[m].buf == \old(t->q[1].f[m + 1].buf);
+    ensures \old(t->wclass) == 1 ==> \forall integer m; 0 <= m < t->q[0].count ==>
+              t->q[0].f[m].buf == \old(t->q[0].f[m].buf);
+    ensures \old(t->wclass) == 1 ==> \forall integer m; 0 <= m < t->q[1].count ==>
+              t->q[1].f[m].len == \old(t->q[1].f[m + 1].len);
+    ensures \old(t->wclass) == 1 ==> \forall integer m; 0 <= m < t->q[0].count ==>
+              t->q[0].f[m].len == \old(t->q[0].f[m].len);
+    ensures \old(t->wclass) == 1 ==> \forall integer m; 0 <= m < t->q[1].count ==>
+              t->q[1].f[m].cookie == \old(t->q[1].f[m + 1].cookie);
+    ensures \old(t->wclass) == 1 ==> \forall integer m; 0 <= m < t->q[0].count ==>
+              t->q[0].f[m].cookie == \old(t->q[0].f[m].cookie);
+*/
+static void
+normfs_conn_sent_head(struct normfs_conn_tx *t, struct normfs_conn_events *out)
+{
+	int cls = t->wclass;
+
+	normfs_conn_emit(out, t->token, NORMFS_CONN_EV_SENT, t->q[cls].f[0].cookie,
+	    (uint8_t *)0, 1, 0, 0);
+	normfs_conn_pop(t, cls);
+	t->wclass = -1;
+	t->woff = 0u;
+}
+
 /*
  * Writes queued frames whole and in order, a reply ahead of read data
  * whenever a new frame starts, until the socket would block or a batch is
  * spent. A failed write drops the rest and closes the write side. 1 when the
  * socket would block, 0 otherwise.
  */
-/*@ requires \valid(t) && NORMFS_CONN_TX_OK(t);
+/*@ predicate normfs_conn_sent_frame{L1}(struct normfs_conn_tx *t, integer c, integer j,
+                                         integer end) =
+      (c == 0 || c == 1) && 0 <= j < \at(t->q[c].count, L1) &&
+      end >= \at(t->q[c].f[j].len, L1);
+
+    predicate normfs_conn_sent_event{L1,L2}(struct normfs_conn_tx *t,
+                                           struct normfs_conn_events *out,
+                                           integer k, integer c, integer j) =
+      \at(out->ev[k].kind, L2) == NORMFS_CONN_EV_SENT &&
+      \at(out->ev[k].status, L2) == 1 &&
+      \at(out->ev[k].value, L2) == \at(t->q[c].f[j].cookie, L1);
+
+    predicate normfs_conn_sent_bytes{L1,L2}(struct normfs_conn_tx *t, integer p0,
+                                           integer c, integer j, integer end) =
+      \forall integer b; 0 <= b < \at(t->q[c].f[j].len, L1) ==>
+        \at(net_out(\at(t->fd, L1), p0 + end - \at(t->q[c].f[j].len, L1) + b), L2) ==
+        \at(t->q[c].f[j].buf[b], L1);
+
+    predicate normfs_conn_sent_ok{L1,L2}(struct normfs_conn_tx *t, struct normfs_conn_events *out,
+                                        integer n0, integer p0, integer i,
+                                        integer c, integer j, integer end) =
+      normfs_conn_sent_frame{L1}(t, c, j, end) &&
+      normfs_conn_sent_event{L1,L2}(t, out, n0 + i, c, j) &&
+      normfs_conn_sent_bytes{L1,L2}(t, p0, c, j, end);
+
+    predicate normfs_conn_sent_next{L1}(struct normfs_conn_tx *t, integer c, integer j,
+                                       integer end, integer prev) =
+      end - \at(t->q[c].f[j].len, L1) == prev;
+*/
+
+/*@ requires \valid(t) && NORMFS_CONN_TX_OK(t) && normfs_conn_tx_stream_ok(t);
     requires \valid(out) && normfs_conn_tx_events_ok(out, t);
     requires normfs_conn_room(out, 2 * NORMFS_CONN_QUEUE + 1);
+    requires \separated(t, out, out->ev + (0 .. out->cap - 1), &normfs_conn_g_sent,
+                        normfs_conn_g_cls + (0 .. 2 * NORMFS_CONN_QUEUE),
+                        normfs_conn_g_idx + (0 .. 2 * NORMFS_CONN_QUEUE),
+                        normfs_conn_g_end + (0 .. 2 * NORMFS_CONN_QUEUE));
     assigns t->q[0 .. 1], t->wclass, t->woff, t->write_open,
-            out->n, out->ev[0 .. out->cap - 1], normfs_net_sys_world;
-    ensures NORMFS_CONN_TX_OK(t);
+            out->n, out->ev[0 .. out->cap - 1], normfs_net_sys_world,
+            normfs_conn_g_sent, normfs_conn_g_cls[0 .. 2 * NORMFS_CONN_QUEUE],
+            normfs_conn_g_idx[0 .. 2 * NORMFS_CONN_QUEUE],
+            normfs_conn_g_end[0 .. 2 * NORMFS_CONN_QUEUE];
+    ensures NORMFS_CONN_TX_OK(t) && normfs_conn_tx_stream_ok(t);
     ensures \old(out->n) <= out->n <= \old(out->n) + 2 * NORMFS_CONN_QUEUE + 1;
     ensures t->write_open <= \old(t->write_open);
     ensures \forall integer g; net_pos(g) == \old(net_pos(g));
@@ -565,22 +684,58 @@ normfs_conn_pick(const struct normfs_conn_tx *t)
               out->ev[k].kind == NORMFS_CONN_EV_SENT ||
               out->ev[k].kind == NORMFS_CONN_EV_WRITE_CLOSED;
     ensures \result == 0 || \result == 1;
+    // Each frame sent whole is identified, in queue order, and on the wire in event order.
+    ensures 0 <= normfs_conn_g_sent <= 2 * NORMFS_CONN_QUEUE &&
+            \old(out->n) + normfs_conn_g_sent <= out->n;
+    ensures \forall integer i; 0 <= i < normfs_conn_g_sent ==>
+              normfs_conn_sent_ok{Pre,Post}(t, out, \old(out->n),
+                \old(net_opos(t->fd)) - \old(t->woff), i, normfs_conn_g_cls[i],
+                normfs_conn_g_idx[i], normfs_conn_g_end[i]) &&
+              normfs_conn_sent_next{Pre}(t, normfs_conn_g_cls[i], normfs_conn_g_idx[i],
+                normfs_conn_g_end[i], i == 0 ? 0 : normfs_conn_g_end[i - 1]);
+    ensures \forall integer i, j; 0 <= i < j < normfs_conn_g_sent &&
+              normfs_conn_g_cls[i] == normfs_conn_g_cls[j] ==>
+              normfs_conn_g_idx[i] < normfs_conn_g_idx[j];
+    ensures \forall integer k; \old(out->n) + normfs_conn_g_sent <= k < out->n ==>
+              out->ev[k].status == 0 || out->ev[k].kind == NORMFS_CONN_EV_WRITE_CLOSED;
+    // What stays queued is what was queued minus the frames sent, from the front.
+    ensures t->write_open == 1 ==>
+              out->n == \old(out->n) + normfs_conn_g_sent &&
+              t->q[0].count + t->q[1].count + normfs_conn_g_sent ==
+                \old(t->q[0].count) + \old(t->q[1].count) &&
+              net_opos(t->fd) == \old(net_opos(t->fd)) - \old(t->woff) +
+                (normfs_conn_g_sent > 0 ? normfs_conn_g_end[normfs_conn_g_sent - 1] : 0) +
+                t->woff &&
+              (\forall integer c, m; (c == 0 || c == 1) && 0 <= m < t->q[c].count ==>
+                 \let d = \old(t->q[c].count) - t->q[c].count;
+                 t->q[c].f[m].buf == \old(t->q[c].f[m + d].buf) &&
+                 t->q[c].f[m].len == \old(t->q[c].f[m + d].len) &&
+                 t->q[c].f[m].cookie == \old(t->q[c].f[m + d].cookie));
+    ensures \forall integer i; 0 <= i < normfs_conn_g_sent && t->write_open == 1 ==>
+              \let c = normfs_conn_g_cls[i];
+              normfs_conn_g_idx[i] < \old(t->q[c].count) - t->q[c].count;
 */
 int
 normfs_conn_write(struct normfs_conn_tx *t, struct normfs_conn_events *out)
 {
 	struct normfs_net_result res;
 	struct normfs_conn_queue *q;
-	/*@ ghost int sent = 0; */
+	//@ ghost uint32_t c0 = t->q[0].count;
+	//@ ghost uint32_t c1 = t->q[1].count;
+	//@ ghost uint64_t rel = t->woff;
+	//@ ghost size_t before;
 
-	/*@ loop invariant NORMFS_CONN_TX_OK(t);
+	/*@ ghost normfs_conn_g_sent = 0; */
+	/*@ loop invariant NORMFS_CONN_TX_OK(t) && normfs_conn_tx_stream_ok(t);
 	    loop invariant normfs_conn_tx_events_ok(out, t);
 	    loop invariant out->ev == \at(out->ev, Pre) && out->cap == \at(out->cap, Pre);
-	    loop invariant 0 <= sent;
-	    loop invariant t->q[0].count + t->q[1].count + sent ==
+	    loop invariant 0 <= normfs_conn_g_sent;
+	    loop invariant c0 == \at(t->q[0].count, Pre) && c1 == \at(t->q[1].count, Pre);
+	    loop invariant t->q[0].count + t->q[1].count + normfs_conn_g_sent ==
 	                     \at(t->q[0].count, Pre) + \at(t->q[1].count, Pre);
-	    loop invariant out->n == \at(out->n, Pre) + sent;
+	    loop invariant out->n == \at(out->n, Pre) + normfs_conn_g_sent;
 	    loop invariant t->write_open == \at(t->write_open, Pre);
+	    loop invariant t->fd == \at(t->fd, Pre);
 	    loop invariant \forall integer g; net_pos(g) == \at(net_pos(g), Pre);
 	    loop invariant t->token == \at(t->token, Pre);
 	    loop invariant t->q[0].count <= \at(t->q[0].count, Pre);
@@ -589,8 +744,50 @@ normfs_conn_write(struct normfs_conn_tx *t, struct normfs_conn_events *out)
 	                     out->ev[k].conn == t->token;
 	    loop invariant \forall integer k; \at(out->n, Pre) <= k < out->n ==>
 	                     out->ev[k].kind == NORMFS_CONN_EV_SENT;
-	    loop assigns sent, res, q, t->q[0 .. 1], t->wclass, t->woff,
-	                 normfs_net_sys_world, out->n, \at(out->ev, Pre)[0 .. \at(out->cap, Pre) - 1];
+	    loop invariant front0_buf: \forall integer m; 0 <= m < t->q[0].count ==>
+	                     \let d = \at(t->q[0].count, Pre) - t->q[0].count;
+	                     t->q[0].f[m].buf == \at(t->q[0].f[m + d].buf, Pre);
+	    loop invariant front0_len: \forall integer m; 0 <= m < t->q[0].count ==>
+	                     \let d = \at(t->q[0].count, Pre) - t->q[0].count;
+	                     t->q[0].f[m].len == \at(t->q[0].f[m + d].len, Pre);
+	    loop invariant front0_cookie: \forall integer m; 0 <= m < t->q[0].count ==>
+	                     \let d = \at(t->q[0].count, Pre) - t->q[0].count;
+	                     t->q[0].f[m].cookie == \at(t->q[0].f[m + d].cookie, Pre);
+	    loop invariant front1_buf: \forall integer m; 0 <= m < t->q[1].count ==>
+	                     \let d = \at(t->q[1].count, Pre) - t->q[1].count;
+	                     t->q[1].f[m].buf == \at(t->q[1].f[m + d].buf, Pre);
+	    loop invariant front1_len: \forall integer m; 0 <= m < t->q[1].count ==>
+	                     \let d = \at(t->q[1].count, Pre) - t->q[1].count;
+	                     t->q[1].f[m].len == \at(t->q[1].f[m + d].len, Pre);
+	    loop invariant front1_cookie: \forall integer m; 0 <= m < t->q[1].count ==>
+	                     \let d = \at(t->q[1].count, Pre) - t->q[1].count;
+	                     t->q[1].f[m].cookie == \at(t->q[1].f[m + d].cookie, Pre);
+	    loop invariant rel == (normfs_conn_g_sent > 0 ?
+	                     normfs_conn_g_end[normfs_conn_g_sent - 1] : 0) + t->woff;
+	    loop invariant net_opos(t->fd) == \at(net_opos(t->fd), Pre) - \at(t->woff, Pre) + rel;
+	    loop invariant normfs_conn_g_sent <= 2 * NORMFS_CONN_QUEUE;
+	    loop invariant (normfs_conn_g_sent > 0 ? normfs_conn_g_end[normfs_conn_g_sent - 1] : 0) <=
+	                     normfs_conn_g_sent * NORMFS_CONN_FRAME_MAX;
+	    loop invariant \forall integer i; 0 <= i < normfs_conn_g_sent ==>
+	                     normfs_conn_g_end[i] + t->woff <= rel;
+	    loop invariant \at(t->wclass, Pre) != -1 && normfs_conn_g_sent == 0 ==>
+	                     t->wclass == \at(t->wclass, Pre);
+	    loop invariant each: \forall integer i; 0 <= i < normfs_conn_g_sent ==>
+	                     normfs_conn_sent_ok{Pre,Here}(t, out, \at(out->n, Pre),
+	                       \at(net_opos(t->fd), Pre) - \at(t->woff, Pre), i, normfs_conn_g_cls[i],
+	                       normfs_conn_g_idx[i], normfs_conn_g_end[i]) &&
+	                     normfs_conn_sent_next{Pre}(t, normfs_conn_g_cls[i], normfs_conn_g_idx[i],
+	                       normfs_conn_g_end[i], i == 0 ? 0 : normfs_conn_g_end[i - 1]) &&
+	                     normfs_conn_g_idx[i] <
+	                       (normfs_conn_g_cls[i] == 0 ? c0 - t->q[0].count : c1 - t->q[1].count);
+	    loop invariant \forall integer i, j; 0 <= i < j < normfs_conn_g_sent &&
+	                     normfs_conn_g_cls[i] == normfs_conn_g_cls[j] ==>
+	                     normfs_conn_g_idx[i] < normfs_conn_g_idx[j];
+	    loop assigns res, q, t->q[0 .. 1], t->wclass, t->woff, rel, before,
+	                 normfs_net_sys_world, out->n, \at(out->ev, Pre)[0 .. \at(out->cap, Pre) - 1],
+	                 normfs_conn_g_sent, normfs_conn_g_cls[0 .. 2 * NORMFS_CONN_QUEUE],
+	                 normfs_conn_g_idx[0 .. 2 * NORMFS_CONN_QUEUE],
+	                 normfs_conn_g_end[0 .. 2 * NORMFS_CONN_QUEUE];
 	    loop variant t->q[0].count + t->q[1].count;
 	*/
 	while (t->write_open) {
@@ -600,7 +797,14 @@ normfs_conn_write(struct normfs_conn_tx *t, struct normfs_conn_events *out)
 				return 0;
 		}
 		q = &t->q[t->wclass];
+		/*@ ghost before = t->woff; */
 		res = normfs_net_write(t->fd, q->f[0].buf, q->f[0].len, &t->woff);
+		/*@ ghost rel = rel + (t->woff - before); */
+		/*@ assert kept_write: \forall integer i; 0 <= i < normfs_conn_g_sent ==>
+		      normfs_conn_sent_ok{Pre,Here}(t, out, \at(out->n, Pre),
+		        \at(net_opos(t->fd), Pre) - \at(t->woff, Pre), i,
+		        normfs_conn_g_cls[i], normfs_conn_g_idx[i], normfs_conn_g_end[i]);
+		*/
 		if (res.status == NORMFS_NET_WOULD_BLOCK)
 			return 1;
 		if (res.status == NORMFS_NET_YIELD)
@@ -609,12 +813,31 @@ normfs_conn_write(struct normfs_conn_tx *t, struct normfs_conn_events *out)
 			normfs_conn_close_write(t, out, res.os_error);
 			return 0;
 		}
-		normfs_conn_emit(out, t->token, NORMFS_CONN_EV_SENT, q->f[0].cookie,
-		    (uint8_t *)0, 1, 0, 0);
-		normfs_conn_pop(t, t->wclass);
-		t->wclass = -1;
-		t->woff = 0u;
-		/*@ ghost sent++; */
+		//@ ghost normfs_conn_g_cls[normfs_conn_g_sent] = t->wclass;
+		/*@ ghost normfs_conn_g_idx[normfs_conn_g_sent] =
+		      (t->wclass == 0 ? c0 - t->q[0].count : c1 - t->q[1].count);
+		*/
+		//@ ghost normfs_conn_g_end[normfs_conn_g_sent] = rel;
+		normfs_conn_sent_head(t, out);
+		/*@ assert kept_head_event: \forall integer i; 0 <= i < normfs_conn_g_sent ==>
+		      normfs_conn_sent_event{Pre,Here}(t, out, \at(out->n, Pre) + i,
+		        normfs_conn_g_cls[i], normfs_conn_g_idx[i]);
+		*/
+		/*@ assert kept_head_bytes: \forall integer i; 0 <= i < normfs_conn_g_sent ==>
+		      normfs_conn_sent_bytes{Pre,Here}(t, \at(net_opos(t->fd), Pre) - \at(t->woff, Pre),
+		        normfs_conn_g_cls[i], normfs_conn_g_idx[i], normfs_conn_g_end[i]);
+		*/
+		/*@ assert kept_head: \forall integer i; 0 <= i < normfs_conn_g_sent ==>
+		      normfs_conn_sent_ok{Pre,Here}(t, out, \at(out->n, Pre),
+		        \at(net_opos(t->fd), Pre) - \at(t->woff, Pre), i,
+		        normfs_conn_g_cls[i], normfs_conn_g_idx[i], normfs_conn_g_end[i]);
+		*/
+		/*@ assert sent_new: normfs_conn_sent_ok{Pre,Here}(t, out, \at(out->n, Pre),
+		      \at(net_opos(t->fd), Pre) - \at(t->woff, Pre), normfs_conn_g_sent,
+		      normfs_conn_g_cls[normfs_conn_g_sent], normfs_conn_g_idx[normfs_conn_g_sent],
+		      normfs_conn_g_end[normfs_conn_g_sent]);
+		*/
+		/*@ ghost normfs_conn_g_sent++; */
 	}
 	return 0;
 }
