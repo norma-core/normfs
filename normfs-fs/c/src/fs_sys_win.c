@@ -575,14 +575,15 @@ normfs_fs_sys_dir_lists(const char *dir, size_t dir_len, const char *name,
 	if (h == INVALID_HANDLE_VALUE) {
 		DWORD e = GetLastError();
 
-		if (normfs_fs_sys_absent(e))
+		/* ERROR_DIRECTORY: dir is a file, as ENOTDIR on POSIX. */
+		if (normfs_fs_sys_absent(e) || e == ERROR_DIRECTORY)
 			return 0;
 		*os_error = (e > 0u && e <= 0x7FFFFFFFu) ? (int)e : ERROR_GEN_FAILURE;
 		return -1;
 	}
 	do {
-		int m = WideCharToMultiByte(CP_UTF8, 0u, entry.cFileName, -1, utf8, (int)sizeof(utf8),
-		    NULL, NULL);
+		int m = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, entry.cFileName, -1, utf8,
+		    (int)sizeof(utf8), NULL, NULL);
 
 		/* An entry that cannot be read is not evidence the name is absent. */
 		if (m <= 0) {

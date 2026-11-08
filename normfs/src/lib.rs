@@ -892,9 +892,10 @@ impl NormFS {
     }
 
     pub async fn ensure_queue_exists_for_read(&self, queue: &QueueId) -> Result<(), Error> {
-        self.refuse_name(queue).await?;
+        refuse_bad_name(queue)?;
         let queue_lock = self.queue_init_lock(queue);
         let _guard = queue_lock.lock().await;
+        self.refuse_alias(queue).await?;
 
         // Reads stay legal on a closed queue; this only loads the marker
         // so a follow here knows to end.
@@ -909,10 +910,12 @@ impl NormFS {
     }
 
     pub async fn ensure_queue_exists_for_write(&self, queue: &QueueId) -> Result<(), Error> {
-        self.refuse_name(queue).await?;
+        refuse_bad_name(queue)?;
         let _write = self.writes.enter()?;
         let queue_lock = self.queue_init_lock(queue);
         let _guard = queue_lock.lock().await;
+        // Under the lock: another spelling's directory may have appeared while waiting.
+        self.refuse_alias(queue).await?;
 
         // A retry still owns its file id until the old writer has finished.
         if self.store.page_writer_is_closing(queue) && !self.store.close_page_writer(queue).await {
@@ -959,11 +962,6 @@ impl NormFS {
         }
         self.mem.reopen(queue);
         Ok(())
-    }
-
-    async fn refuse_name(&self, queue: &QueueId) -> Result<(), Error> {
-        refuse_bad_name(queue)?;
-        self.refuse_alias(queue).await
     }
 
     async fn refuse_alias(&self, queue: &QueueId) -> Result<(), Error> {
@@ -1694,6 +1692,26 @@ impl NormFS {
         self.refuse_alias(queue).await?;
         let queue_config = self.get_config_for_queue(queue);
         let persist = queue_config.persist;
+        if persist.cloud
+            && queue
+                .as_str()
+                .split('/')
+                .filter(|c| !c.is_empty())
+                .skip(1)
+                .any(normfs_cloud::is_id_component)
+        {
+            return Err(ConfigError::CloudQueuePathLooksLikeIds {
+                queue: queue.to_string(),
+            }
+            .into());
+        }
+        if !mode.readonly {
+            // Two first writes as a/b and a/B, or under spellings the lock does
+            // not fold, both pass the check above; the directory mkdir leaves
+            // decides which goes on, and from then on the answer is cached.
+            self.fs.mkdir_all(&queue.to_fs_path(&self.path)).await?;
+            self.refuse_alias(queue).await?;
+        }
         if persist.is_memory() {
             // Past what an earlier cloud life recorded, which may be a reserve,
             // and past a local life's files.
@@ -1709,26 +1727,6 @@ impl NormFS {
             log::info!(target: "normfs", "Memory-only queue '{}' started, last_entry_id: {:?}", queue.short(), last_entry_id);
             self.report_started(queue, mode.readonly, persist, last_entry_id);
             return Ok(());
-        }
-
-        if persist.cloud
-            && queue
-                .as_str()
-                .split('/')
-                .filter(|c| !c.is_empty())
-                .skip(1)
-                .any(normfs_cloud::is_id_component)
-        {
-            return Err(ConfigError::CloudQueuePathLooksLikeIds {
-                queue: queue.to_string(),
-            }
-            .into());
-        }
-        if !mode.readonly && (persist.wal || persist.store) {
-            // Two first writes as a/b and a/B both pass the check above; the
-            // directory mkdir leaves decides which spelling goes on.
-            self.fs.mkdir_all(&queue.to_fs_path(&self.path)).await?;
-            self.refuse_alias(queue).await?;
         }
 
         let (file_id, header, last_entry_id, unchecked) = self.resume_point(queue, persist).await?;
@@ -2112,7 +2110,8 @@ impl NormFS {
         step: u64,
         sender: tokio::sync::mpsc::Sender<ReadEntry>,
     ) -> Result<bool, Error> {
-        self.refuse_name(queue).await?;
+        refuse_bad_name(queue)?;
+        self.refuse_alias(queue).await?;
         log::debug!(target: "normfs",
             "Reading entries - Queue: '{}', Position: {:?}, Limit: {}, Step: {}",
             queue.short(), position, limit, step);
@@ -2128,11 +2127,12 @@ impl NormFS {
     /// and complete the file, then the marker, so a marker on disk implies
     /// the data reached it. Memory is released last.
     pub async fn close_queue(&self, queue: &QueueId) -> Result<(), Error> {
-        self.refuse_name(queue).await?;
+        refuse_bad_name(queue)?;
         self.refuse_reserved(queue)?;
         let _write = self.writes.enter()?;
         let queue_lock = self.queue_init_lock(queue);
         let _guard = queue_lock.lock().await;
+        self.refuse_alias(queue).await?;
 
         log::info!(target: "normfs", "Closing queue '{}'", queue.short());
         let dir = queue.to_fs_path(&self.path);

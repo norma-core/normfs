@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use normfs::{Error, NormFS, NormFsSettings, ReadPosition};
+use normfs::{Error, NormFS, NormFsSettings, Persist, QueueSettings, ReadPosition};
 use uintn::UintN;
 
 #[tokio::test]
@@ -99,8 +99,7 @@ async fn another_spelling_of_an_existing_queue_is_refused() {
     fs.ensure_queue_exists_for_write(&queue).await.unwrap();
     fs.enqueue(&queue, Bytes::from_static(b"x")).await.unwrap();
     let dir = queue.to_fs_path(&data);
-    if !dir.parent().unwrap().join("front").exists() {
-        // Names are bytes here; nothing else opens cam/Front.
+    if !folds(&data) {
         fs.close().await.unwrap();
         return;
     }
@@ -150,6 +149,68 @@ async fn another_spelling_of_an_existing_queue_is_refused() {
         dir.join("closed").exists(),
         "a refused reopen must leave the marker"
     );
+    fs.close().await.unwrap();
+}
+
+fn folds(data: &std::path::Path) -> bool {
+    let probe = data.join("Fold-Probe");
+    std::fs::create_dir_all(&probe).unwrap();
+    let folds = data.join("fold-probe").exists();
+    std::fs::remove_dir(&probe).unwrap();
+    folds
+}
+
+#[tokio::test]
+async fn two_first_writes_under_two_spellings_leave_one_queue() {
+    let root = tempfile::TempDir::new().unwrap();
+    let data = root.path().join("data");
+    let fs = NormFS::new(data.clone(), NormFsSettings::all_active())
+        .await
+        .unwrap();
+    if !folds(&data) {
+        fs.close().await.unwrap();
+        return;
+    }
+
+    let (upper, lower) = (fs.resolve("cam/Front"), fs.resolve("cam/front"));
+    let (a, b) = tokio::join!(
+        fs.ensure_queue_exists_for_write(&upper),
+        fs.ensure_queue_exists_for_write(&lower)
+    );
+    assert!(
+        a.is_ok() != b.is_ok(),
+        "exactly one spelling may start: {a:?} {b:?}"
+    );
+    assert!(matches!(a.err().or(b.err()), Some(Error::BadQueueName(_))));
+    fs.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_memory_queue_is_held_to_its_spelling_too() {
+    let root = tempfile::TempDir::new().unwrap();
+    let data = root.path().join("data");
+    let settings = NormFsSettings {
+        queue_settings: QueueSettings::all_active().with_default_persist(Persist::MEMORY),
+        ..NormFsSettings::all_active()
+    };
+    let fs = NormFS::new(data.clone(), settings).await.unwrap();
+    if !folds(&data) {
+        fs.close().await.unwrap();
+        return;
+    }
+
+    let queue = fs.resolve("mem/Q");
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    fs.enqueue(&queue, Bytes::from_static(b"x")).await.unwrap();
+    let other = fs.resolve("mem/q");
+    assert!(matches!(
+        fs.ensure_queue_exists_for_write(&other).await,
+        Err(Error::BadQueueName(_))
+    ));
+    assert!(matches!(
+        fs.close_queue(&other).await,
+        Err(Error::BadQueueName(_))
+    ));
     fs.close().await.unwrap();
 }
 

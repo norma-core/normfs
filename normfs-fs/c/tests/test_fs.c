@@ -382,6 +382,9 @@ test_dir_lists_matches_exact_bytes(void)
 	CHECK(normfs_fs_sys_dir_lists(sub, strlen(dir), "Name", 4u, &e) == 1);
 	CHECK(path_in(file, sizeof(file), "listing/missing"));
 	CHECK(normfs_fs_sys_dir_lists(file, strlen(file), "x", 1u, &e) == 0 && e == 0);
+	CHECK(path_in(file, sizeof(file), "listing/plain"));
+	CHECK(close(open(file, O_WRONLY | O_CREAT, 0600)) == 0);
+	CHECK(normfs_fs_sys_dir_lists(file, strlen(file), "x", 1u, &e) == 0 && e == 0);
 	return 0;
 }
 
