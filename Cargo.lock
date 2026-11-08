@@ -1593,6 +1593,7 @@ name = "normfs-types"
 version = "0.4.7"
 dependencies = [
  "bytes",
+ "cc",
  "uintn",
 ]
 

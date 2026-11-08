@@ -74,6 +74,12 @@ impl QueueId {
         &self.path[self.name_at..]
     }
 
+    /// Whether the queue's directory stays inside the data directory and clear
+    /// of the names NormFS keeps there for itself.
+    pub fn name_ok(&self) -> bool {
+        queue_name::ok(&self.path)
+    }
+
     /// Get the queue path as a base for cryptographic key derivation
     pub fn to_key_derivation_base(&self) -> &str {
         &self.path
@@ -148,18 +154,19 @@ impl QueueIdResolver {
     }
 
     /// Resolve a queue path to a QueueId with absolute path
-    /// Relative paths are prefixed with /instance_id/, absolute paths (starting with /) are used as-is
+    /// Relative paths are prefixed with /instance_id/, absolute paths (starting with /) are used as-is.
+    /// Repeated and trailing slashes are dropped, so `a//b` and `a/b/` name the queue `a/b`.
     pub fn resolve(&self, path: &str) -> QueueId {
         if path.starts_with('/') {
             QueueId {
-                path: path.to_string(),
+                path: queue_name::canonical(path),
                 name_at: 0,
             }
         } else {
-            QueueId {
-                path: format!("/{}/{}", self.instance_id, path),
-                name_at: self.instance_id.len() + 2,
-            }
+            let prefix = queue_name::canonical(&format!("/{}", self.instance_id));
+            let path = queue_name::canonical(&format!("{prefix}/{path}"));
+            let name_at = (prefix.len() + 1).min(path.len());
+            QueueId { path, name_at }
         }
     }
 }
@@ -279,6 +286,7 @@ impl ReadEntry {
 }
 
 mod bounded_map;
+mod queue_name;
 pub use bounded_map::BoundedMap;
 pub mod events;
 

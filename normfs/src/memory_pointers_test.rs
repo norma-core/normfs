@@ -192,6 +192,45 @@ async fn lines_0_4_2_kept_for_memory_queues_stay_marks() {
 }
 
 #[tokio::test]
+async fn lines_under_a_name_that_was_not_canonical_reach_the_queue() {
+    let dir = tempfile::tempdir().unwrap();
+    let fs = Fs::new(FsConfig::default()).unwrap();
+    let queue = QueueIdResolver::new("instance").resolve("a/b");
+    let old = "# normfs memory-only pointers v1\n/instance/a//b\t9\n/instance/a/b/\t4\n";
+    std::fs::write(dir.path().join(".memory_pointers"), old).unwrap();
+
+    let pointers = MemoryPointers::open(fs, dir.path()).await.unwrap();
+    assert_eq!(pointers.used_id(&queue), Some(UintN::from(9u64)));
+}
+
+#[tokio::test]
+async fn merged_lines_leave_the_bucket_to_decide() {
+    let dir = tempfile::tempdir().unwrap();
+    let fs = Fs::new(FsConfig::default()).unwrap();
+    let resolver = QueueIdResolver::new("instance");
+    let (cloud, memory) = (resolver.resolve("cloud"), resolver.resolve("memory"));
+    let old = "# normfs pointers v1\n\
+        /instance/cloud\t100\t3\texact\n/instance/cloud/\t200\t7\n\
+        /instance/memory\t0\n/instance//memory\t0\t0\n";
+    std::fs::write(dir.path().join(".memory_pointers"), old).unwrap();
+
+    let pointers = MemoryPointers::open(fs, dir.path()).await.unwrap();
+    assert_eq!(
+        pointers.last_landed(&cloud),
+        Some((UintN::from(200u64), UintN::from(7u64)))
+    );
+    assert!(
+        !pointers.is_settled(&cloud),
+        "an exact line merged with another is not exact"
+    );
+    assert_eq!(
+        pointers.used_id(&memory),
+        Some(UintN::zero()),
+        "a bare record must not hide a used id 0"
+    );
+}
+
+#[tokio::test]
 async fn a_marked_entry_zero_is_used_after_a_restart() {
     let dir = tempfile::tempdir().unwrap();
     let fs = Fs::new(FsConfig::default()).unwrap();

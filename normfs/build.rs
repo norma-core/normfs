@@ -46,7 +46,6 @@ fn main() -> Result<()> {
                 "c/src/net_sys.c"
             },
         ),
-        manifest_dir.join("c/src/queue_name.c"),
         manifest_dir.join("c/src/request.c"),
         manifest_dir.join("c/src/response.c"),
         manifest_dir.join("c/src/walk.c"),

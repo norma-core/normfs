@@ -17,6 +17,15 @@ async fn a_queue_name_that_leaves_the_data_directory_is_refused() {
         "a/..",
         "./a",
         "a\u{0}b",
+        "parent/wal/001.wal",
+        "parent/store",
+        "parent/closed",
+        "parent/Closed",
+        "a/WAL/b",
+        "/tmp/x",
+        "/TMP/x",
+        "/.memory_pointers",
+        "/",
     ] {
         let queue = fs.resolve(name);
         assert!(
@@ -46,11 +55,32 @@ async fn a_queue_name_that_leaves_the_data_directory_is_refused() {
     }
     assert!(!root.path().join("escaped").exists());
 
-    for name in ["plain", "a/b.c", "..a", "v1.2/x"] {
+    for name in ["plain", "a/b.c", "..a", "v1.2/x", "wallet/x", "tmp/x", ".a"] {
         let queue = fs.resolve(name);
         fs.ensure_queue_exists_for_write(&queue).await.unwrap();
         fs.enqueue(&queue, Bytes::from_static(b"x")).await.unwrap();
     }
+    fs.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn separator_variants_are_one_queue() {
+    let root = tempfile::TempDir::new().unwrap();
+    let fs = NormFS::new(root.path().join("data"), NormFsSettings::all_active())
+        .await
+        .unwrap();
+
+    let queue = fs.resolve("a/b");
+    for name in ["a//b", "a/b/", "a///b//"] {
+        assert_eq!(fs.resolve(name), queue, "{name}");
+    }
+    assert_eq!(fs.resolve("//x//y/"), fs.resolve("/x/y"));
+
+    let system = fs.resolve("normfs//system/");
+    assert!(matches!(
+        fs.enqueue(&system, Bytes::from_static(b"x")).await,
+        Err(Error::ReservedQueue)
+    ));
     fs.close().await.unwrap();
 }
 

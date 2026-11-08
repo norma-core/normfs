@@ -15,7 +15,6 @@ mod memory_pointers;
 #[cfg(test)]
 mod memory_pointers_test;
 mod offload;
-mod queue_name;
 pub(crate) mod reader_fsm;
 mod system;
 
@@ -134,9 +133,10 @@ pub enum Error {
     /// The queue is NormFS's own ([`SYSTEM_QUEUE`]): it can be read, but
     /// only NormFS writes or closes it.
     ReservedQueue,
-    /// The queue's name would put its directory outside the data directory:
-    /// a `.` or `..` segment, a NUL, or on Windows a drive, a backslash or a
-    /// trailing dot or space.
+    /// The queue's name would put its directory outside the data directory or
+    /// onto a path NormFS keeps for itself: a `.` or `..` segment, a `wal`,
+    /// `store` or `closed` segment, a first segment `tmp` or starting with a
+    /// dot, a NUL, or on Windows a drive, a backslash or a trailing dot or space.
     BadQueueName(String),
     /// [`NormFS::close`] has begun: no more writes are taken.
     Closing,
@@ -187,7 +187,7 @@ impl std::fmt::Display for Error {
             Error::QueueClosed => write!(f, "Queue is closed and accepts no more writes"),
             Error::ReservedQueue => write!(f, "Queue is written by NormFS itself"),
             Error::BadQueueName(name) => {
-                write!(f, "Queue name leaves the data directory: {name:?}")
+                write!(f, "Queue name is not allowed: {name:?}")
             }
             Error::Closing => write!(f, "NormFS is closing and accepts no more writes"),
             Error::MemoryBelowFloor {
@@ -239,7 +239,7 @@ impl std::error::Error for Error {
 }
 
 fn refuse_bad_name(queue: &QueueId) -> Result<(), Error> {
-    if !queue_name::queue_name_ok(queue) {
+    if !queue.name_ok() {
         return Err(Error::BadQueueName(queue.as_str().to_string()));
     }
     Ok(())
@@ -1480,7 +1480,10 @@ impl NormFS {
         // A seed made by this run is a namespace nothing was written to.
         // Only for its first start in this run: after that the pointer says
         // what it wrote.
-        if self.fresh_instance && queue.as_str().starts_with(&self.instance_prefix()) && !recorded {
+        if self.fresh_instance
+            && format!("{}/", queue.as_str()).starts_with(&self.instance_prefix())
+            && !recorded
+        {
             self.memory_pointers
                 .record(queue)
                 .await
