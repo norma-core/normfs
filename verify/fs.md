@@ -48,7 +48,8 @@ The assumptions are:
 - With a data directory set, a path below it is opened one directory at a
   time from the data directory down. `normfs_fs_open_parent` is proved to
   refuse exactly the paths that are not the data directory, '/' and
-  segments (no ".", "..", '/' or NUL), to open only segments, and to open
+  segments (no ".", "..", '/' or NUL; empty pieces between slashes are
+  skipped), to open only segments, and to open
   one more descriptor than it releases when it succeeds and as many as it
   releases when it fails. That each open, and each `*at` call on the last name, follows no
   link is a shim assumption (`O_NOFOLLOW`, `AT_SYMLINK_NOFOLLOW`) checked by
