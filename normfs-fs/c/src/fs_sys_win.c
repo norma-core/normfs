@@ -547,7 +547,7 @@ normfs_fs_sys_dir_lists(const char *dir, size_t dir_len, const char *name,
 	size_t name_len, int *os_error)
 {
 	WIN32_FIND_DATAW entry;
-	wchar_t want[MAX_PATH];
+	wchar_t *want;
 	wchar_t *wide;
 	wchar_t *pattern;
 	size_t n;
@@ -556,19 +556,28 @@ normfs_fs_sys_dir_lists(const char *dir, size_t dir_len, const char *name,
 	int found = 0;
 
 	*os_error = 0;
+	want = malloc(name_len * sizeof(wchar_t));
+	if (want == NULL) {
+		*os_error = ERROR_NOT_ENOUGH_MEMORY;
+		return -1;
+	}
 	want_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, name, (int)name_len, want,
-	    MAX_PATH - 1);
+	    (int)name_len);
 	if (want_len <= 0) {
-		*os_error = ERROR_INVALID_NAME;
+		(void)normfs_fs_sys_fail(os_error);
+		free(want);
 		return -1;
 	}
 	wide = normfs_fs_sys_wpath(dir, dir_len, os_error);
-	if (wide == NULL)
+	if (wide == NULL) {
+		free(want);
 		return -1;
+	}
 	n = wcslen(wide);
 	pattern = malloc((n + 3u) * sizeof(wchar_t));
 	if (pattern == NULL) {
 		free(wide);
+		free(want);
 		*os_error = ERROR_NOT_ENOUGH_MEMORY;
 		return -1;
 	}
@@ -583,6 +592,7 @@ normfs_fs_sys_dir_lists(const char *dir, size_t dir_len, const char *name,
 	if (h == INVALID_HANDLE_VALUE) {
 		DWORD e = GetLastError();
 
+		free(want);
 		/* ERROR_DIRECTORY: dir is a file, as ENOTDIR on POSIX. */
 		if (normfs_fs_sys_absent(e) || e == ERROR_DIRECTORY)
 			return 0;
@@ -599,9 +609,11 @@ normfs_fs_sys_dir_lists(const char *dir, size_t dir_len, const char *name,
 	if (!found && GetLastError() != ERROR_NO_MORE_FILES) {
 		(void)normfs_fs_sys_fail(os_error);
 		(void)FindClose(h);
+		free(want);
 		return -1;
 	}
 	(void)FindClose(h);
+	free(want);
 	return found;
 }
 

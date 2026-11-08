@@ -967,17 +967,29 @@ impl NormFS {
         Ok(())
     }
 
+    /// Two first writes under two spellings both pass the check their callers
+    /// made; the directory mkdir leaves decides which goes on. Made once the
+    /// start can no longer fail, so a refused start leaves no directory.
+    async fn claim_spelling(&self, queue: &QueueId, readonly: bool) -> Result<(), Error> {
+        if readonly {
+            return Ok(());
+        }
+        self.fs.mkdir_all(&queue.to_fs_path(&self.path)).await?;
+        self.refuse_alias(queue).await
+    }
+
     async fn refuse_alias(&self, queue: &QueueId) -> Result<(), Error> {
         if self.exact_queues.read().unwrap().contains(queue) {
             return Ok(());
         }
-        // Looked at before the walk: a directory that was there for the whole
-        // walk keeps the spelling the walk saw.
-        let existed = self.fs.stat(&queue.to_fs_path(&self.path)).await?.is_some();
+        // A directory there for the whole walk keeps the spelling it saw.
+        let dir = queue.to_fs_path(&self.path);
+        let existed = self.fs.stat(&dir).await?.is_some();
         let rel = queue.as_str().trim_start_matches('/');
         match self.fs.exact_names(&self.path, rel).await {
             Ok(true) => {
-                if existed {
+                // Still there after the walk too, so the walk reached it.
+                if existed && self.fs.stat(&dir).await?.is_some() {
                     self.exact_queues.write().unwrap().insert(queue.clone());
                 }
                 Ok(())
@@ -1707,16 +1719,11 @@ impl NormFS {
             }
             .into());
         }
-        if !mode.readonly {
-            // Two first writes under two spellings both pass the check their
-            // callers made; the directory mkdir leaves decides which goes on.
-            self.fs.mkdir_all(&queue.to_fs_path(&self.path)).await?;
-            self.refuse_alias(queue).await?;
-        }
         if persist.is_memory() {
             // Past what an earlier cloud life recorded, which may be a reserve,
             // and past a local life's files.
             let (_, _, local) = self.continue_queue(queue).await?;
+            self.claim_spelling(queue, mode.readonly).await?;
             let last_entry_id = self.memory_pointers.used_id(queue).max(local);
             self.mem.start_queue_with(
                 queue,
@@ -1731,6 +1738,7 @@ impl NormFS {
         }
 
         let (file_id, header, last_entry_id, unchecked) = self.resume_point(queue, persist).await?;
+        self.claim_spelling(queue, mode.readonly).await?;
 
         log::info!(target: "normfs", "----------------------------------------");
         log::info!(target: "normfs", "Queue '{}' - Recovery complete:", queue.short());
