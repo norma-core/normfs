@@ -208,7 +208,11 @@ impl std::fmt::Debug for Fs {
 
 impl Fs {
     pub fn new(cfg: FsConfig) -> io::Result<Fs> {
-        if cfg.root.as_deref().is_some_and(|r| r.parent().is_none()) {
+        if cfg
+            .root
+            .as_deref()
+            .is_some_and(|r| r.has_root() && r.parent().is_none())
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "the data directory cannot be a filesystem root",
@@ -581,6 +585,9 @@ impl Fs {
         let at = self.at(dir)?;
         match beneath::stat(&at)? {
             None => return Err(io::ErrorKind::NotFound.into()),
+            Some(top) if top.is_file() => {
+                return Err(io::Error::from_raw_os_error(os::ENOTDIR));
+            }
             Some(top) if !top.is_dir() => return beneath::unlink(&at),
             Some(_) => {}
         }

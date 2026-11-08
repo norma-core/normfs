@@ -200,7 +200,7 @@ void normfs_fs_world_unlink_ok(const char *path, size_t path_len);
  *
  * With root > 0 a path is the data directory path[0 .. root), which may be a
  * link, then segments opened with normfs_fs_open_parent: no link below the
- * data directory is followed, and one there fails with ELOOP or ENOTDIR.
+ * data directory is followed.
  * With root 0 the path is resolved as given. */
 
 #define NORMFS_FS_TMP_EXCL 0

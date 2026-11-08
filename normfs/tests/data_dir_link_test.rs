@@ -115,3 +115,23 @@ async fn a_queue_name_climbing_out_creates_nothing_above_the_data_directory() {
     assert!(started.is_err());
     assert!(!parent.path().join("escape").exists());
 }
+
+#[tokio::test]
+async fn a_relative_data_directory_not_made_yet_opens() {
+    let cwd = tempfile::TempDir::new().unwrap();
+    std::env::set_current_dir(cwd.path()).unwrap();
+    let fs = NormFS::new(
+        Path::new("rel/data").to_path_buf(),
+        NormFsSettings::all_active(),
+    )
+    .await
+    .unwrap();
+    let queue = fs.resolve("q");
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    fs.enqueue(&queue, Bytes::from_static(b"record"))
+        .await
+        .unwrap();
+    fs.close().await.unwrap();
+
+    assert!(files_under(&cwd.path().join("rel/data")) > 0);
+}

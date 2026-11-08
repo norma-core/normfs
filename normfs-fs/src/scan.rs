@@ -34,7 +34,7 @@ pub(crate) fn scan_ids(
     which: Scan,
     root: Option<&Path>,
 ) -> io::Result<ScanResult> {
-    match beneath::stat(&At::new(root, dir)?)? {
+    match beneath::stat_as_given(&At::new(root, dir)?)? {
         Some(m) if m.is_dir() => {}
         Some(_) => {
             return Err(io::Error::new(
@@ -248,7 +248,7 @@ pub(crate) fn find_max_id(
     extension: &str,
     root: Option<&Path>,
 ) -> Result<UintN, PathError> {
-    if beneath::stat(&At::new(root, base_path)?)?.is_none() {
+    if beneath::stat_as_given(&At::new(root, base_path)?)?.is_none() {
         return Err(PathError::Io(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "Base path does not exist",
@@ -275,7 +275,7 @@ pub(crate) fn find_min_id(
     extension: &str,
     root: Option<&Path>,
 ) -> Result<UintN, PathError> {
-    if beneath::stat(&At::new(root, base_path)?)?.is_none() {
+    if beneath::stat_as_given(&At::new(root, base_path)?)?.is_none() {
         return Err(PathError::Io(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "Base path does not exist",

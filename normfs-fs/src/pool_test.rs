@@ -561,3 +561,12 @@ async fn remove_dir_all_takes_a_link_and_not_what_it_points_at() {
     assert!(real.join("kept").exists());
     assert!(std::fs::symlink_metadata(&link).is_err());
 }
+
+#[tokio::test]
+async fn remove_dir_all_refuses_a_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("file");
+    std::fs::write(&file, b"x").unwrap();
+    assert!(fs().remove_dir_all(&file).await.is_err());
+    assert!(file.exists());
+}

@@ -41,15 +41,16 @@ The assumptions are:
   precondition if an earlier process died during directory creation.
 - Nobody outside the serialized operation replaces its names, directories,
   or open inode. Callers must serialize operations sharing a target. A
-  publish's temporary inode must not alias its target. Hard-link races,
-  mount changes, and arbitrary writes through other descriptors are
-  excluded. The alias checks do not make external races safe.
+  publish's temporary inode must not alias its target. Hard-link and symlink
+  races, mount changes, and arbitrary writes through other descriptors are
+  excluded, except links below a data directory on Unix (below). The alias
+  checks do not make external races safe.
 - With a data directory set, a path below it is opened one directory at a
   time from the data directory down. `normfs_fs_open_parent` is proved to
   refuse exactly the paths that are not the data directory, '/' and
-  segments (no ".", "..", '/' or NUL), to check all of them before opening
-  anything, and to hold one descriptor when it succeeds and none when it
-  fails. That each open, and each `*at` call on the last name, follows no
+  segments (no ".", "..", '/' or NUL), to open only segments, and to open
+  one more descriptor than it releases when it succeeds and as many as it
+  releases when it fails. That each open, and each `*at` call on the last name, follows no
   link is a shim assumption (`O_NOFOLLOW`, `AT_SYMLINK_NOFOLLOW`) checked by
   `tests/test_fs.c`. A link placed or swapped in below the data directory
   then fails the step instead of redirecting it; the data directory itself

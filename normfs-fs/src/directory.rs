@@ -29,11 +29,8 @@ static PENDING: OnceLock<Mutex<Pending>> = OnceLock::new();
 
 /// With a data directory the key is the path as given: canonicalizing would
 /// follow the links the walk refuses.
-fn key(path: &Path, root: Option<&Path>) -> io::Result<PathBuf> {
-    match root {
-        Some(_) if cfg!(unix) => Ok(path.to_path_buf()),
-        _ => std::fs::canonicalize(path),
-    }
+fn walked(root: Option<&Path>) -> bool {
+    root.is_some() && cfg!(unix)
 }
 
 pub(crate) fn mkdir_all(path: &Path, root: Option<&Path>) -> io::Result<()> {
@@ -53,7 +50,11 @@ pub(crate) fn mkdir_all(path: &Path, root: Option<&Path>) -> io::Result<()> {
                 {
                     return Ok(());
                 }
-                let canonical = key(path, root)?;
+                let canonical = if walked(root) {
+                    path.to_path_buf()
+                } else {
+                    std::fs::canonicalize(path)?
+                };
                 let pending = PENDING.get().unwrap().lock().unwrap();
                 pending
                     .get(&canonical)
@@ -74,10 +75,14 @@ pub(crate) fn mkdir_all(path: &Path, root: Option<&Path>) -> io::Result<()> {
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     mkdir_all(parent, root)?;
-    let canonical = key(parent, root)?.join(
-        path.file_name()
-            .ok_or_else(|| io::Error::from_raw_os_error(crate::os::EINVAL))?,
-    );
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::from_raw_os_error(crate::os::EINVAL))?;
+    let canonical = if walked(root) {
+        path.to_path_buf()
+    } else {
+        std::fs::canonicalize(parent)?.join(name)
+    };
     let entry = {
         let mut pending = PENDING.get_or_init(Mutex::default).lock().unwrap();
         pending
