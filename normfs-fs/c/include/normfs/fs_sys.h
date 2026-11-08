@@ -334,4 +334,48 @@ int normfs_fs_sys_unlink(const char *path, size_t path_len, int *os_error);
 */
 int normfs_fs_sys_sync_dir(const char *path, size_t path_len, int *os_error);
 
+/*@ axiomatic NormfsFsListing {
+      // Reading the directory in full shows an entry with exactly these bytes.
+      predicate fs_lists{L}(char *dir, integer dir_len, char *name, integer name_len)
+        reads normfs_fs_vol_names, dir[0 .. dir_len - 1], name[0 .. name_len - 1];
+      // The name resolves to something, a link itself included.
+      predicate fs_exists{L}(char *path, integer len)
+        reads normfs_fs_vol_names, path[0 .. len - 1];
+    }
+*/
+
+/* readdir(3) of dir, which need not be NUL-terminated: 1 when an entry is
+ * named exactly name's bytes, 0 when none is or dir is absent, -1 on any
+ * other failure. A folding filesystem opens a/B for a/b; only the listing
+ * tells them apart. */
+/*@ requires 0 < dir_len < NORMFS_FS_PATH_MAX && 0 < name_len < NORMFS_FS_PATH_MAX;
+    requires \valid_read(dir + (0 .. dir_len - 1));
+    requires \valid_read(name + (0 .. name_len - 1));
+    requires \valid(os_error);
+    requires \separated(os_error, dir + (0 .. dir_len - 1), name + (0 .. name_len - 1));
+    assigns *os_error;
+    ensures \result == -1 || \result == 0 || \result == 1;
+    ensures \result >= 0 ==> *os_error == 0;
+    ensures \result == -1 ==> *os_error > 0;
+    ensures \result == 1 ==> fs_lists(dir, dir_len, name, name_len);
+    ensures \result == 0 ==> !fs_lists(dir, dir_len, name, name_len);
+*/
+int normfs_fs_sys_dir_lists(const char *dir, size_t dir_len, const char *name,
+    size_t name_len, int *os_error);
+
+/* lstat(2) of path, which need not be NUL-terminated: 1 when the name
+ * resolves, 0 when it or a directory above it is absent, -1 otherwise. */
+/*@ requires 0 < path_len < NORMFS_FS_PATH_MAX;
+    requires \valid_read(path + (0 .. path_len - 1));
+    requires \valid(os_error);
+    requires \separated(os_error, path + (0 .. path_len - 1));
+    assigns *os_error;
+    ensures \result == -1 || \result == 0 || \result == 1;
+    ensures \result >= 0 ==> *os_error == 0;
+    ensures \result == -1 ==> *os_error > 0;
+    ensures \result == 1 ==> fs_exists(path, path_len);
+    ensures \result == 0 ==> !fs_exists(path, path_len);
+*/
+int normfs_fs_sys_exists(const char *path, size_t path_len, int *os_error);
+
 #endif /* NORMFS_FS_SYS_H */

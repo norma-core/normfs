@@ -15,6 +15,7 @@
 #define _DARWIN_C_SOURCE 1
 #endif
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -338,4 +339,65 @@ normfs_fs_sys_sync_dir(const char *path, size_t path_len, int *os_error)
 	rc = normfs_fs_sys_fsync(fd, os_error);
 	(void)close(fd);
 	return rc;
+}
+
+/* Every path the contracts admit is shorter than NORMFS_FS_PATH_MAX. */
+static void
+normfs_fs_sys_terminate(char *buf, const char *path, size_t len)
+{
+	memcpy(buf, path, len);
+	buf[len] = '\0';
+}
+
+int
+normfs_fs_sys_dir_lists(const char *dir, size_t dir_len, const char *name,
+	size_t name_len, int *os_error)
+{
+	char buf[NORMFS_FS_PATH_MAX];
+	struct dirent *ent;
+	DIR *d;
+	int e;
+
+	*os_error = 0;
+	normfs_fs_sys_terminate(buf, dir, dir_len);
+	errno = 0;
+	d = opendir(buf);
+	if (d == NULL) {
+		if (errno == ENOENT || errno == ENOTDIR)
+			return 0;
+		return normfs_fs_sys_fail(os_error);
+	}
+	for (;;) {
+		errno = 0;
+		ent = readdir(d);
+		if (ent == NULL)
+			break;
+		if (strlen(ent->d_name) == name_len && memcmp(ent->d_name, name, name_len) == 0)
+			break;
+	}
+	e = errno;
+	(void)closedir(d);
+	if (ent != NULL)
+		return 1;
+	if (e != 0) {
+		errno = e;
+		return normfs_fs_sys_fail(os_error);
+	}
+	return 0;
+}
+
+int
+normfs_fs_sys_exists(const char *path, size_t path_len, int *os_error)
+{
+	char buf[NORMFS_FS_PATH_MAX];
+	struct stat st;
+
+	*os_error = 0;
+	normfs_fs_sys_terminate(buf, path, path_len);
+	errno = 0;
+	if (lstat(buf, &st) == 0)
+		return 1;
+	if (errno == ENOENT || errno == ENOTDIR)
+		return 0;
+	return normfs_fs_sys_fail(os_error);
 }

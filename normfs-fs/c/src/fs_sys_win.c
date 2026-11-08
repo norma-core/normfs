@@ -538,3 +538,84 @@ normfs_fs_sys_sync_dir(const char *path, size_t path_len, int *os_error)
 	free(wide);
 	return rc;
 }
+
+/* FindFirstFile lists long names, so a short name such as INFERE~1, which
+ * opens what it stands for, is not among them. */
+int
+normfs_fs_sys_dir_lists(const char *dir, size_t dir_len, const char *name,
+	size_t name_len, int *os_error)
+{
+	WIN32_FIND_DATAW entry;
+	char utf8[MAX_PATH * 3];
+	wchar_t *wide;
+	wchar_t *pattern;
+	size_t n;
+	HANDLE h;
+	int found = 0;
+
+	*os_error = 0;
+	wide = normfs_fs_sys_wpath(dir, dir_len, os_error);
+	if (wide == NULL)
+		return -1;
+	n = wcslen(wide);
+	pattern = malloc((n + 3u) * sizeof(wchar_t));
+	if (pattern == NULL) {
+		free(wide);
+		*os_error = ERROR_NOT_ENOUGH_MEMORY;
+		return -1;
+	}
+	memcpy(pattern, wide, n * sizeof(wchar_t));
+	free(wide);
+	if (n == 0u || pattern[n - 1u] != L'\\')
+		pattern[n++] = L'\\';
+	pattern[n++] = L'*';
+	pattern[n] = L'\0';
+	h = FindFirstFileExW(pattern, FindExInfoBasic, &entry, FindExSearchNameMatch, NULL, 0u);
+	free(pattern);
+	if (h == INVALID_HANDLE_VALUE) {
+		DWORD e = GetLastError();
+
+		if (normfs_fs_sys_absent(e))
+			return 0;
+		*os_error = (e > 0u && e <= 0x7FFFFFFFu) ? (int)e : ERROR_GEN_FAILURE;
+		return -1;
+	}
+	do {
+		int m = WideCharToMultiByte(CP_UTF8, 0u, entry.cFileName, -1, utf8, (int)sizeof(utf8),
+		    NULL, NULL);
+
+		if (m > 0 && (size_t)(m - 1) == name_len && memcmp(utf8, name, name_len) == 0) {
+			found = 1;
+			break;
+		}
+	} while (FindNextFileW(h, &entry));
+	if (!found && GetLastError() != ERROR_NO_MORE_FILES) {
+		(void)normfs_fs_sys_fail(os_error);
+		(void)FindClose(h);
+		return -1;
+	}
+	(void)FindClose(h);
+	return found;
+}
+
+int
+normfs_fs_sys_exists(const char *path, size_t path_len, int *os_error)
+{
+	wchar_t *wide;
+	DWORD attrs;
+	DWORD e;
+
+	*os_error = 0;
+	wide = normfs_fs_sys_wpath(path, path_len, os_error);
+	if (wide == NULL)
+		return -1;
+	attrs = GetFileAttributesW(wide);
+	e = GetLastError();
+	free(wide);
+	if (attrs != INVALID_FILE_ATTRIBUTES)
+		return 1;
+	if (normfs_fs_sys_absent(e))
+		return 0;
+	*os_error = (e > 0u && e <= 0x7FFFFFFFu) ? (int)e : ERROR_GEN_FAILURE;
+	return -1;
+}

@@ -363,6 +363,46 @@ test_open_does_not_follow_a_symlink(void)
 	return 0;
 }
 
+static int
+test_dir_lists_matches_exact_bytes(void)
+{
+	char dir[512];
+	char sub[512];
+	char file[512];
+	int e;
+
+	CHECK(path_in(dir, sizeof(dir), "listing"));
+	CHECK(mkdir(dir, 0700) == 0);
+	CHECK(path_in(sub, sizeof(sub), "listing/Name"));
+	CHECK(mkdir(sub, 0700) == 0);
+	CHECK(normfs_fs_sys_dir_lists(dir, strlen(dir), "Name", 4u, &e) == 1 && e == 0);
+	CHECK(normfs_fs_sys_dir_lists(dir, strlen(dir), "name", 4u, &e) == 0 && e == 0);
+	CHECK(normfs_fs_sys_dir_lists(dir, strlen(dir), "Nam", 3u, &e) == 0 && e == 0);
+	/* A trailing byte past dir_len is not part of the directory. */
+	CHECK(normfs_fs_sys_dir_lists(sub, strlen(dir), "Name", 4u, &e) == 1);
+	CHECK(path_in(file, sizeof(file), "listing/missing"));
+	CHECK(normfs_fs_sys_dir_lists(file, strlen(file), "x", 1u, &e) == 0 && e == 0);
+	return 0;
+}
+
+static int
+test_exists_does_not_follow_a_link(void)
+{
+	char link[512];
+	char under[512];
+	char target[512];
+	int e;
+
+	CHECK(path_in(link, sizeof(link), "dangling"));
+	CHECK(path_in(target, sizeof(target), "dangling-target"));
+	CHECK(symlink(target, link) == 0);
+	CHECK(normfs_fs_sys_exists(link, strlen(link), &e) == 1 && e == 0);
+	CHECK(normfs_fs_sys_exists(target, strlen(target), &e) == 0 && e == 0);
+	CHECK(path_in(under, sizeof(under), "dangling-target/below"));
+	CHECK(normfs_fs_sys_exists(under, strlen(under), &e) == 0 && e == 0);
+	return 0;
+}
+
 int
 main(void)
 {
@@ -386,6 +426,8 @@ main(void)
 	failed |= test_unlink_reports_absent();
 	failed |= test_sync_dir_rejects_missing_and_regular_paths();
 	failed |= test_open_does_not_follow_a_symlink();
+	failed |= test_dir_lists_matches_exact_bytes();
+	failed |= test_exists_does_not_follow_a_link();
 
 	if (failed == 0)
 		printf("fs: all tests passed\n");

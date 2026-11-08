@@ -87,6 +87,39 @@ async fn separator_variants_are_one_queue() {
     fs.close().await.unwrap();
 }
 
+#[cfg(any(windows, target_os = "macos"))]
+#[tokio::test]
+async fn another_spelling_of_an_existing_queue_is_refused() {
+    let root = tempfile::TempDir::new().unwrap();
+    let fs = NormFS::new(root.path().join("data"), NormFsSettings::all_active())
+        .await
+        .unwrap();
+
+    let queue = fs.resolve("cam/Front");
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    fs.enqueue(&queue, Bytes::from_static(b"x")).await.unwrap();
+
+    for name in ["cam/front", "CAM/Front"] {
+        let other = fs.resolve(name);
+        assert!(
+            matches!(
+                fs.ensure_queue_exists_for_write(&other).await,
+                Err(Error::BadQueueName(_))
+            ),
+            "write {name}"
+        );
+        assert!(
+            matches!(
+                fs.ensure_queue_exists_for_read(&other).await,
+                Err(Error::BadQueueName(_))
+            ),
+            "read {name}"
+        );
+    }
+    fs.ensure_queue_exists_for_read(&queue).await.unwrap();
+    fs.close().await.unwrap();
+}
+
 #[cfg(windows)]
 #[tokio::test]
 async fn a_windows_drive_or_unc_queue_name_is_refused() {

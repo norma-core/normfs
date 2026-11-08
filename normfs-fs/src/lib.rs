@@ -428,6 +428,16 @@ impl Fs {
         done.await.map_err(|_| FsError::ExecutorGone)?
     }
 
+    /// Whether every directory that exists on the way from `root` to
+    /// `root/rel` is listed under the bytes `rel` gives it. A filesystem that
+    /// folds case or Unicode form, or a Windows short name, opens one
+    /// directory under several names; this is false for all but the one on disk.
+    pub async fn exact_names(&self, root: &Path, rel: &str) -> Result<bool, FsError> {
+        let (root, rel) = (root.to_path_buf(), rel.to_string());
+        self.run_blocking(move || directory::exact_names(&root, &rel))
+            .await
+    }
+
     pub async fn open_read(&self, path: &Path) -> io::Result<ReadFile> {
         let path = path.to_path_buf();
         let file = self.run_blocking(move || File::open(path)).await?;

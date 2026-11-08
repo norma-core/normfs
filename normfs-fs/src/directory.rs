@@ -15,6 +15,7 @@ struct Status {
 
 unsafe extern "C" {
     fn normfs_fs_sync_created_dir(path: *const c_char, len: usize, stage: *mut c_int) -> Status;
+    fn normfs_fs_exact_names(path: *const c_char, len: usize, from: usize) -> Status;
 }
 
 type Pending = HashMap<PathBuf, Arc<Mutex<c_int>>>;
@@ -123,6 +124,28 @@ fn sync_created(path: &Path, stage: &mut c_int) -> io::Result<()> {
         unsafe { normfs_fs_sync_created_dir(cpath.as_ptr(), cpath.as_bytes().len(), stage) };
     match status.code {
         0 => Ok(()),
+        1 => Err(io::Error::from_raw_os_error(status.os_error)),
+        other => Err(io::Error::other(PlanError::UnknownStatus(other))),
+    }
+}
+
+pub(crate) fn exact_names(root: &Path, rel: &str) -> io::Result<bool> {
+    let mut path = crate::os::path_bytes(root)
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?
+        .to_vec();
+    let from = path.len();
+    if !rel.is_empty() {
+        path.push(b'/');
+        path.extend_from_slice(rel.as_bytes());
+    }
+    if from == 0 || path.len() >= 4096 {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    // SAFETY: the C reads path.len() bytes of path and keeps no pointer to it.
+    let status = unsafe { normfs_fs_exact_names(path.as_ptr().cast(), path.len(), from) };
+    match status.code {
+        0 => Ok(true),
+        2 => Ok(false),
         1 => Err(io::Error::from_raw_os_error(status.os_error)),
         other => Err(io::Error::other(PlanError::UnknownStatus(other))),
     }

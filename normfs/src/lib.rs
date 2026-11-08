@@ -136,7 +136,9 @@ pub enum Error {
     /// The queue's name would put its directory outside the data directory or
     /// onto a path NormFS keeps for itself: a `.` or `..` segment, a `wal`,
     /// `store` or `closed` segment, a first segment `tmp` or starting with a
-    /// dot, a NUL, or on Windows a drive, a backslash or a trailing dot or space.
+    /// dot, a NUL, or on Windows a drive, a backslash or a trailing dot or space;
+    /// or another spelling of a directory already there, such as `a/B` for
+    /// `a/b` where the filesystem folds case.
     BadQueueName(String),
     /// [`NormFS::close`] has begun: no more writes are taken.
     Closing,
@@ -953,6 +955,15 @@ impl NormFS {
         Ok(())
     }
 
+    async fn refuse_alias(&self, queue: &QueueId) -> Result<(), Error> {
+        let rel = queue.as_str().trim_start_matches('/');
+        match self.fs.exact_names(&self.path, rel).await {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(Error::BadQueueName(queue.as_str().to_string())),
+            Err(e) => Err(Error::Io(e.into())),
+        }
+    }
+
     fn refuse_reserved(&self, queue: &QueueId) -> Result<(), Error> {
         if queue == &self.system_queue {
             return Err(Error::ReservedQueue);
@@ -1658,6 +1669,7 @@ impl NormFS {
         log::info!(target: "normfs", "Starting queue: '{}' (readonly={})", queue.short(), mode.readonly);
         log::info!(target: "normfs", "========================================");
 
+        self.refuse_alias(queue).await?;
         let queue_config = self.get_config_for_queue(queue);
         let persist = queue_config.persist;
         if persist.is_memory() {
@@ -1689,6 +1701,15 @@ impl NormFS {
                 queue: queue.to_string(),
             }
             .into());
+        }
+        if !mode.readonly && (persist.wal || persist.store) {
+            // Two first writes as a/b and a/B both pass the check above; the
+            // directory mkdir leaves decides which spelling goes on.
+            self.fs
+                .mkdir_all(&queue.to_fs_path(&self.path))
+                .await
+                .map_err(|e| Error::Io(e.into()))?;
+            self.refuse_alias(queue).await?;
         }
 
         let (file_id, header, last_entry_id, unchecked) = self.resume_point(queue, persist).await?;

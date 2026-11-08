@@ -176,3 +176,19 @@ async fn only_files_with_the_extension_are_removed() {
         0
     );
 }
+
+#[tokio::test]
+async fn exact_names_refuse_only_another_spelling_of_what_is_there() {
+    let temp = tempfile::tempdir().unwrap();
+    let fs = fs();
+    fs::create_dir_all(temp.path().join("a").join("b")).unwrap();
+
+    assert!(fs.exact_names(temp.path(), "a/b").await.unwrap());
+    assert!(fs.exact_names(temp.path(), "a/b/c/d").await.unwrap());
+    assert!(fs.exact_names(temp.path(), "x/y").await.unwrap());
+    assert!(fs.exact_names(temp.path(), "").await.unwrap());
+    // Absent where names are exact, the same directory where the filesystem folds case.
+    let folds = temp.path().join("A").exists();
+    assert_eq!(fs.exact_names(temp.path(), "A/b").await.unwrap(), !folds);
+    assert_eq!(fs.exact_names(temp.path(), "a/B/c").await.unwrap(), !folds);
+}
