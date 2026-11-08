@@ -27,7 +27,7 @@ use normfs_store::{Layer, PersistStore};
 use normfs_types::events::{EventSink, SystemEvent};
 use normfs_types::CompressionType;
 use normfs_wal::{WalFile, WalSettings, WalStore};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::RwLock;
 use std::{path::Path, sync::Arc};
@@ -95,7 +95,11 @@ pub struct NormFS {
     settings: NormFsSettings,
     reader_fsm: reader_fsm::ReaderFSM,
     queue_resolver: normfs_types::QueueIdResolver,
-    queue_init_locks: RwLock<HashMap<QueueId, Arc<Mutex<()>>>>,
+    // Keyed by the lowercased id, so a/b and a/B, which a folding filesystem
+    // gives one directory, start one at a time.
+    queue_init_locks: RwLock<HashMap<String, Arc<Mutex<()>>>>,
+    /// Queues whose directory exists under exactly their name; that cannot change.
+    exact_queues: RwLock<HashSet<QueueId>>,
     /// The seed was made by this run: no earlier life wrote under this
     /// instance's id.
     fresh_instance: bool,
@@ -807,6 +811,7 @@ impl NormFS {
             reader_fsm,
             queue_resolver,
             queue_init_locks: RwLock::new(HashMap::new()),
+            exact_queues: RwLock::new(HashSet::new()),
             fresh_instance,
             bucket_down: std::sync::Mutex::new(None),
             placer,
@@ -843,14 +848,15 @@ impl NormFS {
     }
 
     fn queue_init_lock(&self, queue: &QueueId) -> Arc<Mutex<()>> {
+        let key = queue.as_str().to_lowercase();
         let locks = self.queue_init_locks.read().unwrap();
-        if let Some(lock) = locks.get(queue).cloned() {
+        if let Some(lock) = locks.get(&key).cloned() {
             lock
         } else {
             drop(locks);
             let mut locks = self.queue_init_locks.write().unwrap();
             locks
-                .entry(queue.clone())
+                .entry(key)
                 .or_insert_with(|| Arc::new(Mutex::new(())))
                 .clone()
         }
@@ -886,7 +892,7 @@ impl NormFS {
     }
 
     pub async fn ensure_queue_exists_for_read(&self, queue: &QueueId) -> Result<(), Error> {
-        refuse_bad_name(queue)?;
+        self.refuse_name(queue).await?;
         let queue_lock = self.queue_init_lock(queue);
         let _guard = queue_lock.lock().await;
 
@@ -903,7 +909,7 @@ impl NormFS {
     }
 
     pub async fn ensure_queue_exists_for_write(&self, queue: &QueueId) -> Result<(), Error> {
-        refuse_bad_name(queue)?;
+        self.refuse_name(queue).await?;
         let _write = self.writes.enter()?;
         let queue_lock = self.queue_init_lock(queue);
         let _guard = queue_lock.lock().await;
@@ -955,12 +961,28 @@ impl NormFS {
         Ok(())
     }
 
+    async fn refuse_name(&self, queue: &QueueId) -> Result<(), Error> {
+        refuse_bad_name(queue)?;
+        self.refuse_alias(queue).await
+    }
+
     async fn refuse_alias(&self, queue: &QueueId) -> Result<(), Error> {
+        if self.exact_queues.read().unwrap().contains(queue) {
+            return Ok(());
+        }
+        // Looked at before the walk: a directory that was there for the whole
+        // walk keeps the spelling the walk saw.
+        let existed = self.fs.stat(&queue.to_fs_path(&self.path)).await?.is_some();
         let rel = queue.as_str().trim_start_matches('/');
         match self.fs.exact_names(&self.path, rel).await {
-            Ok(true) => Ok(()),
+            Ok(true) => {
+                if existed {
+                    self.exact_queues.write().unwrap().insert(queue.clone());
+                }
+                Ok(())
+            }
             Ok(false) => Err(Error::BadQueueName(queue.as_str().to_string())),
-            Err(e) => Err(Error::Io(e.into())),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -1705,10 +1727,7 @@ impl NormFS {
         if !mode.readonly && (persist.wal || persist.store) {
             // Two first writes as a/b and a/B both pass the check above; the
             // directory mkdir leaves decides which spelling goes on.
-            self.fs
-                .mkdir_all(&queue.to_fs_path(&self.path))
-                .await
-                .map_err(|e| Error::Io(e.into()))?;
+            self.fs.mkdir_all(&queue.to_fs_path(&self.path)).await?;
             self.refuse_alias(queue).await?;
         }
 
@@ -2093,7 +2112,7 @@ impl NormFS {
         step: u64,
         sender: tokio::sync::mpsc::Sender<ReadEntry>,
     ) -> Result<bool, Error> {
-        refuse_bad_name(queue)?;
+        self.refuse_name(queue).await?;
         log::debug!(target: "normfs",
             "Reading entries - Queue: '{}', Position: {:?}, Limit: {}, Step: {}",
             queue.short(), position, limit, step);
@@ -2109,7 +2128,7 @@ impl NormFS {
     /// and complete the file, then the marker, so a marker on disk implies
     /// the data reached it. Memory is released last.
     pub async fn close_queue(&self, queue: &QueueId) -> Result<(), Error> {
-        refuse_bad_name(queue)?;
+        self.refuse_name(queue).await?;
         self.refuse_reserved(queue)?;
         let _write = self.writes.enter()?;
         let queue_lock = self.queue_init_lock(queue);

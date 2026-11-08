@@ -87,17 +87,23 @@ async fn separator_variants_are_one_queue() {
     fs.close().await.unwrap();
 }
 
-#[cfg(any(windows, target_os = "macos"))]
 #[tokio::test]
 async fn another_spelling_of_an_existing_queue_is_refused() {
     let root = tempfile::TempDir::new().unwrap();
-    let fs = NormFS::new(root.path().join("data"), NormFsSettings::all_active())
+    let data = root.path().join("data");
+    let fs = NormFS::new(data.clone(), NormFsSettings::all_active())
         .await
         .unwrap();
 
     let queue = fs.resolve("cam/Front");
     fs.ensure_queue_exists_for_write(&queue).await.unwrap();
     fs.enqueue(&queue, Bytes::from_static(b"x")).await.unwrap();
+    let dir = queue.to_fs_path(&data);
+    if !dir.parent().unwrap().join("front").exists() {
+        // Names are bytes here; nothing else opens cam/Front.
+        fs.close().await.unwrap();
+        return;
+    }
 
     for name in ["cam/front", "CAM/Front"] {
         let other = fs.resolve(name);
@@ -115,8 +121,35 @@ async fn another_spelling_of_an_existing_queue_is_refused() {
             ),
             "read {name}"
         );
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let read = fs.read(&other, ReadPosition::ShiftFromTail(UintN::zero()), 1, 1, tx);
+        assert!(
+            matches!(read.await, Err(Error::BadQueueName(_))),
+            "direct read {name}"
+        );
+        assert!(
+            matches!(fs.close_queue(&other).await, Err(Error::BadQueueName(_))),
+            "close {name}"
+        );
     }
-    fs.ensure_queue_exists_for_read(&queue).await.unwrap();
+    assert!(
+        !dir.join("closed").exists(),
+        "a refused close must not close cam/Front"
+    );
+
+    fs.close_queue(&queue).await.unwrap();
+    assert!(
+        matches!(
+            fs.ensure_queue_exists_for_write(&fs.resolve("cam/front"))
+                .await,
+            Err(Error::BadQueueName(_))
+        ),
+        "reopen through another spelling"
+    );
+    assert!(
+        dir.join("closed").exists(),
+        "a refused reopen must leave the marker"
+    );
     fs.close().await.unwrap();
 }
 

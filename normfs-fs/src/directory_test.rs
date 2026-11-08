@@ -201,3 +201,30 @@ async fn exact_names_refuse_only_another_spelling_of_what_is_there() {
     );
     assert!(fs.exact_names(temp.path(), "\u{e9}").await.unwrap());
 }
+
+#[cfg(windows)]
+#[tokio::test]
+async fn exact_names_refuse_a_short_name() {
+    let temp = tempfile::tempdir().unwrap();
+    let long = temp.path().join("inference-states");
+    fs::create_dir(&long).unwrap();
+    // cmd prints the 8.3 alias, or the long name where the volume makes none.
+    let out = std::process::Command::new("cmd")
+        .args([
+            "/c",
+            &format!("for %I in ({}) do @echo %~snxI", long.display()),
+        ])
+        .output()
+        .unwrap();
+    let short = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if short.is_empty() || short == "inference-states" {
+        return;
+    }
+    assert!(temp.path().join(&short).exists());
+    assert!(!fs().exact_names(temp.path(), &short).await.unwrap());
+    assert!(
+        fs().exact_names(temp.path(), "inference-states")
+            .await
+            .unwrap()
+    );
+}
