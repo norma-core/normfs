@@ -184,14 +184,15 @@ normfs_fs_sys_is_link(const wchar_t *path, DWORD attrs)
  * as O_NOFOLLOW does not, and truncation waits until the handle is known not
  * to be one. */
 normfs_fs_fd
-normfs_fs_sys_open_create(const char *path, size_t path_len, int mode,
-	uint64_t *ino, int *os_error)
+normfs_fs_sys_open_create(const char *path, size_t path_len, size_t root,
+	int mode, uint64_t *ino, int *os_error)
 {
 	BY_HANDLE_FILE_INFORMATION info;
 	FILE_END_OF_FILE_INFO eof;
 	wchar_t *wide;
 	HANDLE h;
 
+	(void)root;
 	*os_error = 0;
 	*ino = 0u;
 	wide = normfs_fs_sys_wpath(path, path_len, os_error);
@@ -290,13 +291,14 @@ normfs_fs_sys_close(normfs_fs_fd fd, int *os_error)
 }
 
 int
-normfs_fs_sys_file_len(const char *path, size_t path_len, uint64_t *len,
-	int *os_error)
+normfs_fs_sys_file_len(const char *path, size_t path_len, size_t root,
+	uint64_t *len, int *os_error)
 {
 	WIN32_FILE_ATTRIBUTE_DATA data;
 	wchar_t *wide;
 	int link;
 
+	(void)root;
 	*os_error = 0;
 	*len = 0u;
 	wide = normfs_fs_sys_wpath(path, path_len, os_error);
@@ -338,7 +340,7 @@ normfs_fs_sys_file_len(const char *path, size_t path_len, uint64_t *len,
  */
 int
 normfs_fs_sys_rename(const char *src, size_t src_len, const char *dst,
-	size_t dst_len, int *os_error)
+	size_t dst_len, size_t root, int *os_error)
 {
 	FILE_RENAME_INFO *info;
 	wchar_t *wsrc;
@@ -349,6 +351,7 @@ normfs_fs_sys_rename(const char *src, size_t src_len, const char *dst,
 	HANDLE h;
 	int ok;
 
+	(void)root;
 	*os_error = 0;
 	wsrc = normfs_fs_sys_wpath(src, src_len, os_error);
 	if (wsrc == NULL)
@@ -429,12 +432,14 @@ normfs_fs_sys_flush_dir(const wchar_t *dir, int *os_error)
 }
 
 int
-normfs_fs_sys_fsync_parent(const char *path, size_t path_len, int *os_error)
+normfs_fs_sys_fsync_parent(const char *path, size_t path_len, size_t root,
+	int *os_error)
 {
 	wchar_t *wide;
 	wchar_t *cut;
 	int rc;
 
+	(void)root;
 	*os_error = 0;
 	wide = normfs_fs_sys_wpath(path, path_len, os_error);
 	if (wide == NULL)
@@ -478,7 +483,8 @@ normfs_fs_sys_ftruncate(normfs_fs_fd fd, uint64_t len, int *os_error)
  * FAT and exFAT lack the flag and fall back to the plain delete.
  */
 int
-normfs_fs_sys_unlink(const char *path, size_t path_len, int *os_error)
+normfs_fs_sys_unlink(const char *path, size_t path_len, size_t root,
+	int *os_error)
 {
 	FILE_DISPOSITION_INFO plain;
 	wchar_t *wide;
@@ -486,6 +492,7 @@ normfs_fs_sys_unlink(const char *path, size_t path_len, int *os_error)
 	HANDLE h;
 	int ok;
 
+	(void)root;
 	*os_error = 0;
 	wide = normfs_fs_sys_wpath(path, path_len, os_error);
 	if (wide == NULL)
@@ -525,11 +532,13 @@ normfs_fs_sys_unlink(const char *path, size_t path_len, int *os_error)
 }
 
 int
-normfs_fs_sys_sync_dir(const char *path, size_t path_len, int *os_error)
+normfs_fs_sys_sync_dir(const char *path, size_t path_len, size_t root,
+	int *os_error)
 {
 	wchar_t *wide;
 	int rc;
 
+	(void)root;
 	*os_error = 0;
 	wide = normfs_fs_sys_wpath(path, path_len, os_error);
 	if (wide == NULL)
@@ -537,4 +546,32 @@ normfs_fs_sys_sync_dir(const char *path, size_t path_len, int *os_error)
 	rc = normfs_fs_sys_flush_dir(wide, os_error);
 	free(wide);
 	return rc;
+}
+
+/* The walk needs handle-relative opens, which the Windows port does not make
+ * yet; the Rust side passes root 0 here, so these are never reached. */
+normfs_fs_fd
+normfs_fs_sys_open_root(const char *path, size_t len, int *os_error)
+{
+	(void)path;
+	(void)len;
+	*os_error = ERROR_NOT_SUPPORTED;
+	return -1;
+}
+
+normfs_fs_fd
+normfs_fs_sys_open_below(normfs_fs_fd dir, const char *name, size_t len,
+	int *os_error)
+{
+	(void)dir;
+	(void)name;
+	(void)len;
+	*os_error = ERROR_NOT_SUPPORTED;
+	return -1;
+}
+
+void
+normfs_fs_sys_release(normfs_fs_fd fd)
+{
+	(void)CloseHandle((HANDLE)fd);
 }

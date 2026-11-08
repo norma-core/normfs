@@ -17,19 +17,19 @@ fn scans_the_chunked_layout() {
     fs::write(root.join("001").join("000.wal"), b"").unwrap();
 
     assert_eq!(
-        scan_ids(&root, "store", Scan::Min).unwrap(),
+        scan_ids(&root, "store", Scan::Min, None).unwrap(),
         ScanResult::One(UintN::from(0x00000au64))
     );
     assert_eq!(
-        scan_ids(&root, "store", Scan::Max).unwrap(),
+        scan_ids(&root, "store", Scan::Max, None).unwrap(),
         ScanResult::One(UintN::from(0x001000u64))
     );
-    match scan_ids(&root, "store", Scan::All).unwrap() {
+    match scan_ids(&root, "store", Scan::All, None).unwrap() {
         ScanResult::All(ids) => assert_eq!(ids.len(), 3),
         other => panic!("{other:?}"),
     }
     assert_eq!(
-        scan_ids(&root, "wal", Scan::Max).unwrap(),
+        scan_ids(&root, "wal", Scan::Max, None).unwrap(),
         ScanResult::One(UintN::from(0x001000u64))
     );
 }
@@ -38,15 +38,15 @@ fn scans_the_chunked_layout() {
 fn nothing_is_none() {
     let dir = tempfile::tempdir().unwrap();
     assert_eq!(
-        scan_ids(dir.path(), "wal", Scan::Min).unwrap(),
+        scan_ids(dir.path(), "wal", Scan::Min, None).unwrap(),
         ScanResult::None
     );
     assert_eq!(
-        scan_ids(dir.path(), "wal", Scan::All).unwrap(),
+        scan_ids(dir.path(), "wal", Scan::All, None).unwrap(),
         ScanResult::None
     );
     assert_eq!(
-        scan_ids(&dir.path().join("absent"), "wal", Scan::Max).unwrap(),
+        scan_ids(&dir.path().join("absent"), "wal", Scan::Max, None).unwrap(),
         ScanResult::None
     );
 }
@@ -61,7 +61,7 @@ fn test_get_files_ids() {
     fs::write(base_path.join("001/001.store"), "").unwrap();
     fs::write(base_path.join("001/002/003.store"), "").unwrap();
 
-    let result = get_files_ids(base_path, "store").unwrap();
+    let result = get_files_ids(base_path, "store", None).unwrap();
     assert_eq!(
         result,
         vec![
@@ -82,7 +82,7 @@ fn test_find_max_id() {
     fs::write(base_path.join("001/001.store"), "").unwrap();
     fs::write(base_path.join("001/002/003.store"), "").unwrap();
 
-    let result = find_max_id(base_path, "store").unwrap();
+    let result = find_max_id(base_path, "store", None).unwrap();
     assert_eq!(result, UintN::from(0x001002003u64));
 }
 
@@ -96,7 +96,7 @@ fn test_find_min_id() {
     fs::write(base_path.join("001/001.store"), "").unwrap();
     fs::write(base_path.join("001/002/003.store"), "").unwrap();
 
-    let result = find_min_id(base_path, "store").unwrap();
+    let result = find_min_id(base_path, "store", None).unwrap();
     assert_eq!(result, UintN::from(0x00u64));
 }
 
@@ -111,7 +111,7 @@ fn test_find_min_id_large_number() {
     fs::write(base_path.join("00f/fff/fff/fff/fff/ffe.store"), "").unwrap();
     fs::write(base_path.join("00f/fff/fff/fff/fff/fff.store"), "").unwrap();
 
-    let result = find_min_id(base_path, "store").unwrap();
+    let result = find_min_id(base_path, "store", None).unwrap();
     let expected = "18446744073709551614";
     assert_eq!(result.to_string(), expected);
 }
@@ -121,7 +121,7 @@ fn test_find_max_id_empty() {
     let dir = tempdir().unwrap();
     let base_path = dir.path();
 
-    let result = find_max_id(base_path, "store");
+    let result = find_max_id(base_path, "store", None);
     assert!(matches!(result, Err(PathError::NoFilesFound)));
 }
 
@@ -132,7 +132,7 @@ fn test_find_max_id_no_extension_match() {
 
     fs::write(base_path.join("000.other"), "").unwrap();
 
-    let result = find_max_id(base_path, "store");
+    let result = find_max_id(base_path, "store", None);
     assert!(matches!(result, Err(PathError::NoFilesFound)));
 }
 
@@ -143,21 +143,21 @@ fn test_single_file_at_root() {
 
     fs::write(base_path.join("001.store"), "").unwrap();
 
-    let result = find_min_id(base_path, "store").unwrap();
+    let result = find_min_id(base_path, "store", None).unwrap();
     assert_eq!(
         result,
         UintN::from(0x01u64),
         "Single file '001.store' should be ID 0x01"
     );
 
-    let result = find_max_id(base_path, "store").unwrap();
+    let result = find_max_id(base_path, "store", None).unwrap();
     assert_eq!(
         result,
         UintN::from(0x01u64),
         "Single file '001.store' should be ID 0x01"
     );
 
-    let ids = get_files_ids(base_path, "store").unwrap();
+    let ids = get_files_ids(base_path, "store", None).unwrap();
     assert_eq!(
         ids,
         vec![UintN::from(0x01u64)],
@@ -174,21 +174,21 @@ fn test_mixed_hierarchy() {
     fs::create_dir_all(base_path.join("001")).unwrap();
     fs::write(base_path.join("001/000.store"), "").unwrap(); // Should be 0x001000
 
-    let ids = get_files_ids(base_path, "store").unwrap();
+    let ids = get_files_ids(base_path, "store", None).unwrap();
     assert_eq!(
         ids,
         vec![UintN::from(0x01u64), UintN::from(0x001000u64)],
         "Should correctly parse both '001.store' (0x01) and '001/000.store' (0x001000)"
     );
 
-    let min_id = find_min_id(base_path, "store").unwrap();
+    let min_id = find_min_id(base_path, "store", None).unwrap();
     assert_eq!(
         min_id,
         UintN::from(0x01u64),
         "Min should be 0x01 from '001.store'"
     );
 
-    let max_id = find_max_id(base_path, "store").unwrap();
+    let max_id = find_max_id(base_path, "store", None).unwrap();
     assert_eq!(
         max_id,
         UintN::from(0x001000u64),
@@ -210,8 +210,8 @@ fn test_issue_reproduction() {
     fs::create_dir_all(base_path.join("001")).unwrap();
     fs::write(base_path.join("001/000.store"), "").unwrap();
 
-    let min_id = find_min_id(base_path, "store").unwrap();
-    let max_id = find_max_id(base_path, "store").unwrap();
+    let min_id = find_min_id(base_path, "store", None).unwrap();
+    let max_id = find_max_id(base_path, "store", None).unwrap();
 
     assert_eq!(
         min_id,
@@ -241,7 +241,7 @@ fn test_find_max_id_lexicographic_vs_numeric() {
     fs::create_dir_all(base_path.join("001/000")).unwrap();
     fs::write(base_path.join("001/000/000.store"), "").unwrap();
 
-    let max_id = find_max_id(base_path, "store").unwrap();
+    let max_id = find_max_id(base_path, "store", None).unwrap();
 
     assert_eq!(
         max_id,

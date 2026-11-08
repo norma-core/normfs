@@ -22,6 +22,7 @@ unsafe extern "C" {
     fn normfs_fs_sys_open_create(
         path: *const c_char,
         path_len: usize,
+        root: usize,
         mode: c_int,
         ino: *mut u64,
         os_error: *mut c_int,
@@ -38,6 +39,7 @@ unsafe extern "C" {
     fn normfs_fs_sys_file_len(
         path: *const c_char,
         path_len: usize,
+        root: usize,
         len: *mut u64,
         os_error: *mut c_int,
     ) -> c_int;
@@ -46,15 +48,22 @@ unsafe extern "C" {
         src_len: usize,
         dst: *const c_char,
         dst_len: usize,
+        root: usize,
         os_error: *mut c_int,
     ) -> c_int;
     fn normfs_fs_sys_fsync_parent(
         path: *const c_char,
         path_len: usize,
+        root: usize,
         os_error: *mut c_int,
     ) -> c_int;
     fn normfs_fs_sys_ftruncate(fd: SysFd, len: u64, os_error: *mut c_int) -> c_int;
-    fn normfs_fs_sys_unlink(path: *const c_char, path_len: usize, os_error: *mut c_int) -> c_int;
+    fn normfs_fs_sys_unlink(
+        path: *const c_char,
+        path_len: usize,
+        root: usize,
+        os_error: *mut c_int,
+    ) -> c_int;
 }
 
 // Must match the shim's fixed-size iovec array.
@@ -141,7 +150,12 @@ fn run_plan(job: PlanJob) {
             let mut e = Errno::new();
             // SAFETY: tmp is a NUL-terminated path owned by the plan.
             unsafe {
-                normfs_fs_sys_unlink(plan.tmp().as_ptr(), plan.tmp().to_bytes().len(), &mut e.0)
+                normfs_fs_sys_unlink(
+                    plan.tmp().as_ptr(),
+                    plan.tmp().to_bytes().len(),
+                    res.root,
+                    &mut e.0,
+                )
             };
         }
         // The rename replaced the file; a directory sync failing after it does not undo that.
@@ -212,6 +226,7 @@ fn drive(plan: &mut Plan, res: &Resources) -> Result<Driven, FsError> {
                     normfs_fs_sys_open_create(
                         target.as_ptr(),
                         target.to_bytes().len(),
+                        res.root,
                         mode,
                         &mut ino,
                         &mut e.0,
@@ -286,6 +301,7 @@ fn drive(plan: &mut Plan, res: &Resources) -> Result<Driven, FsError> {
                     normfs_fs_sys_file_len(
                         plan.dst().as_ptr(),
                         plan.dst().to_bytes().len(),
+                        res.root,
                         &mut len,
                         &mut e.0,
                     )
@@ -304,6 +320,7 @@ fn drive(plan: &mut Plan, res: &Resources) -> Result<Driven, FsError> {
                         plan.tmp().to_bytes().len(),
                         plan.dst().as_ptr(),
                         plan.dst().to_bytes().len(),
+                        res.root,
                         &mut e.0,
                     )
                 };
@@ -323,7 +340,12 @@ fn drive(plan: &mut Plan, res: &Resources) -> Result<Driven, FsError> {
                 let err = crate::dir_sync::sync_parent(dst, || {
                     // SAFETY: dst is a NUL-terminated path owned by the plan.
                     let rc = unsafe {
-                        normfs_fs_sys_fsync_parent(dst.as_ptr(), dst.to_bytes().len(), &mut e.0)
+                        normfs_fs_sys_fsync_parent(
+                            dst.as_ptr(),
+                            dst.to_bytes().len(),
+                            res.root,
+                            &mut e.0,
+                        )
                     };
                     match rc {
                         0 => 0,
@@ -353,7 +375,12 @@ fn drive(plan: &mut Plan, res: &Resources) -> Result<Driven, FsError> {
             Op::Unlink => {
                 // SAFETY: dst is a NUL-terminated path owned by the plan.
                 let rc = unsafe {
-                    normfs_fs_sys_unlink(plan.dst().as_ptr(), plan.dst().to_bytes().len(), &mut e.0)
+                    normfs_fs_sys_unlink(
+                        plan.dst().as_ptr(),
+                        plan.dst().to_bytes().len(),
+                        res.root,
+                        &mut e.0,
+                    )
                 };
                 match rc {
                     0 => plan.ok(0)?,

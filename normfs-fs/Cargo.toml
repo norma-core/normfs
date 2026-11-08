@@ -20,7 +20,6 @@ libc = "0.2"
 log = { workspace = true }
 tokio = { workspace = true }
 uintn = { workspace = true }
-walkdir = "2.5"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }

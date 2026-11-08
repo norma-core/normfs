@@ -522,7 +522,11 @@ impl NormFS {
         let path = path.as_ref().to_path_buf();
         log::debug!(target: "normfs", "Creating new NormFS at path: {:?}", path);
 
-        let fs = Fs::new(FsConfig::default()).map_err(Error::Io)?;
+        let fs = Fs::new(FsConfig {
+            root: Some(path.clone()),
+            ..FsConfig::default()
+        })
+        .map_err(Error::Io)?;
         fs.mkdir_all(&path).await?;
 
         let crypto_path = path.clone();

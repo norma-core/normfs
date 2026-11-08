@@ -41,9 +41,15 @@ The assumptions are:
   precondition if an earlier process died during directory creation.
 - Nobody outside the serialized operation replaces its names, directories,
   or open inode. Callers must serialize operations sharing a target. A
-  publish's temporary inode must not alias its target. Hard-link and symlink
-  races, mount changes, and arbitrary writes through other descriptors are
+  publish's temporary inode must not alias its target. Hard-link races,
+  mount changes, and arbitrary writes through other descriptors are
   excluded. The alias checks do not make external races safe.
+- With a data directory set, a path below it is opened one directory at a
+  time from the data directory down (`normfs_fs_open_parent`, proved), and
+  no link below it is followed, the last name included. A link placed or
+  swapped in there makes the step fail; it never redirects it. The data
+  directory itself may be a link. This holds on Unix; on Windows paths are
+  still resolved as given.
 
 The syscall shims assume ordinary local regular files and directories. A
 backend can claim these guarantees only if its filesystem and storage stack

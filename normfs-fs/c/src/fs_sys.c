@@ -15,6 +15,7 @@
 #define _DARWIN_C_SOURCE 1
 #endif
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -113,24 +114,63 @@ normfs_fs_sys_fail(int *os_error)
 	return -1;
 }
 
+/* The directory to resolve the last segment from, and that segment. With
+ * root 0 that is the working directory and the whole path. */
+static int
+normfs_fs_sys_at(const char *path, size_t path_len, size_t root, int *dir,
+	const char **name, int *os_error)
+{
+	struct normfs_fs_status st;
+	size_t at = 0u;
+
+	if (root == 0u) {
+		*dir = AT_FDCWD;
+		*name = path;
+		return 0;
+	}
+	st = normfs_fs_open_parent(path, path_len, root, dir, &at);
+	if (st.code != 0) {
+		*os_error = (st.code == 1) ? st.os_error : EINVAL;
+		return -1;
+	}
+	*name = path + at;
+	return 0;
+}
+
+static void
+normfs_fs_sys_done(int dir)
+{
+	if (dir != AT_FDCWD)
+		(void)close(dir);
+}
+
 normfs_fs_fd
-normfs_fs_sys_open_create(const char *path, size_t path_len, int mode,
-	uint64_t *ino, int *os_error)
+normfs_fs_sys_open_create(const char *path, size_t path_len, size_t root,
+	int mode, uint64_t *ino, int *os_error)
 {
 	struct stat st;
 	int flags = O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW;
+	const char *name;
+	int dir;
 	int fd;
 
-	(void)path_len;
 	flags |= (mode == NORMFS_FS_TMP_TRUNC) ? O_TRUNC : O_EXCL;
 	*os_error = 0;
 	*ino = 0u;
+	if (normfs_fs_sys_at(path, path_len, root, &dir, &name, os_error) != 0)
+		return -1;
 	do {
 		errno = 0;
-		fd = open(path, flags, 0644);
+		fd = openat(dir, name, flags, 0644);
 	} while (fd < 0 && errno == EINTR);
-	if (fd < 0)
+	if (fd < 0) {
+		int saved = errno;
+
+		normfs_fs_sys_done(dir);
+		errno = saved;
 		return normfs_fs_sys_fail(os_error);
+	}
+	normfs_fs_sys_done(dir);
 	if (fstat(fd, &st) != 0 || st.st_ino == 0) {
 		int saved = errno;
 
@@ -229,20 +269,34 @@ normfs_fs_sys_close(normfs_fs_fd fd, int *os_error)
 }
 
 int
-normfs_fs_sys_file_len(const char *path, size_t path_len, uint64_t *len,
-	int *os_error)
+normfs_fs_sys_file_len(const char *path, size_t path_len, size_t root,
+	uint64_t *len, int *os_error)
 {
 	struct stat st;
+	const char *name;
+	int dir;
+	int rc;
 
-	(void)path_len;
 	*os_error = 0;
 	*len = 0u;
+	if (normfs_fs_sys_at(path, path_len, root, &dir, &name, os_error) != 0) {
+		if (*os_error != ENOENT)
+			return -1;
+		*os_error = 0;
+		return 0;
+	}
 	errno = 0;
-	if (lstat(path, &st) != 0) {
-		if (errno == ENOENT)
+	rc = fstatat(dir, name, &st, AT_SYMLINK_NOFOLLOW);
+	if (rc != 0) {
+		int saved = errno;
+
+		normfs_fs_sys_done(dir);
+		if (saved == ENOENT)
 			return 0;
+		errno = saved;
 		return normfs_fs_sys_fail(os_error);
 	}
+	normfs_fs_sys_done(dir);
 	if (!S_ISREG(st.st_mode)) {
 		*os_error = EEXIST;
 		return -1;
@@ -253,26 +307,54 @@ normfs_fs_sys_file_len(const char *path, size_t path_len, uint64_t *len,
 
 int
 normfs_fs_sys_rename(const char *src, size_t src_len, const char *dst,
-	size_t dst_len, int *os_error)
+	size_t dst_len, size_t root, int *os_error)
 {
-	(void)src_len;
-	(void)dst_len;
+	const char *from;
+	const char *to;
+	int src_dir;
+	int dst_dir;
+	int rc;
+
 	*os_error = 0;
+	if (normfs_fs_sys_at(src, src_len, root, &src_dir, &from, os_error) != 0)
+		return -1;
+	if (normfs_fs_sys_at(dst, dst_len, root, &dst_dir, &to, os_error) != 0) {
+		normfs_fs_sys_done(src_dir);
+		return -1;
+	}
 	errno = 0;
-	if (rename(src, dst) != 0)
+	rc = renameat(src_dir, from, dst_dir, to);
+	if (rc != 0) {
+		int saved = errno;
+
+		normfs_fs_sys_done(src_dir);
+		normfs_fs_sys_done(dst_dir);
+		errno = saved;
 		return normfs_fs_sys_fail(os_error);
+	}
+	normfs_fs_sys_done(src_dir);
+	normfs_fs_sys_done(dst_dir);
 	return 0;
 }
 
 int
-normfs_fs_sys_fsync_parent(const char *path, size_t path_len, int *os_error)
+normfs_fs_sys_fsync_parent(const char *path, size_t path_len, size_t root,
+	int *os_error)
 {
 	char dir[NORMFS_FS_PATH_MAX];
+	const char *name;
 	size_t cut = path_len;
 	int fd;
 	int rc;
 
 	*os_error = 0;
+	if (root != 0u) {
+		if (normfs_fs_sys_at(path, path_len, root, &fd, &name, os_error) != 0)
+			return -1;
+		rc = normfs_fs_sys_fsync(fd, os_error);
+		(void)close(fd);
+		return rc;
+	}
 	while (cut > 0u && path[cut - 1u] != '/')
 		cut--;
 	if (cut == 0u) {
@@ -310,32 +392,298 @@ normfs_fs_sys_ftruncate(normfs_fs_fd fd, uint64_t len, int *os_error)
 }
 
 int
-normfs_fs_sys_unlink(const char *path, size_t path_len, int *os_error)
+normfs_fs_sys_unlink(const char *path, size_t path_len, size_t root,
+	int *os_error)
 {
-	(void)path_len;
+	const char *name;
+	int dir;
+	int rc;
+
 	*os_error = 0;
+	if (normfs_fs_sys_at(path, path_len, root, &dir, &name, os_error) != 0) {
+		if (*os_error != ENOENT)
+			return -1;
+		*os_error = 0;
+		return 1;
+	}
 	errno = 0;
-	if (unlink(path) != 0) {
-		if (errno == ENOENT)
+	rc = unlinkat(dir, name, 0);
+	if (rc != 0) {
+		int saved = errno;
+
+		normfs_fs_sys_done(dir);
+		if (saved == ENOENT)
 			return 1;
+		errno = saved;
 		return normfs_fs_sys_fail(os_error);
 	}
+	normfs_fs_sys_done(dir);
 	return 0;
 }
 
+/* openat of a directory, refusing a link at the name when walked from root. */
+static int
+normfs_fs_sys_open_dir(const char *path, size_t path_len, size_t root,
+	int *os_error)
+{
+	int flags = O_RDONLY | O_DIRECTORY | O_CLOEXEC;
+	const char *name;
+	int dir;
+	int fd;
+
+	if (root != 0u)
+		flags |= O_NOFOLLOW;
+	if (normfs_fs_sys_at(path, path_len, root, &dir, &name, os_error) != 0)
+		return -1;
+	do {
+		errno = 0;
+		fd = openat(dir, name, flags);
+	} while (fd < 0 && errno == EINTR);
+	if (fd < 0) {
+		int saved = errno;
+
+		normfs_fs_sys_done(dir);
+		errno = saved;
+		return normfs_fs_sys_fail(os_error);
+	}
+	normfs_fs_sys_done(dir);
+	return fd;
+}
+
 int
-normfs_fs_sys_sync_dir(const char *path, size_t path_len, int *os_error)
+normfs_fs_sys_sync_dir(const char *path, size_t path_len, size_t root,
+	int *os_error)
 {
 	int fd;
 	int rc;
-	(void)path_len;
-    *os_error = 0;
-	do {
-		fd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-	} while (fd < 0 && errno == EINTR);
+
+	*os_error = 0;
+	fd = normfs_fs_sys_open_dir(path, path_len, root, os_error);
 	if (fd < 0)
-		return normfs_fs_sys_fail(os_error);
+		return -1;
 	rc = normfs_fs_sys_fsync(fd, os_error);
 	(void)close(fd);
 	return rc;
+}
+
+static int
+normfs_fs_sys_kind(const struct stat *st, uint64_t *len)
+{
+	if (S_ISREG(st->st_mode)) {
+		*len = (uint64_t)st->st_size;
+		return 1;
+	}
+	if (S_ISDIR(st->st_mode))
+		return 2;
+	return 3;
+}
+
+int
+normfs_fs_sys_stat(const char *path, size_t path_len, size_t root,
+	uint64_t *len, int *os_error)
+{
+	struct stat st;
+	const char *name;
+	int dir;
+	int rc;
+
+	*os_error = 0;
+	*len = 0u;
+	if (normfs_fs_sys_at(path, path_len, root, &dir, &name, os_error) != 0) {
+		if (*os_error != ENOENT)
+			return -1;
+		*os_error = 0;
+		return 0;
+	}
+	errno = 0;
+	rc = fstatat(dir, name, &st, AT_SYMLINK_NOFOLLOW);
+	if (rc != 0) {
+		int saved = errno;
+
+		normfs_fs_sys_done(dir);
+		if (saved == ENOENT)
+			return 0;
+		errno = saved;
+		return normfs_fs_sys_fail(os_error);
+	}
+	normfs_fs_sys_done(dir);
+	return normfs_fs_sys_kind(&st, len);
+}
+
+normfs_fs_fd
+normfs_fs_sys_open_file(const char *path, size_t path_len, size_t root,
+	int write, int *os_error)
+{
+	int flags = (write ? O_WRONLY : O_RDONLY) | O_CLOEXEC;
+	const char *name;
+	int dir;
+	int fd;
+
+	*os_error = 0;
+	if (root != 0u)
+		flags |= O_NOFOLLOW;
+	if (normfs_fs_sys_at(path, path_len, root, &dir, &name, os_error) != 0)
+		return -1;
+	do {
+		errno = 0;
+		fd = openat(dir, name, flags);
+	} while (fd < 0 && errno == EINTR);
+	if (fd < 0) {
+		int saved = errno;
+
+		normfs_fs_sys_done(dir);
+		errno = saved;
+		return normfs_fs_sys_fail(os_error);
+	}
+	normfs_fs_sys_done(dir);
+	return fd;
+}
+
+int
+normfs_fs_sys_mkdir(const char *path, size_t path_len, size_t root,
+	int remove, int *os_error)
+{
+	const char *name;
+	int dir;
+	int rc;
+
+	*os_error = 0;
+	if (normfs_fs_sys_at(path, path_len, root, &dir, &name, os_error) != 0)
+		return -1;
+	errno = 0;
+	rc = remove ? unlinkat(dir, name, AT_REMOVEDIR) : mkdirat(dir, name, 0777);
+	if (rc != 0) {
+		int saved = errno;
+
+		normfs_fs_sys_done(dir);
+		errno = saved;
+		return normfs_fs_sys_fail(os_error);
+	}
+	normfs_fs_sys_done(dir);
+	return 0;
+}
+
+void *
+normfs_fs_sys_list_open(const char *path, size_t path_len, size_t root,
+	int *os_error)
+{
+	DIR *d;
+	int fd;
+
+	*os_error = 0;
+	fd = normfs_fs_sys_open_dir(path, path_len, root, os_error);
+	if (fd < 0)
+		return NULL;
+	errno = 0;
+	d = fdopendir(fd);
+	if (d == NULL) {
+		int saved = errno;
+
+		(void)close(fd);
+		errno = saved;
+		(void)normfs_fs_sys_fail(os_error);
+		return NULL;
+	}
+	return d;
+}
+
+int
+normfs_fs_sys_list_next(void *list, char *name, size_t cap, size_t *name_len,
+	int *kind, uint64_t *len, int *os_error)
+{
+	DIR *d = list;
+	struct dirent *ent;
+	struct stat st;
+	size_t n;
+
+	*os_error = 0;
+	for (;;) {
+		errno = 0;
+		ent = readdir(d);
+		if (ent == NULL) {
+			if (errno != 0)
+				return normfs_fs_sys_fail(os_error);
+			return 0;
+		}
+		if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
+			continue;
+		errno = 0;
+		if (fstatat(dirfd(d), ent->d_name, &st, AT_SYMLINK_NOFOLLOW) != 0) {
+			if (errno == ENOENT)
+				continue;
+			return normfs_fs_sys_fail(os_error);
+		}
+		n = strlen(ent->d_name);
+		if (n > cap) {
+			*os_error = ENAMETOOLONG;
+			return -1;
+		}
+		memcpy(name, ent->d_name, n);
+		*name_len = n;
+		*len = 0u;
+		*kind = normfs_fs_sys_kind(&st, len);
+		return 1;
+	}
+}
+
+void
+normfs_fs_sys_list_close(void *list)
+{
+	(void)closedir(list);
+}
+
+/* Copies a segment the caller holds without a NUL. */
+static int
+normfs_fs_sys_terminated(char *buf, const char *path, size_t len, int *os_error)
+{
+	if (len >= NORMFS_FS_PATH_MAX) {
+		*os_error = ENAMETOOLONG;
+		return -1;
+	}
+	memcpy(buf, path, len);
+	buf[len] = '\0';
+	return 0;
+}
+
+normfs_fs_fd
+normfs_fs_sys_open_root(const char *path, size_t len, int *os_error)
+{
+	char buf[NORMFS_FS_PATH_MAX];
+	int fd;
+
+	*os_error = 0;
+	if (normfs_fs_sys_terminated(buf, path, len, os_error) != 0)
+		return -1;
+	do {
+		errno = 0;
+		fd = open(buf, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	} while (fd < 0 && errno == EINTR);
+	if (fd < 0)
+		return normfs_fs_sys_fail(os_error);
+	return fd;
+}
+
+normfs_fs_fd
+normfs_fs_sys_open_below(normfs_fs_fd dir, const char *name, size_t len,
+	int *os_error)
+{
+	char buf[NORMFS_FS_PATH_MAX];
+	int fd;
+
+	*os_error = 0;
+	if (normfs_fs_sys_terminated(buf, name, len, os_error) != 0)
+		return -1;
+	do {
+		errno = 0;
+		fd = openat(dir, buf, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+	} while (fd < 0 && errno == EINTR);
+	if (fd < 0)
+		return normfs_fs_sys_fail(os_error);
+	return fd;
+}
+
+void
+normfs_fs_sys_release(normfs_fs_fd fd)
+{
+	(void)close(fd);
 }
