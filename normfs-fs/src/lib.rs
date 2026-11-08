@@ -429,10 +429,7 @@ impl Fs {
     }
 
     /// Whether every name on the way from `root` to `root/rel` that exists is
-    /// listed in its directory under the bytes `rel` gives it. A filesystem
-    /// that folds case or Unicode form, or a Windows short name, opens one
-    /// directory under several names; this is false for all but the one on
-    /// disk. It checks spelling only, not what the names are or where they lead.
+    /// listed in its directory under exactly the bytes `rel` gives it.
     pub async fn exact_names(&self, root: &Path, rel: &str) -> Result<bool, FsError> {
         let (root, rel) = (root.to_path_buf(), rel.to_string());
         self.run_blocking(move || directory::exact_names(&root, &rel))

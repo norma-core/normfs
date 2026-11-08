@@ -95,8 +95,7 @@ pub struct NormFS {
     settings: NormFsSettings,
     reader_fsm: reader_fsm::ReaderFSM,
     queue_resolver: normfs_types::QueueIdResolver,
-    // Keyed by the lowercased id, so a/b and a/B, which a folding filesystem
-    // gives one directory, start one at a time.
+    // Keyed by the lowercased id, so a/b and a/B start one at a time.
     queue_init_locks: RwLock<HashMap<String, Arc<Mutex<()>>>>,
     /// Queues whose directory exists under exactly their name; that cannot change.
     exact_queues: RwLock<HashSet<QueueId>>,
@@ -934,6 +933,12 @@ impl NormFS {
         };
 
         if queue_exists && has_writer {
+            // Started for read, a memory queue has no directory to hold its
+            // spelling; a write makes it, as a start for write would have.
+            if !self.exact_queues.read().unwrap().contains(queue) {
+                self.fs.mkdir_all(&queue.to_fs_path(&self.path)).await?;
+                self.refuse_alias(queue).await?;
+            }
             return Ok(());
         }
 
@@ -1706,9 +1711,8 @@ impl NormFS {
             .into());
         }
         if !mode.readonly {
-            // Two first writes as a/b and a/B, or under spellings the lock does
-            // not fold, both pass the check above; the directory mkdir leaves
-            // decides which goes on, and from then on the answer is cached.
+            // Spellings the lock does not fold can both pass the check above;
+            // the directory mkdir leaves decides which goes on.
             self.fs.mkdir_all(&queue.to_fs_path(&self.path)).await?;
             self.refuse_alias(queue).await?;
         }

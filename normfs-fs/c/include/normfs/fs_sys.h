@@ -346,8 +346,7 @@ int normfs_fs_sys_sync_dir(const char *path, size_t path_len, int *os_error);
 
 /* readdir(3) of dir, which need not be NUL-terminated: 1 when an entry is
  * named exactly name's bytes, 0 when none is or dir is absent, -1 on any
- * other failure. A folding filesystem opens a/B for a/b; only the listing
- * tells them apart. */
+ * other failure. */
 /*@ requires 0 < dir_len < NORMFS_FS_PATH_MAX && 0 < name_len < NORMFS_FS_PATH_MAX;
     requires \valid_read(dir + (0 .. dir_len - 1));
     requires \valid_read(name + (0 .. name_len - 1));

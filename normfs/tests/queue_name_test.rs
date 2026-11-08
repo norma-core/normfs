@@ -162,27 +162,37 @@ fn folds(data: &std::path::Path) -> bool {
 
 #[tokio::test]
 async fn two_first_writes_under_two_spellings_leave_one_queue() {
-    let root = tempfile::TempDir::new().unwrap();
-    let data = root.path().join("data");
-    let fs = NormFS::new(data.clone(), NormFsSettings::all_active())
-        .await
-        .unwrap();
-    if !folds(&data) {
-        fs.close().await.unwrap();
-        return;
-    }
+    // The second pair is composed and decomposed é, which the start lock does not fold.
+    for (one, two) in [
+        ("cam/Front", "cam/front"),
+        ("cam/caf\u{e9}", "cam/cafe\u{301}"),
+    ] {
+        let root = tempfile::TempDir::new().unwrap();
+        let data = root.path().join("data");
+        let fs = NormFS::new(data.clone(), NormFsSettings::all_active())
+            .await
+            .unwrap();
+        let (one, two) = (fs.resolve(one), fs.resolve(two));
+        let probe = one.to_fs_path(&data);
+        std::fs::create_dir_all(&probe).unwrap();
+        let folds = two.to_fs_path(&data).exists();
+        std::fs::remove_dir(&probe).unwrap();
+        if !folds {
+            fs.close().await.unwrap();
+            continue;
+        }
 
-    let (upper, lower) = (fs.resolve("cam/Front"), fs.resolve("cam/front"));
-    let (a, b) = tokio::join!(
-        fs.ensure_queue_exists_for_write(&upper),
-        fs.ensure_queue_exists_for_write(&lower)
-    );
-    assert!(
-        a.is_ok() != b.is_ok(),
-        "exactly one spelling may start: {a:?} {b:?}"
-    );
-    assert!(matches!(a.err().or(b.err()), Some(Error::BadQueueName(_))));
-    fs.close().await.unwrap();
+        let (a, b) = tokio::join!(
+            fs.ensure_queue_exists_for_write(&one),
+            fs.ensure_queue_exists_for_write(&two)
+        );
+        assert!(
+            a.is_ok() != b.is_ok(),
+            "exactly one spelling may start: {a:?} {b:?}"
+        );
+        assert!(matches!(a.err().or(b.err()), Some(Error::BadQueueName(_))));
+        fs.close().await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -243,6 +253,14 @@ async fn a_memory_queue_is_held_to_its_spelling_too() {
     fs.ensure_queue_exists_for_write(&queue).await.unwrap();
     fs.enqueue(&queue, Bytes::from_static(b"x")).await.unwrap();
     let other = fs.resolve("mem/q");
+    // Started for read first, then written: the write is what fixes the spelling.
+    let first_read = fs.resolve("mem/R");
+    fs.ensure_queue_exists_for_read(&first_read).await.unwrap();
+    fs.ensure_queue_exists_for_write(&first_read).await.unwrap();
+    assert!(matches!(
+        fs.ensure_queue_exists_for_write(&fs.resolve("mem/r")).await,
+        Err(Error::BadQueueName(_))
+    ));
     assert!(matches!(
         fs.ensure_queue_exists_for_write(&other).await,
         Err(Error::BadQueueName(_))
