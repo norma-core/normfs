@@ -24,6 +24,9 @@ async fn a_queue_name_that_leaves_the_data_directory_is_refused() {
         "a/WAL/b",
         "/tmp/x",
         "/TMP/x",
+        "//tmp/x",
+        "parent//wal",
+        "//.memory_pointers",
         "/.memory_pointers",
         "/",
     ] {
