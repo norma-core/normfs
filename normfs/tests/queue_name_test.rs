@@ -338,6 +338,27 @@ async fn a_directory_normfs_made_is_not_a_queue_to_close() {
     fs.close().await.unwrap();
 }
 
+#[tokio::test]
+async fn a_memory_queue_reopened_and_restarted_can_still_be_closed() {
+    let root = tempfile::TempDir::new().unwrap();
+    let data = root.path().join("data");
+    let settings = || NormFsSettings {
+        queue_settings: QueueSettings::all_active().with_default_persist(Persist::MEMORY),
+        ..NormFsSettings::all_active()
+    };
+    let fs = NormFS::new(data.clone(), settings()).await.unwrap();
+    let queue = fs.resolve("m");
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    fs.enqueue(&queue, Bytes::from_static(b"x")).await.unwrap();
+    fs.close_queue(&queue).await.unwrap();
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    fs.close().await.unwrap();
+
+    let fs = NormFS::new(data, settings()).await.unwrap();
+    fs.close_queue(&fs.resolve("m")).await.unwrap();
+    fs.close().await.unwrap();
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn a_read_only_data_directory_still_opens() {

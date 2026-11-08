@@ -562,16 +562,9 @@ impl NormFS {
         let queue_resolver = normfs_types::QueueIdResolver::new(instance_id);
         let (system, system_rx) = system::SystemQueue::new(queue_resolver.resolve(SYSTEM_QUEUE));
         // NormFS's own names go on disk before any request can take another
-        // spelling of them. A data directory opened read-only takes no request
-        // that could, so it still opens.
+        // spelling of them. Where it cannot make them, read-only or full, no
+        // request can either, so the start goes on.
         if let Err(e) = fs.mkdir_all(&system.queue().to_fs_path(&path)).await {
-            let e = std::io::Error::from(e);
-            if !matches!(
-                e.kind(),
-                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
-            ) {
-                return Err(e.into());
-            }
             log::warn!(target: "normfs", "Cannot make the system queue's directory in {path:?}: {e}");
         }
         let events = if settings.system_queue {
@@ -993,8 +986,12 @@ impl NormFS {
     }
 
     /// A directory alone is no queue: NormFS makes one for each written memory
-    /// queue and for its own names, and a parent holds its children's.
-    async fn has_queue_data(&self, dir: &std::path::Path) -> Result<bool, Error> {
+    /// queue and for its own names, and a parent holds its children's. A memory
+    /// or cloud queue keeps its ids in the pointers file, not in its directory.
+    async fn has_queue_data(&self, queue: &QueueId, dir: &std::path::Path) -> Result<bool, Error> {
+        if self.memory_pointers.last_id(queue).is_some() {
+            return Ok(true);
+        }
         for child in ["wal", "store", "closed"] {
             if self.fs.stat(&dir.join(child)).await?.is_some() {
                 return Ok(true);
@@ -2180,7 +2177,7 @@ impl NormFS {
         // no half-closed state. An unknown name is more likely a typo than
         // an intent, and "closed" is a reserved child name the same way
         // wal/ and store/ already are.
-        if self.mem.get_last_id(queue).is_none() && !self.has_queue_data(&dir).await? {
+        if self.mem.get_last_id(queue).is_none() && !self.has_queue_data(queue, &dir).await? {
             return Err(Error::QueueNotFound);
         }
 
