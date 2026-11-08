@@ -560,6 +560,8 @@ impl NormFS {
 
         let queue_resolver = normfs_types::QueueIdResolver::new(instance_id);
         let (system, system_rx) = system::SystemQueue::new(queue_resolver.resolve(SYSTEM_QUEUE));
+        // NormFS's own names go on disk before any request can take another spelling of them.
+        fs.mkdir_all(&system.queue().to_fs_path(&path)).await?;
         let events = if settings.system_queue {
             system.sink()
         } else {

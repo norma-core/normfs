@@ -286,6 +286,41 @@ async fn a_memory_queue_is_held_to_its_spelling_too() {
     fs.close().await.unwrap();
 }
 
+#[tokio::test]
+async fn normfs_own_names_cannot_be_taken_under_another_spelling() {
+    let root = tempfile::TempDir::new().unwrap();
+    let data = root.path().join("data");
+    let quiet = || NormFsSettings {
+        system_queue: false,
+        ..NormFsSettings::all_active()
+    };
+    let fs = NormFS::new(data.clone(), quiet()).await.unwrap();
+    if !folds(&data) {
+        fs.close().await.unwrap();
+        return;
+    }
+
+    let upper = format!("/{}/x", fs.get_instance_id().to_uppercase());
+    for name in [upper.as_str(), "normfs/System", "NORMFS/system"] {
+        assert!(
+            matches!(
+                fs.ensure_queue_exists_for_write(&fs.resolve(name)).await,
+                Err(Error::BadQueueName(_))
+            ),
+            "{name}"
+        );
+    }
+    fs.ensure_queue_exists_for_write(&fs.resolve("y"))
+        .await
+        .unwrap();
+    fs.close().await.unwrap();
+
+    let fs = NormFS::new(data, NormFsSettings::all_active())
+        .await
+        .unwrap();
+    fs.close().await.unwrap();
+}
+
 #[cfg(windows)]
 #[tokio::test]
 async fn a_windows_drive_or_unc_queue_name_is_refused() {

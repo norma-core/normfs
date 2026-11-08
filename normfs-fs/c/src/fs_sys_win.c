@@ -633,7 +633,7 @@ normfs_fs_sys_exists(const char *path, size_t path_len, int *os_error)
 	free(wide);
 	if (attrs != INVALID_FILE_ATTRIBUTES)
 		return 1;
-	if (normfs_fs_sys_absent(e))
+	if (normfs_fs_sys_absent(e) || e == ERROR_DIRECTORY)
 		return 0;
 	*os_error = (e > 0u && e <= 0x7FFFFFFFu) ? (int)e : ERROR_GEN_FAILURE;
 	return -1;
