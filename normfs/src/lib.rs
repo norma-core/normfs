@@ -987,7 +987,8 @@ impl NormFS {
 
     /// A directory alone is no queue: NormFS makes one for each written memory
     /// queue and for its own names, and a parent holds its children's. A memory
-    /// or cloud queue keeps its ids in the pointers file, not in its directory.
+    /// or cloud queue keeps its ids in the pointers file, so one written in an
+    /// earlier life closes; before, only once a close had made its directory.
     async fn has_queue_data(&self, queue: &QueueId, dir: &std::path::Path) -> Result<bool, Error> {
         if self.memory_pointers.last_id(queue).is_some() {
             return Ok(true);
