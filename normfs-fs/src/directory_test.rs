@@ -191,4 +191,13 @@ async fn exact_names_refuse_only_another_spelling_of_what_is_there() {
     let folds = temp.path().join("A").exists();
     assert_eq!(fs.exact_names(temp.path(), "A/b").await.unwrap(), !folds);
     assert_eq!(fs.exact_names(temp.path(), "a/B/c").await.unwrap(), !folds);
+
+    fs::create_dir(temp.path().join("\u{e9}")).unwrap();
+    let decomposed = "e\u{301}";
+    let folds = temp.path().join(decomposed).exists();
+    assert_eq!(
+        fs.exact_names(temp.path(), decomposed).await.unwrap(),
+        !folds
+    );
+    assert!(fs.exact_names(temp.path(), "\u{e9}").await.unwrap());
 }
