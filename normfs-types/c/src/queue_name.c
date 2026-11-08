@@ -101,8 +101,15 @@ normfs_queue_name_canonical(const uint8_t *name, size_t len, uint8_t *out)
         (s[i] == '.' ||
          normfs_queue_name_word(s, n, i, (uint8_t *)normfs_queue_name_tmp, 3))));
 
+    // The long s and the s-t ligatures, U+017F, U+FB05 and U+FB06: folding
+    // filesystems read them as s and st, so ſtore opens store.
+    predicate normfs_queue_name_long_s(uint8_t *s, integer n, integer i) =
+      (s[i] == 0xC5 && i + 1 < n && s[i + 1] == 0xBF) ||
+      (s[i] == 0xEF && i + 2 < n && s[i + 1] == 0xAC && (s[i + 2] == 0x85 || s[i + 2] == 0x86));
+
     predicate normfs_queue_name_bad_at(uint8_t *s, integer n, integer i, integer windows) =
       normfs_queue_name_bad_byte(s[i], windows) ||
+      normfs_queue_name_long_s(s, n, i) ||
       normfs_queue_name_dots(s, n, i) ||
       normfs_queue_name_win_tail(s, n, i, windows) ||
       normfs_queue_name_reserved(s, n, i);
@@ -164,6 +171,19 @@ normfs_queue_name_ok(const uint8_t *name, size_t len, int windows)
 		uint8_t c = name[i];
 		int end = i + 1u == len || name[i + 1u] == '/';
 
+		if (c == 0xC5u && i + 1u < len && name[i + 1u] == 0xBFu) {
+			/*@ assert normfs_queue_name_long_s(name, len, i); */
+			return 0;
+		}
+		if (c == 0xEFu && len - i > 2u) {
+			uint8_t b = name[i + 1u];
+			uint8_t d = name[i + 2u];
+
+			if (b == 0xACu && (d == 0x85u || d == 0x86u)) {
+				/*@ assert normfs_queue_name_long_s(name, len, i); */
+				return 0;
+			}
+		}
 		if (c == 0u || (windows != 0 && (c == '\\' || c == ':'))) {
 			/*@ assert normfs_queue_name_bad_at(name, len, i, windows); */
 			return 0;
