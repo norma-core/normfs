@@ -1017,9 +1017,15 @@ impl NormFS {
                 Ok(())
             }
             Ok(false) => {
-                log::warn!(target: "normfs",
-                    "Queue '{}' names a directory that is on disk under another spelling; refused. A directory left so by an older version is renamed by hand.",
-                    queue.as_str());
+                // Refused again on every request, so warned of once per process.
+                static WARNED: AtomicBool = AtomicBool::new(false);
+                if WARNED.swap(true, Ordering::Relaxed) {
+                    log::debug!(target: "normfs", "Queue '{}' refused: another spelling is on disk", queue.as_str());
+                } else {
+                    log::warn!(target: "normfs",
+                        "Queue '{}' names a directory that is on disk under another spelling; refused. A directory left so by an older version is renamed by hand.",
+                        queue.as_str());
+                }
                 Err(Error::BadQueueName(queue.as_str().to_string()))
             }
             Err(e) => Err(e.into()),
