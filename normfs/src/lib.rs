@@ -2156,6 +2156,11 @@ impl NormFS {
             )));
         }
 
+        // The marker goes in this directory: made now and checked again, so a
+        // spelling the lock does not fold cannot have made it meanwhile.
+        self.fs.mkdir_all(&dir).await?;
+        self.refuse_alias(queue).await?;
+
         // Waits for the in-flight append: after this, everything accepted
         // is placed and nothing more can be.
         self.mem.begin_close(queue).await;
@@ -2181,7 +2186,6 @@ impl NormFS {
         }
 
         // The marker and its directory entry, both synced: a CREATE plan.
-        self.fs.mkdir_all(&dir).await?;
         self.fs
             .create_durable(&dir.join("closed"), Runs::default(), TmpMode::Trunc, true)
             .await?;

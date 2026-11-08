@@ -540,20 +540,28 @@ normfs_fs_sys_sync_dir(const char *path, size_t path_len, int *os_error)
 }
 
 /* FindFirstFile lists long names, so a short name such as INFERE~1, which
- * opens what it stands for, is not among them. */
+ * opens what it stands for, is not among them. Compared as UTF-16, so an
+ * entry with no UTF-8 form cannot fail the listing for its siblings. */
 int
 normfs_fs_sys_dir_lists(const char *dir, size_t dir_len, const char *name,
 	size_t name_len, int *os_error)
 {
 	WIN32_FIND_DATAW entry;
-	char utf8[MAX_PATH * 3];
+	wchar_t want[MAX_PATH];
 	wchar_t *wide;
 	wchar_t *pattern;
 	size_t n;
 	HANDLE h;
+	int want_len;
 	int found = 0;
 
 	*os_error = 0;
+	want_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, name, (int)name_len, want,
+	    MAX_PATH - 1);
+	if (want_len <= 0) {
+		*os_error = ERROR_INVALID_NAME;
+		return -1;
+	}
 	wide = normfs_fs_sys_wpath(dir, dir_len, os_error);
 	if (wide == NULL)
 		return -1;
@@ -582,16 +590,8 @@ normfs_fs_sys_dir_lists(const char *dir, size_t dir_len, const char *name,
 		return -1;
 	}
 	do {
-		int m = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, entry.cFileName, -1, utf8,
-		    (int)sizeof(utf8), NULL, NULL);
-
-		/* An entry that cannot be read is not evidence the name is absent. */
-		if (m <= 0) {
-			(void)normfs_fs_sys_fail(os_error);
-			(void)FindClose(h);
-			return -1;
-		}
-		if ((size_t)(m - 1) == name_len && memcmp(utf8, name, name_len) == 0) {
+		if (wcslen(entry.cFileName) == (size_t)want_len &&
+		    memcmp(entry.cFileName, want, (size_t)want_len * sizeof(wchar_t)) == 0) {
 			found = 1;
 			break;
 		}

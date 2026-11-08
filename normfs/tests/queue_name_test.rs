@@ -186,6 +186,46 @@ async fn two_first_writes_under_two_spellings_leave_one_queue() {
 }
 
 #[tokio::test]
+async fn closing_two_spellings_started_for_read_marks_one_directory() {
+    // The second pair is composed and decomposed é, which the start lock does not fold.
+    for (one, two) in [
+        ("cam/Front", "cam/front"),
+        ("cam/caf\u{e9}", "cam/cafe\u{301}"),
+    ] {
+        let root = tempfile::TempDir::new().unwrap();
+        let data = root.path().join("data");
+        let fs = NormFS::new(data.clone(), NormFsSettings::all_active())
+            .await
+            .unwrap();
+        let (one, two) = (fs.resolve(one), fs.resolve(two));
+        let probe = one.to_fs_path(&data);
+        std::fs::create_dir_all(&probe).unwrap();
+        let folds = two.to_fs_path(&data).exists();
+        std::fs::remove_dir(&probe).unwrap();
+        if !folds {
+            fs.close().await.unwrap();
+            continue;
+        }
+
+        // Started for read, neither has a directory yet, so both are let in.
+        fs.ensure_queue_exists_for_read(&one).await.unwrap();
+        fs.ensure_queue_exists_for_read(&two).await.unwrap();
+
+        let (a, b) = tokio::join!(fs.close_queue(&one), fs.close_queue(&two));
+        assert!(
+            a.is_ok() != b.is_ok(),
+            "exactly one close may mark: {a:?} {b:?}"
+        );
+        let names: Vec<_> = std::fs::read_dir(probe.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names.len(), 1, "{names:?}");
+        fs.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn a_memory_queue_is_held_to_its_spelling_too() {
     let root = tempfile::TempDir::new().unwrap();
     let data = root.path().join("data");
