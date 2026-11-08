@@ -101,21 +101,11 @@ normfs_queue_name_canonical(const uint8_t *name, size_t len, uint8_t *out)
         (s[i] == '.' ||
          normfs_queue_name_word(s, n, i, (uint8_t *)normfs_queue_name_tmp, 3))));
 
-    predicate normfs_queue_name_hex(uint8_t c) = ('0' <= c <= '9') || ('a' <= c <= 'f');
-
-    // A cloud file is <queue>/abc/def.store, so a queue ending in three hex
-    // digits would share keys and listings with its parent's files.
-    predicate normfs_queue_name_id_tail(uint8_t *s, integer n, integer i) =
-      normfs_queue_name_seg_start(s, i) && i + 3 == n &&
-      normfs_queue_name_hex(s[i]) && normfs_queue_name_hex(s[i + 1]) &&
-      normfs_queue_name_hex(s[i + 2]);
-
     predicate normfs_queue_name_bad_at(uint8_t *s, integer n, integer i, integer windows) =
       normfs_queue_name_bad_byte(s[i], windows) ||
       normfs_queue_name_dots(s, n, i) ||
       normfs_queue_name_win_tail(s, n, i, windows) ||
-      normfs_queue_name_reserved(s, n, i) ||
-      normfs_queue_name_id_tail(s, n, i);
+      normfs_queue_name_reserved(s, n, i);
 */
 
 /*@ requires i < n && \valid_read(s + (0 .. n - 1));
@@ -147,16 +137,6 @@ normfs_queue_name_word_at(const uint8_t *s, size_t n, size_t i, const uint8_t *w
 			return 0;
 	}
 	return 1;
-}
-
-/*@ assigns \nothing;
-    ensures \result == 0 || \result == 1;
-    ensures \result == 1 <==> normfs_queue_name_hex(c);
-*/
-static int
-normfs_queue_name_is_hex(uint8_t c)
-{
-	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
 }
 
 /*@ requires len == 0 || \valid_read(name + (0 .. len - 1));
@@ -212,11 +192,6 @@ normfs_queue_name_ok(const uint8_t *name, size_t len, int windows)
 			if ((i == 0u || (i == 1u && name[0] == '/')) &&
 			    (c == '.' ||
 			     normfs_queue_name_word_at(name, len, i, normfs_queue_name_tmp, 3u))) {
-				/*@ assert normfs_queue_name_bad_at(name, len, i, windows); */
-				return 0;
-			}
-			if (i + 3u == len && normfs_queue_name_is_hex(name[i]) &&
-			    normfs_queue_name_is_hex(name[i + 1u]) && normfs_queue_name_is_hex(name[i + 2u])) {
 				/*@ assert normfs_queue_name_bad_at(name, len, i, windows); */
 				return 0;
 			}

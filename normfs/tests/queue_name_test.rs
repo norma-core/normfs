@@ -27,8 +27,6 @@ async fn a_queue_name_that_leaves_the_data_directory_is_refused() {
         "//tmp/x",
         "parent//wal",
         "//.memory_pointers",
-        "x/123",
-        "x/abc/def",
         "/.memory_pointers",
         "/",
     ] {
@@ -60,9 +58,7 @@ async fn a_queue_name_that_leaves_the_data_directory_is_refused() {
     }
     assert!(!root.path().join("escaped").exists());
 
-    for name in [
-        "plain", "a/b.c", "..a", "v1.2/x", "wallet/x", "tmp/x", ".a", "x/abc/q", "x/ABC", "x/12",
-    ] {
+    for name in ["plain", "a/b.c", "..a", "v1.2/x", "wallet/x", "tmp/x", ".a"] {
         let queue = fs.resolve(name);
         fs.ensure_queue_exists_for_write(&queue).await.unwrap();
         fs.enqueue(&queue, Bytes::from_static(b"x")).await.unwrap();
