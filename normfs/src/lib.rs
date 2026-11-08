@@ -96,7 +96,8 @@ pub struct NormFS {
     reader_fsm: reader_fsm::ReaderFSM,
     queue_resolver: normfs_types::QueueIdResolver,
     queue_init_locks: RwLock<HashMap<QueueId, Arc<Mutex<()>>>>,
-    /// Queues whose directory exists under exactly their name; that cannot change.
+    /// Queues whose directory exists under exactly their name. Never dropped,
+    /// since NormFS removes no queue directory; a delete must remove its entry.
     exact_queues: RwLock<HashSet<QueueId>>,
     /// The seed was made by this run: no earlier life wrote under this
     /// instance's id.
