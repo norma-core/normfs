@@ -1,7 +1,9 @@
 //! Path operations that follow no link below the data directory. On Windows
 //! they still resolve the path as given.
 
-use std::ffi::{CString, OsString};
+#[cfg(unix)]
+use std::ffi::CString;
+use std::ffi::OsString;
 use std::fs::File;
 use std::io;
 use std::path::Path;
@@ -77,13 +79,27 @@ pub(crate) fn root_len(root: Option<&Path>, path: &Path) -> io::Result<usize> {
     }
 }
 
-/// A path the way the shims take it.
+/// A path the way the shims take it. Windows walks nothing yet and keeps the
+/// path as std takes it.
 pub(crate) struct At {
+    #[cfg(unix)]
     path: CString,
+    #[cfg(windows)]
+    path: std::path::PathBuf,
     root: usize,
 }
 
 impl At {
+    #[cfg(windows)]
+    pub(crate) fn new(root: Option<&Path>, path: &Path) -> io::Result<At> {
+        let root = root_len(root, path)?;
+        Ok(At {
+            path: path.to_path_buf(),
+            root,
+        })
+    }
+
+    #[cfg(unix)]
     pub(crate) fn new(root: Option<&Path>, path: &Path) -> io::Result<At> {
         let root = root_len(root, path)?;
         let mut bytes = crate::os::path_bytes(path).ok_or_else(|| {
@@ -105,9 +121,10 @@ impl At {
 
     #[cfg(windows)]
     pub(crate) fn path(&self) -> &Path {
-        crate::os::path_of(&self.path)
+        &self.path
     }
 
+    #[cfg(unix)]
     pub(crate) fn raw(&self) -> (*const std::os::raw::c_char, usize, usize) {
         (self.path.as_ptr(), self.path.as_bytes().len(), self.root)
     }

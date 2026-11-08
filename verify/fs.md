@@ -43,8 +43,8 @@ The assumptions are:
   or open inode. Callers must serialize operations sharing a target. A
   publish's temporary inode must not alias its target. Hard-link and symlink
   races, mount changes, and arbitrary writes through other descriptors are
-  excluded, except links below a data directory on Unix (below). The alias
-  checks do not make external races safe.
+  excluded, except links below a data directory for the operations `Fs`
+  performs on Unix (below). The alias checks do not make external races safe.
 - With a data directory set, a path below it is opened one directory at a
   time from the data directory down. `normfs_fs_open_parent` is proved to
   refuse exactly the paths that are not the data directory, '/' and
@@ -56,7 +56,8 @@ The assumptions are:
   `tests/test_fs.c`. A link placed or swapped in below the data directory
   then fails the step instead of redirecting it; the data directory itself
   may be a link. This holds on Unix; on Windows paths are still resolved as
-  given.
+  given, and the disk monitor and the crypto seed open their paths in their
+  own C without the walk.
 
 The syscall shims assume ordinary local regular files and directories. A
 backend can claim these guarantees only if its filesystem and storage stack
@@ -92,7 +93,8 @@ failed tail, since ftruncate alone is not a durability barrier.
 `normfs_fs_sync_created_dir` proves monotone retry stages: success requires
 completion of both the new-directory sync and the parent sync. Failure retains
 which barrier remains. The Rust directory coordinator serializes creation of the
-same directory across Fs instances and retains pending stages until success. Its registry lock excludes
+same directory across Fs instances that share a data directory, or both
+have none, and retains pending stages until success. Its registry lock excludes
 mkdir and fsync; unrelated directories have separate completion locks. Existing
 directories avoid canonicalization when the pending registry is empty. Its path
 traversal and retention are tested obligations outside WP. File operations sync only their

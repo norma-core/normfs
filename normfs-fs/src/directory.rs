@@ -136,7 +136,20 @@ fn finish(path: &Path, root: Option<&Path>, entry: Arc<Mutex<c_int>>) -> io::Res
 }
 
 fn sync_created(at: &At, stage: &mut c_int) -> io::Result<()> {
+    #[cfg(unix)]
     let (path, len, root) = at.raw();
+    #[cfg(windows)]
+    let owned = {
+        let bytes = crate::os::path_bytes(at.path()).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "path is not valid UTF-8")
+        })?;
+        std::ffi::CString::new(bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?
+    };
+    #[cfg(windows)]
+    let (path, len, root) = (owned.as_ptr(), owned.as_bytes().len(), 0);
+    if len >= 4096 {
+        return Err(io::Error::from_raw_os_error(crate::os::ENAMETOOLONG));
+    }
     // SAFETY: the owned NUL-terminated path is bounded and disjoint from the retained stage.
     let status = unsafe { normfs_fs_sync_created_dir(path, len, root, stage) };
     match status.code {
