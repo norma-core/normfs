@@ -321,6 +321,45 @@ async fn normfs_own_names_cannot_be_taken_under_another_spelling() {
     fs.close().await.unwrap();
 }
 
+#[tokio::test]
+async fn a_directory_normfs_made_is_not_a_queue_to_close() {
+    let root = tempfile::TempDir::new().unwrap();
+    let settings = NormFsSettings {
+        system_queue: false,
+        ..NormFsSettings::all_active()
+    };
+    let fs = NormFS::new(root.path().join("data"), settings)
+        .await
+        .unwrap();
+    assert!(matches!(
+        fs.close_queue(&fs.resolve("normfs")).await,
+        Err(Error::QueueNotFound)
+    ));
+    fs.close().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_read_only_data_directory_still_opens() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::TempDir::new().unwrap();
+    let data = root.path().join("data");
+    let quiet = || NormFsSettings {
+        system_queue: false,
+        ..NormFsSettings::all_active()
+    };
+    let fs = NormFS::new(data.clone(), quiet()).await.unwrap();
+    let instance = data.join(fs.get_instance_id());
+    fs.close().await.unwrap();
+    std::fs::remove_dir_all(instance.join("normfs")).unwrap();
+    std::fs::set_permissions(&instance, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+    let opened = NormFS::new(data, quiet()).await;
+    std::fs::set_permissions(&instance, std::fs::Permissions::from_mode(0o700)).unwrap();
+    opened.unwrap().close().await.unwrap();
+}
+
 #[cfg(windows)]
 #[tokio::test]
 async fn a_windows_drive_or_unc_queue_name_is_refused() {

@@ -561,8 +561,19 @@ impl NormFS {
 
         let queue_resolver = normfs_types::QueueIdResolver::new(instance_id);
         let (system, system_rx) = system::SystemQueue::new(queue_resolver.resolve(SYSTEM_QUEUE));
-        // NormFS's own names go on disk before any request can take another spelling of them.
-        fs.mkdir_all(&system.queue().to_fs_path(&path)).await?;
+        // NormFS's own names go on disk before any request can take another
+        // spelling of them. A data directory opened read-only takes no request
+        // that could, so it still opens.
+        if let Err(e) = fs.mkdir_all(&system.queue().to_fs_path(&path)).await {
+            let e = std::io::Error::from(e);
+            if !matches!(
+                e.kind(),
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+            ) {
+                return Err(e.into());
+            }
+            log::warn!(target: "normfs", "Cannot make the system queue's directory in {path:?}: {e}");
+        }
         let events = if settings.system_queue {
             system.sink()
         } else {
@@ -981,6 +992,17 @@ impl NormFS {
         self.refuse_alias(queue).await
     }
 
+    /// A directory alone is no queue: NormFS makes one for each written memory
+    /// queue and for its own names, and a parent holds its children's.
+    async fn has_queue_data(&self, dir: &std::path::Path) -> Result<bool, Error> {
+        for child in ["wal", "store", "closed"] {
+            if self.fs.stat(&dir.join(child)).await?.is_some() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     async fn refuse_alias(&self, queue: &QueueId) -> Result<(), Error> {
         if self.exact_queues.read().unwrap().contains(queue) {
             return Ok(());
@@ -997,7 +1019,12 @@ impl NormFS {
                 }
                 Ok(())
             }
-            Ok(false) => Err(Error::BadQueueName(queue.as_str().to_string())),
+            Ok(false) => {
+                log::warn!(target: "normfs",
+                    "Queue '{}' names a directory that is on disk under another spelling; refused. A directory left so by an older version is renamed by hand.",
+                    queue.as_str());
+                Err(Error::BadQueueName(queue.as_str().to_string()))
+            }
             Err(e) => Err(e.into()),
         }
     }
@@ -2153,7 +2180,7 @@ impl NormFS {
         // no half-closed state. An unknown name is more likely a typo than
         // an intent, and "closed" is a reserved child name the same way
         // wal/ and store/ already are.
-        if self.mem.get_last_id(queue).is_none() && self.fs.stat(&dir).await?.is_none() {
+        if self.mem.get_last_id(queue).is_none() && !self.has_queue_data(&dir).await? {
             return Err(Error::QueueNotFound);
         }
 
