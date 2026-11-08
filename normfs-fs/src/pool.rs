@@ -58,7 +58,7 @@ unsafe extern "C" {
         os_error: *mut c_int,
     ) -> c_int;
     fn normfs_fs_sys_ftruncate(fd: SysFd, len: u64, os_error: *mut c_int) -> c_int;
-    fn normfs_fs_sys_unlink(
+    pub(crate) fn normfs_fs_sys_unlink(
         path: *const c_char,
         path_len: usize,
         root: usize,

@@ -480,7 +480,7 @@ normfs_fs_sys_kind(const struct stat *st, uint64_t *len)
 
 int
 normfs_fs_sys_stat(const char *path, size_t path_len, size_t root,
-	uint64_t *len, int *os_error)
+	int follow, uint64_t *len, int *os_error)
 {
 	struct stat st;
 	const char *name;
@@ -496,7 +496,8 @@ normfs_fs_sys_stat(const char *path, size_t path_len, size_t root,
 		return 0;
 	}
 	errno = 0;
-	rc = fstatat(dir, name, &st, AT_SYMLINK_NOFOLLOW);
+	rc = fstatat(dir, name, &st,
+	    (follow && root == 0u) ? 0 : AT_SYMLINK_NOFOLLOW);
 	if (rc != 0) {
 		int saved = errno;
 
@@ -632,7 +633,7 @@ normfs_fs_sys_list_close(void *list)
 	(void)closedir(list);
 }
 
-/* Copies a segment the caller holds without a NUL. */
+/* Copies bytes the caller holds without a NUL. */
 static int
 normfs_fs_sys_terminated(char *buf, const char *path, size_t len, int *os_error)
 {

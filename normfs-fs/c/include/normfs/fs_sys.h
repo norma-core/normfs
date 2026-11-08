@@ -348,8 +348,9 @@ int normfs_fs_sys_unlink(const char *path, size_t path_len, size_t root,
 int normfs_fs_sys_sync_dir(const char *path, size_t path_len, size_t root,
     int *os_error);
 
-/* lstat(2) without following a link at the name: 0 absent, 1 a regular file
- * of *len bytes, 2 a directory, 3 anything else. */
+/* fstatat(2): 0 absent, 1 a regular file of *len bytes, 2 a directory, 3
+ * anything else. A link at the name is followed only with follow set and root
+ * 0, where the path is resolved as given. */
 /*@ requires path_len < NORMFS_FS_PATH_MAX;
     requires \valid_read(path + (0 .. path_len));
     requires path[path_len] == 0;
@@ -363,7 +364,7 @@ int normfs_fs_sys_sync_dir(const char *path, size_t path_len, size_t root,
     ensures \result == -1 ==> *os_error > 0;
 */
 int normfs_fs_sys_stat(const char *path, size_t path_len, size_t root,
-    uint64_t *len, int *os_error);
+    int follow, uint64_t *len, int *os_error);
 
 /* open(O_RDONLY or O_WRONLY, O_NOFOLLOW|O_CLOEXEC) of an existing file. */
 /*@ requires path_len < NORMFS_FS_PATH_MAX;
@@ -417,7 +418,7 @@ void *normfs_fs_sys_list_open(const char *path, size_t path_len, size_t root,
     requires \separated(name + (0 .. cap - 1), name_len, kind, len, os_error);
     assigns name[0 .. cap - 1], *name_len, *kind, *len, *os_error;
     ensures -1 <= \result <= 1;
-    ensures \result == 1 ==> *name_len <= cap && *os_error == 0;
+    ensures \result == 1 ==> *name_len <= cap && 1 <= *kind <= 3 && *os_error == 0;
     ensures \result == 0 ==> *os_error == 0;
     ensures \result == -1 ==> *os_error > 0;
 */
@@ -429,8 +430,8 @@ void normfs_fs_sys_list_close(void *list);
 
 /* ------------------------------------------------------------------------
  * The walk below the data directory, for normfs_fs_open_parent. Each open
- * adds one to normfs_fs_held and each release takes one, so the walk's
- * contract can say it leaks no descriptor. */
+ * adds one to normfs_fs_held and each release takes one: the count of opens
+ * less releases, not which descriptor was released. */
 
 /*@ ghost extern int normfs_fs_held; */
 
@@ -466,7 +467,8 @@ normfs_fs_fd normfs_fs_sys_open_below(normfs_fs_fd dir, const char *name,
     size_t len, int *os_error);
 
 /* close(2); a walk has no use for its error. */
-/*@ assigns normfs_fs_held;
+/*@ requires fd >= 0;
+    assigns normfs_fs_held;
     ensures normfs_fs_held == \old(normfs_fs_held) - 1;
 */
 void normfs_fs_sys_release(normfs_fs_fd fd);

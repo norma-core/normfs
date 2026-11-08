@@ -536,3 +536,28 @@ async fn remove_frees_the_name_while_a_reader_holds_the_file() {
     drop(reader);
     assert_eq!(std::fs::read(&path).unwrap(), b"new");
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn remove_dir_all_takes_a_link_and_not_what_it_points_at() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    std::fs::write(real.join("kept"), b"x").unwrap();
+    let link = dir.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let rooted = Fs::new(FsConfig {
+        root: Some(dir.path().to_path_buf()),
+        ..FsConfig::default()
+    })
+    .unwrap();
+
+    fs().remove_dir_all(&link).await.unwrap();
+    assert!(real.join("kept").exists());
+    assert!(std::fs::symlink_metadata(&link).is_err());
+
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    rooted.remove_dir_all(&link).await.unwrap();
+    assert!(real.join("kept").exists());
+    assert!(std::fs::symlink_metadata(&link).is_err());
+}

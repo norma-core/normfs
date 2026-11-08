@@ -71,10 +71,48 @@ normfs_fs_open_parent(const char *path, size_t len, size_t root,
 	*/
 	while (last > root + 1u && path[last - 1u] != '/')
 		last--;
-	if (last == len || !normfs_fs_is_segment(path + last, len - last)) {
+	if (last == len) {
+		/*@ assert path[len - 1] == '/'; */
 		result.code = 2;
 		return result;
 	}
+	/*@ assert path[last - 1] == '/'; */
+	if (!normfs_fs_is_segment(path + last, len - last)) {
+		/*@ assert fs_piece(path, root, len, last, len); */
+		result.code = 2;
+		return result;
+	}
+	/* The whole path is checked before anything is opened. */
+	i = root + 1u;
+	/*@ loop invariant root < i <= last;
+	    loop invariant path[i - 1] == '/' || path[i] == '/';
+	    loop invariant \forall integer a, b; fs_piece(path, root, len, a, b) && b <= i &&
+	                     b < len ==> a == b || fs_segment(path + a, b - a);
+	    loop assigns i;
+	    loop variant last - i;
+	*/
+	while (i < last) {
+		size_t s = i;
+
+		/*@ loop invariant s <= i <= last;
+		    loop invariant \forall integer k; s <= k < i ==> path[k] != '/';
+		    loop assigns i;
+		    loop variant last - i;
+		*/
+		while (i < last && path[i] != '/')
+			i++;
+		if (i == s) {
+			i++;
+			continue;
+		}
+		/*@ assert path[i] == '/' && path[s - 1] == '/'; */
+		if (!normfs_fs_is_segment(path + s, i - s)) {
+			/*@ assert fs_piece(path, root, len, s, i); */
+			result.code = 2;
+			return result;
+		}
+	}
+	/*@ assert fs_walkable(path, root, len); */
 	d = normfs_fs_sys_open_root(path, root, &e);
 	if (d == -1) {
 		result.code = 1;
@@ -83,6 +121,7 @@ normfs_fs_open_parent(const char *path, size_t len, size_t root,
 	}
 	i = root + 1u;
 	/*@ loop invariant root < i <= last;
+	    loop invariant path[i - 1] == '/' || path[i] == '/';
 	    loop invariant d >= 0;
 	    loop invariant normfs_fs_held == \at(normfs_fs_held, Pre) + 1;
 	    loop assigns i, d, e, normfs_fs_held;
@@ -93,6 +132,7 @@ normfs_fs_open_parent(const char *path, size_t len, size_t root,
 		normfs_fs_fd next;
 
 		/*@ loop invariant s <= i <= last;
+		    loop invariant \forall integer k; s <= k < i ==> path[k] != '/';
 		    loop assigns i;
 		    loop variant last - i;
 		*/
@@ -102,11 +142,7 @@ normfs_fs_open_parent(const char *path, size_t len, size_t root,
 			i++;
 			continue;
 		}
-		if (!normfs_fs_is_segment(path + s, i - s)) {
-			normfs_fs_sys_release(d);
-			result.code = 2;
-			return result;
-		}
+		/*@ assert fs_piece(path, root, len, s, i); */
 		next = normfs_fs_sys_open_below(d, path + s, i - s, &e);
 		normfs_fs_sys_release(d);
 		if (next == -1) {

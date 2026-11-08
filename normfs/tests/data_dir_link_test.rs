@@ -81,3 +81,37 @@ async fn a_queue_moved_behind_a_link_is_not_read_through_it() {
         "a record behind a link must not be read, read result {read:?}"
     );
 }
+
+#[tokio::test]
+async fn a_data_directory_that_is_a_link_opens_and_writes() {
+    let real = tempfile::TempDir::new().unwrap();
+    let parent = tempfile::TempDir::new().unwrap();
+    let data = parent.path().join("data");
+    std::os::unix::fs::symlink(real.path(), &data).unwrap();
+    let fs = NormFS::new(data, NormFsSettings::all_active())
+        .await
+        .unwrap();
+    let queue = fs.resolve("q");
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    fs.enqueue(&queue, Bytes::from_static(b"record"))
+        .await
+        .unwrap();
+    fs.close().await.unwrap();
+
+    assert!(files_under(real.path()) > 0);
+}
+
+#[tokio::test]
+async fn a_queue_name_climbing_out_creates_nothing_above_the_data_directory() {
+    let parent = tempfile::TempDir::new().unwrap();
+    let data = parent.path().join("data");
+    let fs = NormFS::new(data.clone(), NormFsSettings::all_active())
+        .await
+        .unwrap();
+    let queue = fs.resolve("/../escape");
+    let started = fs.ensure_queue_exists_for_write(&queue).await;
+    let _ = fs.close().await;
+
+    assert!(started.is_err());
+    assert!(!parent.path().join("escape").exists());
+}

@@ -34,6 +34,8 @@ pub use beneath::Stat;
 pub use read::ReadFile;
 
 #[cfg(test)]
+mod beneath_test;
+#[cfg(test)]
 mod dir_sync_test;
 #[cfg(test)]
 mod directory_test;
@@ -63,8 +65,9 @@ pub struct FsConfig {
     pub backend: Backend,
     /// Executor threads. Zero picks a default sized for the machine.
     pub threads: usize,
-    /// The data directory. Paths below it are opened one directory at a time
-    /// following no link, and a path outside it is refused.
+    /// The data directory. On Unix, paths below it are opened one directory
+    /// at a time following no link. It and its ancestors are resolved as
+    /// given, and any other path is refused.
     pub root: Option<PathBuf>,
 }
 
@@ -205,6 +208,12 @@ impl std::fmt::Debug for Fs {
 
 impl Fs {
     pub fn new(cfg: FsConfig) -> io::Result<Fs> {
+        if cfg.root.as_deref().is_some_and(|r| r.parent().is_none()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the data directory cannot be a filesystem root",
+            ));
+        }
         let threads = if cfg.threads == 0 {
             default_threads()
         } else {
@@ -567,9 +576,15 @@ impl Fs {
         .await
     }
 
-    /// A link inside is removed, never followed.
+    /// A link, inside or at `dir`, is removed and never followed.
     fn remove_tree(&self, dir: &Path) -> io::Result<()> {
-        for entry in beneath::list(&self.at(dir)?)? {
+        let at = self.at(dir)?;
+        match beneath::stat(&at)? {
+            None => return Err(io::ErrorKind::NotFound.into()),
+            Some(top) if !top.is_dir() => return beneath::unlink(&at),
+            Some(_) => {}
+        }
+        for entry in beneath::list(&at)? {
             let path = dir.join(&entry.name);
             let removed = if entry.stat.is_dir() {
                 self.remove_tree(&path)
@@ -581,7 +596,7 @@ impl Fs {
                 _ => {}
             }
         }
-        beneath::rmdir(&self.at(dir)?)
+        beneath::rmdir(&at)
     }
 
     /// Unlinks the `.{ext}` files directly under `dir` and returns how many

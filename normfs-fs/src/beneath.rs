@@ -15,6 +15,7 @@ unsafe extern "C" {
         path: *const c_char,
         path_len: usize,
         root: usize,
+        follow: c_int,
         len: *mut u64,
         os_error: *mut c_int,
     ) -> c_int;
@@ -30,12 +31,6 @@ unsafe extern "C" {
         path_len: usize,
         root: usize,
         remove: c_int,
-        os_error: *mut c_int,
-    ) -> c_int;
-    fn normfs_fs_sys_unlink(
-        path: *const c_char,
-        path_len: usize,
-        root: usize,
         os_error: *mut c_int,
     ) -> c_int;
     fn normfs_fs_sys_list_open(
@@ -60,7 +55,8 @@ unsafe extern "C" {
 /// Zero for a path at or above it, which is resolved as given.
 pub(crate) fn root_len(root: Option<&Path>, path: &Path) -> io::Result<usize> {
     let Some(root) = root else { return Ok(0) };
-    if cfg!(windows) || root.starts_with(path) {
+    let above = path.components().all(|c| c == std::path::Component::CurDir);
+    if cfg!(windows) || above || root.starts_with(path) {
         return Ok(0);
     }
     let bytes = crate::os::path_bytes(path);
@@ -149,12 +145,23 @@ fn os_err(e: c_int) -> io::Error {
 }
 
 /// `None` when nothing is at the path; a link there is not followed.
-#[cfg(unix)]
 pub(crate) fn stat(at: &At) -> io::Result<Option<Stat>> {
+    stat_with(at, false)
+}
+
+/// [`stat`], except that a path at or above the data directory follows a
+/// link, as resolving it as given does.
+pub(crate) fn stat_as_given(at: &At) -> io::Result<Option<Stat>> {
+    stat_with(at, at.root == 0)
+}
+
+#[cfg(unix)]
+fn stat_with(at: &At, follow: bool) -> io::Result<Option<Stat>> {
     let (p, n, root) = at.raw();
     let (mut len, mut e) = (0u64, 0);
-    // SAFETY: p is NUL-terminated and n long; len and e are valid for writes.
-    let kind = unsafe { normfs_fs_sys_stat(p, n, root, &mut len, &mut e) };
+    // SAFETY: p is NUL-terminated and n long, root is 0 or below n (At::new);
+    // len and e are valid for writes.
+    let kind = unsafe { normfs_fs_sys_stat(p, n, root, follow as c_int, &mut len, &mut e) };
     match kind {
         0 => Ok(None),
         1..=3 => Ok(Some(Stat { kind, len })),
@@ -168,7 +175,8 @@ pub(crate) fn open(at: &At, write: bool) -> io::Result<File> {
 
     let (p, n, root) = at.raw();
     let mut e = 0;
-    // SAFETY: p is NUL-terminated and n long; e is valid for writes.
+    // SAFETY: p is NUL-terminated and n long, root is 0 or below n (At::new);
+    // e is valid for writes.
     let fd = unsafe { normfs_fs_sys_open_file(p, n, root, write as c_int, &mut e) };
     if fd < 0 {
         return Err(os_err(e));
@@ -181,7 +189,8 @@ pub(crate) fn open(at: &At, write: bool) -> io::Result<File> {
 fn mkdir_or_rmdir(at: &At, remove: bool) -> io::Result<()> {
     let (p, n, root) = at.raw();
     let mut e = 0;
-    // SAFETY: p is NUL-terminated and n long; e is valid for writes.
+    // SAFETY: p is NUL-terminated and n long, root is 0 or below n (At::new);
+    // e is valid for writes.
     match unsafe { normfs_fs_sys_mkdir(p, n, root, remove as c_int, &mut e) } {
         0 => Ok(()),
         _ => Err(os_err(e)),
@@ -203,8 +212,9 @@ pub(crate) fn rmdir(at: &At) -> io::Result<()> {
 pub(crate) fn unlink(at: &At) -> io::Result<()> {
     let (p, n, root) = at.raw();
     let mut e = 0;
-    // SAFETY: p is NUL-terminated and n long; e is valid for writes.
-    match unsafe { normfs_fs_sys_unlink(p, n, root, &mut e) } {
+    // SAFETY: p is NUL-terminated and n long, root is 0 or below n (At::new);
+    // e is valid for writes.
+    match unsafe { crate::pool::normfs_fs_sys_unlink(p, n, root, &mut e) } {
         0 => Ok(()),
         1 => Err(io::ErrorKind::NotFound.into()),
         _ => Err(os_err(e)),
@@ -217,7 +227,8 @@ pub(crate) fn list(at: &At) -> io::Result<Vec<Entry>> {
 
     let (p, n, root) = at.raw();
     let mut e = 0;
-    // SAFETY: p is NUL-terminated and n long; e is valid for writes.
+    // SAFETY: p is NUL-terminated and n long, root is 0 or below n (At::new);
+    // e is valid for writes.
     let list = unsafe { normfs_fs_sys_list_open(p, n, root, &mut e) };
     if list.is_null() {
         return Err(os_err(e));
@@ -267,8 +278,13 @@ fn stat_of(m: &std::fs::Metadata) -> Stat {
 }
 
 #[cfg(windows)]
-pub(crate) fn stat(at: &At) -> io::Result<Option<Stat>> {
-    match std::fs::symlink_metadata(at.path()) {
+fn stat_with(at: &At, follow: bool) -> io::Result<Option<Stat>> {
+    let meta = if follow {
+        std::fs::metadata(at.path())
+    } else {
+        std::fs::symlink_metadata(at.path())
+    };
+    match meta {
         Ok(m) => Ok(Some(stat_of(&m))),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e),

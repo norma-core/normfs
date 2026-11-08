@@ -31,8 +31,8 @@ static PENDING: OnceLock<Mutex<Pending>> = OnceLock::new();
 /// follow the links the walk refuses.
 fn key(path: &Path, root: Option<&Path>) -> io::Result<PathBuf> {
     match root {
-        Some(_) => Ok(path.to_path_buf()),
-        None => std::fs::canonicalize(path),
+        Some(_) if cfg!(unix) => Ok(path.to_path_buf()),
+        _ => std::fs::canonicalize(path),
     }
 }
 
@@ -42,7 +42,7 @@ pub(crate) fn mkdir_all(path: &Path, root: Option<&Path>) -> io::Result<()> {
     } else {
         path
     };
-    match beneath::stat(&At::new(root, path)?) {
+    match beneath::stat_as_given(&At::new(root, path)?) {
         Ok(Some(meta)) if meta.is_dir() => {
             let entry = {
                 if PENDING
@@ -92,7 +92,7 @@ fn finish(path: &Path, root: Option<&Path>, entry: Arc<Mutex<c_int>>) -> io::Res
     let at = At::new(root, path)?;
     let mut stage = entry.lock().unwrap();
     // A removal does not reset a retained stage, so resume only if the directory is still there.
-    if *stage != 0 && beneath::stat(&at)?.is_none() {
+    if *stage != 0 && beneath::stat_as_given(&at)?.is_none() {
         *stage = 0;
     }
     if *stage == 0 {
@@ -100,7 +100,7 @@ fn finish(path: &Path, root: Option<&Path>, entry: Arc<Mutex<c_int>>) -> io::Res
             Ok(()) => *stage = 1,
             Err(e)
                 if e.kind() == io::ErrorKind::AlreadyExists
-                    && beneath::stat(&at)
+                    && beneath::stat_as_given(&at)
                         .ok()
                         .flatten()
                         .is_some_and(|m| m.is_dir()) =>

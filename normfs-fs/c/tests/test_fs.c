@@ -385,7 +385,7 @@ test_walk_follows_no_link_below_the_root(void)
 	fd = normfs_fs_sys_open_create(path, strlen(path), rl, NORMFS_FS_TMP_EXCL, &ino, &e);
 	CHECK(fd == -1 && (e == ELOOP || e == ENOTDIR));
 	CHECK(normfs_fs_sys_mkdir(path, strlen(path), rl, 0, &e) == -1);
-	CHECK(normfs_fs_sys_stat(path, strlen(path), rl, &len, &e) == -1);
+	CHECK(normfs_fs_sys_stat(path, strlen(path), rl, 0, &len, &e) == -1);
 	CHECK(path_in(path, sizeof(path), "walk-out/x"));
 	CHECK(access(path, F_OK) == -1 && errno == ENOENT);
 	fd = normfs_fs_sys_open_create(path, strlen(path), 0u, NORMFS_FS_TMP_EXCL, &ino, &e);
@@ -402,8 +402,10 @@ test_walk_follows_no_link_below_the_root(void)
 	CHECK(normfs_fs_sys_open_file(out, strlen(out), rl, 1, &e) == -1 && e == ELOOP);
 
 	CHECK(path_in(path, sizeof(path), "walk-link"));
-	CHECK(normfs_fs_sys_stat(path, strlen(path), rl, &len, &e) == 3);
-	CHECK(normfs_fs_sys_stat(path, strlen(path), 0u, &len, &e) == 3);
+	CHECK(normfs_fs_sys_stat(path, strlen(path), rl, 0, &len, &e) == 3);
+	CHECK(normfs_fs_sys_stat(path, strlen(path), 0u, 0, &len, &e) == 3);
+	CHECK(normfs_fs_sys_stat(path, strlen(path), 0u, 1, &len, &e) == 2);
+	CHECK(normfs_fs_sys_stat(path, strlen(path), rl, 1, &len, &e) == 3);
 	CHECK(normfs_fs_sys_sync_dir(path, strlen(path), rl, &e) == -1);
 	CHECK(normfs_fs_sys_list_open(path, strlen(path), rl, &e) == NULL);
 
@@ -414,10 +416,10 @@ test_walk_follows_no_link_below_the_root(void)
 	fd = normfs_fs_sys_open_create(path, strlen(path), rl, NORMFS_FS_TMP_EXCL, &ino, &e);
 	CHECK(fd >= 0);
 	CHECK(normfs_fs_sys_close(fd, &e) == 0);
-	CHECK(normfs_fs_sys_stat(path, strlen(path), rl, &len, &e) == 1 && len == 0u);
+	CHECK(normfs_fs_sys_stat(path, strlen(path), rl, 0, &len, &e) == 1 && len == 0u);
 	CHECK(normfs_fs_sys_fsync_parent(path, strlen(path), rl, &e) == 0);
 	CHECK(path_in(path, sizeof(path), "walk-gone/x"));
-	CHECK(normfs_fs_sys_stat(path, strlen(path), rl, &len, &e) == 0 && e == 0);
+	CHECK(normfs_fs_sys_stat(path, strlen(path), rl, 0, &len, &e) == 0 && e == 0);
 	CHECK(normfs_fs_sys_file_len(path, strlen(path), rl, &len, &e) == 0 && e == 0);
 	CHECK(normfs_fs_sys_unlink(path, strlen(path), rl, &e) == 1 && e == 0);
 	return 0;
@@ -440,7 +442,7 @@ test_walk_lists_and_makes_directories(void)
 	CHECK(path_in(path, sizeof(path), "list"));
 	CHECK(normfs_fs_sys_mkdir(path, strlen(path), rl, 0, &e) == 0);
 	CHECK(normfs_fs_sys_mkdir(path, strlen(path), rl, 0, &e) == -1 && e == EEXIST);
-	CHECK(normfs_fs_sys_stat(path, strlen(path), rl, &len, &e) == 2);
+	CHECK(normfs_fs_sys_stat(path, strlen(path), rl, 0, &len, &e) == 2);
 	CHECK(path_in(path, sizeof(path), "list/sub"));
 	CHECK(normfs_fs_sys_mkdir(path, strlen(path), rl, 0, &e) == 0);
 	CHECK(path_in(path, sizeof(path), "list/link"));
@@ -458,7 +460,7 @@ test_walk_lists_and_makes_directories(void)
 	CHECK(rc == 0 && seen == 3);
 	CHECK(path_in(path, sizeof(path), "list/sub"));
 	CHECK(normfs_fs_sys_mkdir(path, strlen(path), rl, 1, &e) == 0);
-	CHECK(normfs_fs_sys_stat(path, strlen(path), rl, &len, &e) == 0);
+	CHECK(normfs_fs_sys_stat(path, strlen(path), rl, 0, &len, &e) == 0);
 	return 0;
 }
 
