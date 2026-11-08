@@ -66,7 +66,7 @@ normfs_conn_emit(struct normfs_conn_events *out, uint64_t conn, int kind, uint64
     ensures r->deadline_ms == now + NORMFS_CONN_IDLE_MS;
 */
 void
-normfs_conn_rx_init(struct normfs_conn_rx *r, int fd, uint64_t token, int64_t now)
+normfs_conn_rx_init(struct normfs_conn_rx *r, normfs_net_fd fd, uint64_t token, int64_t now)
 {
 	normfs_net_reader_init(&r->rd);
 	r->payload = (uint8_t *)0;
@@ -365,7 +365,7 @@ normfs_conn_deadline(const struct normfs_conn_rx *r)
     ensures normfs_conn_tx_stream_ok(t);
 */
 void
-normfs_conn_tx_init(struct normfs_conn_tx *t, int fd, uint64_t token)
+normfs_conn_tx_init(struct normfs_conn_tx *t, normfs_net_fd fd, uint64_t token)
 {
 	t->q[0].count = 0u;
 	t->q[1].count = 0u;

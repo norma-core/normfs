@@ -81,3 +81,26 @@ fn a_bare_name_is_the_working_directory() {
     assert_eq!(sync_parent(&bare, || 0), 0);
     assert_eq!(sync_parent(&dotted, || 0), 0);
 }
+
+#[cfg(windows)]
+#[test]
+fn backslash_directories_do_not_wait() {
+    let a = CString::new(r"C:\one\a").unwrap();
+    let elsewhere = CString::new(r"C:\two\b").unwrap();
+    let (started, on_started) = mpsc::channel();
+    let (release, blocked) = mpsc::channel();
+    let leader = thread::spawn(move || {
+        sync_parent(&a, || {
+            started.send(()).unwrap();
+            blocked.recv().unwrap();
+            0
+        })
+    });
+    on_started.recv().unwrap();
+    let (synced, on_synced) = mpsc::channel();
+    thread::spawn(move || synced.send(sync_parent(&elsewhere, || 0)).unwrap());
+    let rc = on_synced.recv_timeout(std::time::Duration::from_secs(5));
+    release.send(()).unwrap();
+    leader.join().unwrap();
+    assert_eq!(rc, Ok(0));
+}

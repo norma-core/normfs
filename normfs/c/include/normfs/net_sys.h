@@ -13,6 +13,13 @@
 
 #define NORMFS_NET_SYS_WOULD_BLOCK (-2)
 
+/* A descriptor on Unix, a SOCKET on Windows; Frama-C sees the int. */
+#if defined(_WIN32)
+typedef uintptr_t normfs_net_fd;
+#else
+typedef int normfs_net_fd;
+#endif
+
 /*
  * A connection as two byte streams. net_in is what the peer sends, fixed in
  * advance; net_pos counts how much of it has been read. net_out holds what has
@@ -58,7 +65,7 @@
               net_rcalls(g) == \old(net_rcalls(g)) && net_opos(g) == \old(net_opos(g)) &&
               net_wlast(g) == \old(net_wlast(g)) && net_wcalls(g) == \old(net_wcalls(g));
 */
-long normfs_net_sys_read(int fd, uint8_t *buf, size_t off, size_t len,
+long normfs_net_sys_read(normfs_net_fd fd, uint8_t *buf, size_t off, size_t len,
     int *os_error);
 
 /* write(2) of buf[off .. off + len): bytes written, at least one,
@@ -88,7 +95,7 @@ long normfs_net_sys_read(int fd, uint8_t *buf, size_t off, size_t len,
               net_rcalls(g) == \old(net_rcalls(g)) && net_opos(g) == \old(net_opos(g)) &&
               net_wlast(g) == \old(net_wlast(g)) && net_wcalls(g) == \old(net_wcalls(g));
 */
-long normfs_net_sys_write(int fd, const uint8_t *buf, size_t off, size_t len,
+long normfs_net_sys_write(normfs_net_fd fd, const uint8_t *buf, size_t off, size_t len,
     int *os_error);
 
 /* Family 4 or 6, the 4 or 16 address bytes in network order, the IPv6 scope
@@ -128,8 +135,8 @@ int normfs_net_sys_local_addr(int fd, struct normfs_net_sys_addr *addr, int *os_
 int normfs_net_sys_accept(int fd, struct normfs_net_sys_accepted *out, int *os_error);
 
 /* shutdown(SHUT_WR); errors are ignored, the peer may already be gone. */
-void normfs_net_sys_shutdown_write(int fd);
+void normfs_net_sys_shutdown_write(normfs_net_fd fd);
 
-void normfs_net_sys_close(int fd);
+void normfs_net_sys_close(normfs_net_fd fd);
 
 #endif /* NORMFS_NET_SYS_H */

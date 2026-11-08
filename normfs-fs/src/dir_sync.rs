@@ -33,7 +33,10 @@ fn registry() -> &'static Registry {
 // Keep parent identity consistent with the syscall shim.
 fn parent_key(path: &CStr) -> Vec<u8> {
     let bytes = path.to_bytes();
-    match bytes.iter().rposition(|&b| b == b'/') {
+    match bytes
+        .iter()
+        .rposition(|&b| b == b'/' || (cfg!(windows) && b == b'\\'))
+    {
         Some(cut) => bytes[..=cut].to_vec(),
         None => b".".to_vec(),
     }

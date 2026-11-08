@@ -30,15 +30,31 @@ fn main() -> Result<()> {
     let sources = [
         manifest_dir.join("c/src/conn.c"),
         manifest_dir.join("c/src/disk_monitor.c"),
-        manifest_dir.join("c/src/disk_monitor_sys.c"),
+        manifest_dir.join(
+            if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+                "c/src/disk_monitor_sys_win.c"
+            } else {
+                "c/src/disk_monitor_sys.c"
+            },
+        ),
         manifest_dir.join("c/src/frame.c"),
         manifest_dir.join("c/src/net.c"),
-        manifest_dir.join("c/src/net_sys.c"),
+        manifest_dir.join(
+            if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+                "c/src/net_sys_win.c"
+            } else {
+                "c/src/net_sys.c"
+            },
+        ),
         manifest_dir.join("c/src/queue_name.c"),
         manifest_dir.join("c/src/request.c"),
         manifest_dir.join("c/src/response.c"),
         manifest_dir.join("c/src/walk.c"),
     ];
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        println!("cargo:rustc-link-lib=ntdll");
+        println!("cargo:rustc-link-lib=ws2_32");
+    }
 
     println!("cargo:rerun-if-changed={}", include_dir.display());
     println!("cargo:rerun-if-changed={}", uintn_include_dir.display());

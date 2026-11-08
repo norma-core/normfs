@@ -113,7 +113,7 @@ normfs_fs_sys_fail(int *os_error)
 	return -1;
 }
 
-int
+normfs_fs_fd
 normfs_fs_sys_open_create(const char *path, size_t path_len, int mode,
 	uint64_t *ino, int *os_error)
 {
@@ -143,7 +143,7 @@ normfs_fs_sys_open_create(const char *path, size_t path_len, int mode,
 }
 
 int
-normfs_fs_sys_pwritev_all(int fd, const struct normfs_fs_iov *iov,
+normfs_fs_sys_pwritev_all(normfs_fs_fd fd, const struct normfs_fs_iov *iov,
 	size_t cnt, uint64_t off, int *os_error)
 {
 	struct iovec vec[1024];
@@ -193,7 +193,7 @@ normfs_fs_sys_pwritev_all(int fd, const struct normfs_fs_iov *iov,
 }
 
 int
-normfs_fs_sys_fsync(int fd, int *os_error)
+normfs_fs_sys_fsync(normfs_fs_fd fd, int *os_error)
 {
 	int rc;
 
@@ -219,7 +219,7 @@ normfs_fs_sys_fsync(int fd, int *os_error)
 }
 
 int
-normfs_fs_sys_close(int fd, int *os_error)
+normfs_fs_sys_close(normfs_fs_fd fd, int *os_error)
 {
 	*os_error = 0;
 	errno = 0;
@@ -295,7 +295,7 @@ normfs_fs_sys_fsync_parent(const char *path, size_t path_len, int *os_error)
 }
 
 int
-normfs_fs_sys_ftruncate(int fd, uint64_t len, int *os_error)
+normfs_fs_sys_ftruncate(normfs_fs_fd fd, uint64_t len, int *os_error)
 {
 	int rc;
 

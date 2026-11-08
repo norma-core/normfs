@@ -2,7 +2,6 @@ use log::{debug, error, info};
 use std::collections::HashMap;
 use std::future::Future;
 use std::net::SocketAddr;
-use std::os::fd::AsRawFd;
 use std::os::raw::c_int;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,7 +11,7 @@ use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 
 use super::command_processor::{CommandProcessor, ResponseSender};
 use super::frame::{self, FRAME_HEADER_SIZE, FRAME_MAX_PAYLOAD};
-use super::net::{os_error, Conn};
+use super::net::{os_error, Conn, SysFd};
 use super::request;
 use super::response;
 use crate::proto::ServerResponse;
@@ -68,7 +67,7 @@ unsafe extern "C" {
     fn normfs_conn_events_room() -> usize;
     fn normfs_conn_pending_max() -> usize;
     fn normfs_conn_frame_max() -> usize;
-    fn normfs_conn_rx_init(r: *mut u8, fd: c_int, token: u64, now: i64);
+    fn normfs_conn_rx_init(r: *mut u8, fd: SysFd, token: u64, now: i64);
     fn normfs_conn_read(r: *mut u8, out: *mut CEvents, now: i64) -> c_int;
     fn normfs_conn_give_buffer(r: *mut u8, buf: *mut u8, now: i64);
     fn normfs_conn_ack(r: *mut u8, now: i64);
@@ -76,7 +75,7 @@ unsafe extern "C" {
     fn normfs_conn_stop(r: *mut u8, out: *mut CEvents);
     fn normfs_conn_rx_interest(r: *const u8) -> c_int;
     fn normfs_conn_deadline(r: *const u8) -> i64;
-    fn normfs_conn_tx_init(t: *mut u8, fd: c_int, token: u64);
+    fn normfs_conn_tx_init(t: *mut u8, fd: SysFd, token: u64);
     fn normfs_conn_submit(
         t: *mut u8,
         out: *mut CEvents,
@@ -334,7 +333,7 @@ impl ClientHandler {
             tx: vec![0u64; words(tx_size)],
             events: vec![blank; room],
         };
-        let fd = conn.fd().as_raw_fd();
+        let fd = conn.raw();
         let start = Instant::now();
         // SAFETY: rx and tx are zeroed, 8-aligned and as large as the C asked for.
         unsafe {
@@ -388,7 +387,7 @@ impl ClientHandler {
                         state.release();
                     }
                 },
-                guard = conn.fd().readable(), if want & WANT_READ != 0 => match guard {
+                guard = conn.readable(), if want & WANT_READ != 0 => match guard {
                     Ok(mut guard) => {
                         tokio::task::consume_budget().await;
                         if state.read() {
@@ -398,11 +397,11 @@ impl ClientHandler {
                         state.write();
                     }
                     Err(e) => {
-                        error!("Error reading message size (client_addr: {}, error: {})", addr, e);
+                        log_io_error("Error reading message size", addr, &e);
                         state.release();
                     }
                 },
-                guard = conn.fd().writable(), if want & WANT_WRITE != 0 => match guard {
+                guard = conn.writable(), if want & WANT_WRITE != 0 => match guard {
                     Ok(mut guard) => {
                         tokio::task::consume_budget().await;
                         if state.write() {
@@ -410,7 +409,7 @@ impl ClientHandler {
                         }
                     }
                     Err(e) => {
-                        error!("Error writing response (client_addr: {}, error: {})", addr, e);
+                        log_io_error("Error writing response", addr, &e);
                         state.release();
                     }
                 },
@@ -591,11 +590,7 @@ impl Driver {
                     log_read_closed(self.addr, e.status, e.os_error, e.value, e.in_payload != 0);
                 }
                 EV_WRITE_CLOSED => {
-                    error!(
-                        "Error writing response (client_addr: {}, error: {})",
-                        self.addr,
-                        os_error(e.os_error)
-                    );
+                    log_io_error("Error writing response", self.addr, &os_error(e.os_error));
                     self.closed.store(true, Ordering::Release);
                     self.write_closed = true;
                     self.requests = None;
@@ -613,6 +608,26 @@ impl Driver {
     }
 }
 
+/// Windows closes a socket with unread data by reset, which is how most of its clients
+/// disconnect, and a reply still in flight then fails the same way.
+fn reset(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+    )
+}
+
+fn log_io_error(what: &str, addr: SocketAddr, e: &std::io::Error) {
+    if reset(e) {
+        debug!(
+            "Client disconnected (reset) (client_addr: {}, during: {})",
+            addr, what
+        );
+    } else {
+        error!("{} (client_addr: {}, error: {})", what, addr, e);
+    }
+}
+
 fn log_read_closed(addr: SocketAddr, status: c_int, os_err: c_int, size: u64, in_payload: bool) {
     match (status, in_payload) {
         (NET_OK, _) => {}
@@ -625,6 +640,9 @@ fn log_read_closed(addr: SocketAddr, status: c_int, os_err: c_int, size: u64, in
             "Message size exceeds maximum (client_addr: {}, message_size: {}, max_size: {})",
             addr, size, FRAME_MAX_PAYLOAD
         ),
+        (NET_ERR_IO, false) if reset(&os_error(os_err)) => {
+            debug!("Client disconnected (reset) (client_addr: {})", addr)
+        }
         (NET_ERR_IO, false) => error!(
             "Error reading message size (client_addr: {}, error: {})",
             addr,
