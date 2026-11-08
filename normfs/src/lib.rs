@@ -95,8 +95,7 @@ pub struct NormFS {
     settings: NormFsSettings,
     reader_fsm: reader_fsm::ReaderFSM,
     queue_resolver: normfs_types::QueueIdResolver,
-    // Keyed by the lowercased id, so a/b and a/B start one at a time.
-    queue_init_locks: RwLock<HashMap<String, Arc<Mutex<()>>>>,
+    queue_init_locks: RwLock<HashMap<QueueId, Arc<Mutex<()>>>>,
     /// Queues whose directory exists under exactly their name; that cannot change.
     exact_queues: RwLock<HashSet<QueueId>>,
     /// The seed was made by this run: no earlier life wrote under this
@@ -847,15 +846,14 @@ impl NormFS {
     }
 
     fn queue_init_lock(&self, queue: &QueueId) -> Arc<Mutex<()>> {
-        let key = queue.as_str().to_lowercase();
         let locks = self.queue_init_locks.read().unwrap();
-        if let Some(lock) = locks.get(&key).cloned() {
+        if let Some(lock) = locks.get(queue).cloned() {
             lock
         } else {
             drop(locks);
             let mut locks = self.queue_init_locks.write().unwrap();
             locks
-                .entry(key)
+                .entry(queue.clone())
                 .or_insert_with(|| Arc::new(Mutex::new(())))
                 .clone()
         }
@@ -1694,7 +1692,6 @@ impl NormFS {
         log::info!(target: "normfs", "Starting queue: '{}' (readonly={})", queue.short(), mode.readonly);
         log::info!(target: "normfs", "========================================");
 
-        self.refuse_alias(queue).await?;
         let queue_config = self.get_config_for_queue(queue);
         let persist = queue_config.persist;
         if persist.cloud
@@ -1711,8 +1708,8 @@ impl NormFS {
             .into());
         }
         if !mode.readonly {
-            // Spellings the lock does not fold can both pass the check above;
-            // the directory mkdir leaves decides which goes on.
+            // Two first writes under two spellings both pass the check their
+            // callers made; the directory mkdir leaves decides which goes on.
             self.fs.mkdir_all(&queue.to_fs_path(&self.path)).await?;
             self.refuse_alias(queue).await?;
         }

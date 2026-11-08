@@ -261,6 +261,16 @@ async fn a_memory_queue_is_held_to_its_spelling_too() {
         fs.ensure_queue_exists_for_write(&fs.resolve("mem/r")).await,
         Err(Error::BadQueueName(_))
     ));
+    // Started for read, then another spelling writes first and owns the directory.
+    let read_first = fs.resolve("mem/S");
+    fs.ensure_queue_exists_for_read(&read_first).await.unwrap();
+    fs.ensure_queue_exists_for_write(&fs.resolve("mem/s"))
+        .await
+        .unwrap();
+    assert!(matches!(
+        fs.ensure_queue_exists_for_write(&read_first).await,
+        Err(Error::BadQueueName(_))
+    ));
     assert!(matches!(
         fs.ensure_queue_exists_for_write(&other).await,
         Err(Error::BadQueueName(_))
