@@ -37,7 +37,7 @@ if(FRAMAC)
             -wp-warn-key pedantic-assigns=inactive
             -wp-no-warn-memory-model
             -cpp-extra-args=-I${CMAKE_CURRENT_SOURCE_DIR}/include
-            -wp-fct normfs_queue_name_canonical,normfs_queue_name_word_at,normfs_queue_name_ok
+            -wp-fct normfs_queue_name_canonical,normfs_queue_name_word_at,normfs_queue_name_is_hex,normfs_queue_name_ok
             src/queue_name.c
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
         COMMENT "WP: normfs queue names"
