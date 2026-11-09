@@ -140,12 +140,16 @@ impl QueueId {
 #[derive(Debug, Clone)]
 pub struct QueueIdResolver {
     instance_id: String,
+    prefix: String,
 }
 
 impl QueueIdResolver {
     pub fn new(instance_id: impl Into<String>) -> Self {
+        let instance_id = instance_id.into();
+        let prefix = queue_name::canonical(&format!("/{instance_id}"));
         Self {
-            instance_id: instance_id.into(),
+            instance_id,
+            prefix,
         }
     }
 
@@ -163,9 +167,8 @@ impl QueueIdResolver {
                 name_at: 0,
             }
         } else {
-            let prefix = queue_name::canonical(&format!("/{}", self.instance_id));
-            let path = queue_name::canonical(&format!("{prefix}/{path}"));
-            let name_at = (prefix.len() + 1).min(path.len());
+            let path = queue_name::canonical(&format!("{}/{path}", self.prefix));
+            let name_at = (self.prefix.len() + 1).min(path.len());
             QueueId { path, name_at }
         }
     }

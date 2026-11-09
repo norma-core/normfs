@@ -20,6 +20,9 @@ if(FRAMAC)
     if(NPROC EQUAL 0)
         set(NPROC 4)
     endif()
+    if(NPROC GREATER 4)
+        set(NPROC 4)
+    endif()
 
     add_custom_target(verify-queue-name
         COMMAND ${FRAMAC}

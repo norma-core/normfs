@@ -60,12 +60,12 @@ A Rust workspace (`Cargo.toml`), a Go client tree under `normfs_go/` with its
 own `go.work` (explicitly excluded from the Cargo workspace), a shared wire
 schema in `proto/normfs.proto`, and a verified C layer.
 
-Crates: `normfs` (server/binary), `normfs-types`, `normfs-time`, `normfs-wal`, `normfs-store`,
-`normfs-cloud`, `normfs-crypto`, `uintn-rs`.
+Crates: `normfs` (server/binary), `normfs-types`, `normfs-time`, `normfs-fs`, `normfs-wal`,
+`normfs-store`, `normfs-cloud`, `normfs-crypto`, `uintn-rs`.
 
-Six of them carry C — `uintn-rs`, `normfs-types` (queue names),
-`normfs-wal`, `normfs-store`, `normfs-crypto`, and `normfs` (the disk
-monitor) — and all six follow the same layout:
+Seven of them carry C — `uintn-rs`, `normfs-types` (queue names),
+`normfs-fs`, `normfs-wal`, `normfs-store`, `normfs-crypto`, and `normfs`
+(the disk monitor) — and all seven follow the same layout:
 
 ```
 <crate>/
