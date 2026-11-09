@@ -475,7 +475,6 @@ impl Fs {
         Ok(ReadFile::new(self.clone(), file))
     }
 
-    /// Opens an existing file for reading or writing.
     pub async fn open(&self, path: &Path, write: bool) -> io::Result<File> {
         let at = self.at(path)?;
         Ok(self.run_blocking(move || beneath::open(&at, write)).await?)

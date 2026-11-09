@@ -366,7 +366,8 @@ int normfs_fs_sys_sync_dir(const char *path, size_t path_len, size_t root,
 int normfs_fs_sys_stat(const char *path, size_t path_len, size_t root,
     int follow, uint64_t *len, int *os_error);
 
-/* open(O_RDONLY or O_WRONLY, O_NOFOLLOW|O_CLOEXEC) of an existing file. */
+/* open(O_RDONLY or O_WRONLY, O_CLOEXEC) of an existing file, with O_NOFOLLOW
+ * when root > 0. */
 /*@ requires path_len < NORMFS_FS_PATH_MAX;
     requires \valid_read(path + (0 .. path_len));
     requires path[path_len] == 0;

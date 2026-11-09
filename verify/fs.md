@@ -93,8 +93,8 @@ failed tail, since ftruncate alone is not a durability barrier.
 `normfs_fs_sync_created_dir` proves monotone retry stages: success requires
 completion of both the new-directory sync and the parent sync. Failure retains
 which barrier remains. The Rust directory coordinator serializes creation of the
-same directory across Fs instances that share a data directory, or both
-have none, and retains pending stages until success. Its registry lock excludes
+same directory across Fs instances that share a data directory spelled the
+same way, or both have none, and retains pending stages until success. Its registry lock excludes
 mkdir and fsync; unrelated directories have separate completion locks. Existing
 directories avoid canonicalization when the pending registry is empty. Its path
 traversal and retention are tested obligations outside WP. File operations sync only their
