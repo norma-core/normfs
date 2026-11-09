@@ -82,7 +82,6 @@ normfs_fs_open_parent(const char *path, size_t len, size_t root,
 		result.code = 2;
 		return result;
 	}
-	/* The whole path is checked before anything is opened. */
 	i = root + 1u;
 	/*@ loop invariant root < i <= last;
 	    loop invariant path[i - 1] == '/' || path[i] == '/';
