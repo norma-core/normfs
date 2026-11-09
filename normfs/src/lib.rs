@@ -2040,6 +2040,11 @@ impl NormFS {
         }
     }
 
+    /// Whether everything the queue has accepted is written and synced.
+    pub fn is_durable(&self, queue: &QueueId) -> bool {
+        self.mem.is_fully_durable(queue)
+    }
+
     /// Where the queue's next record would land. Only its writer can act on
     /// the answer: any append, a flush or a close moves it.
     pub fn file_room(&self, queue: &QueueId) -> Result<FileRoom, Error> {

@@ -9,6 +9,7 @@ members = [
     "normfs-cloud",
     "normfs-crypto",
     "normfs-fs",
+    "normfs-capi",
     "uintn-rs",
 ]
 exclude = ["normfs_go", "go.work", "go.work.sum"]
