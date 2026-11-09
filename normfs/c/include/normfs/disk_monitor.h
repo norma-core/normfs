@@ -82,8 +82,8 @@ struct normfs_disk_scan {
  * `next` and `to_free` are updated in place. has_bound == 0 means every id
  * may go: the no-offloader case. `root` is the data directory's length in
  * both dirs, as in normfs/fs_sys.h; 0 resolves them as given. `store_bytes`
- * is what the caller counts in the store, less each store file deleted; a
- * WAL file is not deleted while it is above 0.
+ * is what the caller counts in the store; no WAL file is deleted while it,
+ * less the store files this call deleted, is above 0.
  */
 struct normfs_disk_evict_req {
 	const char *store_dir;

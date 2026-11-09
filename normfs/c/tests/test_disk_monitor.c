@@ -537,7 +537,6 @@ test_evict_keeps_wal_while_the_store_count_is_left(void)
 	    NORMFS_DISK_OK);
 	CHECK(stop == NORMFS_DISK_STOP_STALE);
 	CHECK(count == 1u && ev[0].kind == NORMFS_DISK_STORE);
-	CHECK(rq.store_bytes == 40u);
 	CHECK(id_is(&rq.next, "2"));
 	CHECK(file_exists(wal, "2", NORMFS_DISK_WAL) == 1);
 
