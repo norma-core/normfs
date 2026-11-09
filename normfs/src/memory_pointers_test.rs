@@ -338,6 +338,37 @@ async fn a_clean_close_does_not_lower_a_line_below_a_memory_mark() {
 }
 
 #[tokio::test]
+async fn a_memory_life_under_another_spelling_still_floors_the_reserve() {
+    let dir = tempfile::tempdir().unwrap();
+    let fs = Fs::new(FsConfig::default()).unwrap();
+    let queue = QueueIdResolver::new("instance").resolve("switched");
+    std::fs::write(
+        dir.path().join(".memory_pointers"),
+        format!(
+            "# normfs pointers v1\n/instance//switched\t400\n{}\t50\t1\n",
+            queue.as_str()
+        ),
+    )
+    .unwrap();
+
+    let pointers = MemoryPointers::open(fs.clone(), dir.path()).await.unwrap();
+    pointers
+        .reserve(&queue, &UintN::from(100u64))
+        .await
+        .unwrap();
+    pointers
+        .mark_landed(&queue, &UintN::from(100u64), &UintN::from(1u64))
+        .await
+        .unwrap();
+    pointers.settle_landed();
+    pointers.flush_all().await.unwrap();
+    drop(pointers);
+
+    let reopened = MemoryPointers::open(fs, dir.path()).await.unwrap();
+    assert_eq!(reopened.used_id(&queue), Some(UintN::from(400u64)));
+}
+
+#[tokio::test]
 async fn a_reserve_after_a_memory_life_of_entry_zero_never_writes_a_bare_record() {
     let dir = tempfile::tempdir().unwrap();
     let fs = Fs::new(FsConfig::default()).unwrap();
