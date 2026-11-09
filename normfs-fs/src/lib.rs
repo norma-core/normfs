@@ -218,6 +218,17 @@ impl Fs {
                 "the data directory cannot be a filesystem root",
             ));
         }
+        // Below "" every path is a bare name, which root_len cannot tell from one outside it.
+        if cfg
+            .root
+            .as_deref()
+            .is_some_and(|r| r.as_os_str().is_empty())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the data directory is empty; give \".\" for the working directory",
+            ));
+        }
         let threads = if cfg.threads == 0 {
             default_threads()
         } else {
@@ -625,7 +636,8 @@ impl Fs {
             let mut removed = 0;
             for entry in entries {
                 let path = dir.join(entry.name);
-                if entry.stat.is_file() && path.extension().and_then(|s| s.to_str()) == Some(ext) {
+                // A link is unlinked itself; left, it would refuse the next create of its name.
+                if !entry.stat.is_dir() && path.extension().and_then(|s| s.to_str()) == Some(ext) {
                     match beneath::unlink(&fs.at(&path)?) {
                         Ok(()) => removed += 1,
                         Err(e) => log::warn!(target: "normfs-fs",
