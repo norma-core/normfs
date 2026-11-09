@@ -9,6 +9,13 @@ fn uintn_include_dir(manifest_dir: &Path) -> PathBuf {
     }
 }
 
+fn fs_include_dir(manifest_dir: &Path) -> PathBuf {
+    match env::var_os("DEP_NORMFS_FS_C_INCLUDE") {
+        Some(dir) => PathBuf::from(dir),
+        None => manifest_dir.join("../normfs-fs/c/include"),
+    }
+}
+
 fn main() -> Result<()> {
     let out_dir = PathBuf::from("src/proto");
 
@@ -27,6 +34,7 @@ fn main() -> Result<()> {
     let include_dir = manifest_dir.join("c/include");
     let gremlin_dir = manifest_dir.join("c/gremlin");
     let uintn_include_dir = uintn_include_dir(&manifest_dir);
+    let fs_include_dir = fs_include_dir(&manifest_dir);
     let sources = [
         manifest_dir.join("c/src/conn.c"),
         manifest_dir.join("c/src/disk_monitor.c"),
@@ -57,6 +65,7 @@ fn main() -> Result<()> {
 
     println!("cargo:rerun-if-changed={}", include_dir.display());
     println!("cargo:rerun-if-changed={}", uintn_include_dir.display());
+    println!("cargo:rerun-if-changed={}", fs_include_dir.display());
     println!("cargo:rerun-if-changed={}", gremlin_dir.display());
     for source in &sources {
         println!("cargo:rerun-if-changed={}", source.display());
@@ -66,6 +75,7 @@ fn main() -> Result<()> {
         .files(&sources)
         .include(&include_dir)
         .include(&uintn_include_dir)
+        .include(&fs_include_dir)
         .include(&gremlin_dir)
         .opt_level(3)
         .compile("normfs_c");

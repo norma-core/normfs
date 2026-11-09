@@ -138,7 +138,7 @@ async fn eviction_never_passes_the_offloaded_bound() {
     let wal = queue.to_wal_dir(root);
 
     let bound = UintN::from(2u64);
-    let eviction = evict(&store, &wal, &UintN::from(1u64), Some(&bound), 1000).unwrap();
+    let eviction = evict(&store, &wal, 0, &UintN::from(1u64), Some(&bound), 1000).unwrap();
     assert_eq!(eviction.stop, Stop::Bound);
     assert_eq!(eviction.next, UintN::from(3u64));
     assert_eq!(eviction.events.len(), 2);
@@ -146,12 +146,12 @@ async fn eviction_never_passes_the_offloaded_bound() {
     assert!(!store_file_exists(root, &queue, 2));
     assert!(store_file_exists(root, &queue, 3));
 
-    let eviction = evict(&store, &wal, &UintN::from(3u64), None, 150).unwrap();
+    let eviction = evict(&store, &wal, 0, &UintN::from(3u64), None, 150).unwrap();
     assert_eq!(eviction.stop, Stop::Freed);
     assert_eq!(eviction.next, UintN::from(5u64));
     assert!(!store_file_exists(root, &queue, 4));
 
-    let eviction = evict(&store, &wal, &UintN::from(5u64), None, 150).unwrap();
+    let eviction = evict(&store, &wal, 0, &UintN::from(5u64), None, 150).unwrap();
     assert_eq!(eviction.stop, Stop::Gap);
     assert!(eviction.events.is_empty());
 }
@@ -256,7 +256,7 @@ async fn concurrent_rescans_and_out_of_order_publications_preserve_usage() {
     tokio::join!(publish, rescan);
     assert_eq!(monitor.get_queue_size().await.unwrap(), 3200);
     assert_eq!(
-        scan(&queue.to_store_dir(root), FileKind::Store)
+        scan(&queue.to_store_dir(root), 0, FileKind::Store)
             .unwrap()
             .total,
         3200
@@ -409,6 +409,48 @@ async fn a_file_that_cannot_be_deleted_holds_cleanup_at_its_id() {
     assert!(!store_file_exists(root, &queue, 0x1fff));
     assert!(!store_file_exists(root, &queue, 0x2000));
     assert!(store_file_exists(root, &queue, 0x2001));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cleanup_deletes_nothing_behind_a_link_below_the_data_directory() {
+    let data = tempfile::TempDir::new().unwrap();
+    let outside = tempfile::TempDir::new().unwrap();
+    let queue = QueueIdResolver::new("inst").resolve("cam");
+    for id in 1..=4 {
+        write_store_file(outside.path(), &queue, id, 100);
+    }
+    let store = queue.to_store_dir(data.path());
+    std::fs::create_dir_all(store.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(queue.to_store_dir(outside.path()), &store).unwrap();
+    let fs = Fs::new(normfs_fs::FsConfig {
+        root: Some(data.path().to_path_buf()),
+        ..normfs_fs::FsConfig::default()
+    })
+    .unwrap();
+
+    let monitor = QueueMonitor::new(
+        fs,
+        queue.clone(),
+        DiskMonitorConfig {
+            max_size: 150,
+            check_interval: Duration::from_secs(60),
+            wal_settings: WalSettings::default(),
+            offload: false,
+        },
+        data.path().to_path_buf(),
+        None,
+        None,
+        Arc::new(DiskUsage::default()),
+        events::discard(),
+    )
+    .await
+    .unwrap();
+    monitor.check_and_cleanup(false).await.unwrap();
+
+    for id in 1..=4 {
+        assert!(store_file_exists(outside.path(), &queue, id));
+    }
 }
 
 #[tokio::test]

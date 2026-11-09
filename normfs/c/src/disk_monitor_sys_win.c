@@ -137,12 +137,14 @@ normfs_disk_sys_dots(const wchar_t *name)
 }
 
 void *
-normfs_disk_sys_dir_open(const char *path, size_t path_len, int *os_error)
+normfs_disk_sys_dir_open(const char *path, size_t path_len, size_t root,
+    int *os_error)
 {
 	struct normfs_disk_sys_dir *d;
 	wchar_t *wide;
 	size_t n;
 
+	(void)root;
 	*os_error = 0;
 	wide = normfs_disk_sys_wpath(path, path_len, 2u, os_error);
 	if (wide == NULL)
@@ -277,8 +279,8 @@ normfs_disk_sys_dir_close(void *handle)
 }
 
 int
-normfs_disk_sys_file_size(const char *path, size_t path_len, uint64_t *size,
-    int *os_error)
+normfs_disk_sys_file_size(const char *path, size_t path_len, size_t root,
+    uint64_t *size, int *os_error)
 {
 	WIN32_FILE_ATTRIBUTE_DATA data;
 	WIN32_FIND_DATAW found;
@@ -286,6 +288,7 @@ normfs_disk_sys_file_size(const char *path, size_t path_len, uint64_t *size,
 	HANDLE find;
 	DWORD tag = 0u;
 
+	(void)root;
 	*os_error = 0;
 	*size = 0u;
 	wide = normfs_disk_sys_wpath(path, path_len, 0u, os_error);
@@ -329,7 +332,8 @@ normfs_disk_sys_file_size(const char *path, size_t path_len, uint64_t *size,
 /* An evicted file a reader still holds loses its name at once, as with
  * unlink; FAT and exFAT fall back to the plain delete. */
 int
-normfs_disk_sys_unlink(const char *path, size_t path_len, int *os_error)
+normfs_disk_sys_unlink(const char *path, size_t path_len, size_t root,
+    int *os_error)
 {
 	FILE_DISPOSITION_INFO plain;
 	wchar_t *wide;
@@ -337,6 +341,7 @@ normfs_disk_sys_unlink(const char *path, size_t path_len, int *os_error)
 	HANDLE h;
 	int ok;
 
+	(void)root;
 	*os_error = 0;
 	wide = normfs_disk_sys_wpath(path, path_len, 0u, os_error);
 	if (wide == NULL)

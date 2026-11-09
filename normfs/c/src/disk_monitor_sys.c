@@ -17,6 +17,7 @@
 #include <unistd.h>
 
 #include "normfs/disk_monitor_sys.h"
+#include "normfs/fs_dir.h"
 
 /* A failing syscall that left errno at 0 would break the Rust side's
  * io::Error::from_raw_os_error, so normalise to EIO. */
@@ -29,18 +30,72 @@ normfs_disk_sys_fail(int *os_error)
 	return -1;
 }
 
-void *
-normfs_disk_sys_dir_open(const char *path, size_t path_len, int *os_error)
+/* The directory holding the last name of path and that name, walked from the
+ * data directory as normfs/fs_sys.h does; AT_FDCWD and the whole path for root
+ * 0. errno is set on failure. */
+static int
+normfs_disk_sys_at(const char *path, size_t path_len, size_t root, int *dir,
+    const char **name)
 {
-	DIR *d;
+	struct normfs_fs_status st;
+	size_t at = 0u;
 
-	(void)path_len;
+	if (root == 0u) {
+		*dir = AT_FDCWD;
+		*name = path;
+		return 0;
+	}
+	if (root >= path_len || path_len >= (size_t)NORMFS_FS_PATH_MAX) {
+		errno = EINVAL;
+		return -1;
+	}
+	st = normfs_fs_open_parent(path, path_len, root, dir, &at);
+	if (st.code != 0) {
+		errno = (st.code == 1) ? st.os_error : EINVAL;
+		return -1;
+	}
+	*name = path + at;
+	return 0;
+}
+
+static void
+normfs_disk_sys_done(int dir)
+{
+	int saved = errno;
+
+	if (dir != AT_FDCWD)
+		(void)close(dir);
+	errno = saved;
+}
+
+void *
+normfs_disk_sys_dir_open(const char *path, size_t path_len, size_t root,
+    int *os_error)
+{
+	const char *name;
+	DIR *d = NULL;
+	int dir;
+	int fd;
+
 	*os_error = 0;
 
 	errno = 0;
-	d = opendir(path);
+	if (normfs_disk_sys_at(path, path_len, root, &dir, &name) == 0) {
+		fd = openat(dir, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC |
+		    (root != 0u ? O_NOFOLLOW : 0));
+		normfs_disk_sys_done(dir);
+		if (fd >= 0) {
+			d = fdopendir(fd);
+			if (d == NULL) {
+				int saved = errno;
+
+				(void)close(fd);
+				errno = saved;
+			}
+		}
+	}
 	if (d == NULL) {
-		if (errno != ENOENT && errno != ENOTDIR)
+		if (errno != ENOENT && errno != ENOTDIR && errno != ELOOP)
 			(void)normfs_disk_sys_fail(os_error);
 		return NULL;
 	}
@@ -114,18 +169,25 @@ normfs_disk_sys_dir_close(void *handle)
 }
 
 int
-normfs_disk_sys_file_size(const char *path, size_t path_len, uint64_t *size,
-    int *os_error)
+normfs_disk_sys_file_size(const char *path, size_t path_len, size_t root,
+    uint64_t *size, int *os_error)
 {
 	struct stat st;
+	const char *name;
+	int dir;
+	int rc;
 
-	(void)path_len;
 	*os_error = 0;
 	*size = 0u;
 
 	errno = 0;
-	if (lstat(path, &st) != 0) {
-		if (errno == ENOENT || errno == ENOTDIR)
+	rc = normfs_disk_sys_at(path, path_len, root, &dir, &name);
+	if (rc == 0) {
+		rc = fstatat(dir, name, &st, AT_SYMLINK_NOFOLLOW);
+		normfs_disk_sys_done(dir);
+	}
+	if (rc != 0) {
+		if (errno == ENOENT || errno == ENOTDIR || errno == ELOOP)
 			return 0;
 		return normfs_disk_sys_fail(os_error);
 	}
@@ -138,13 +200,22 @@ normfs_disk_sys_file_size(const char *path, size_t path_len, uint64_t *size,
 }
 
 int
-normfs_disk_sys_unlink(const char *path, size_t path_len, int *os_error)
+normfs_disk_sys_unlink(const char *path, size_t path_len, size_t root,
+    int *os_error)
 {
-	(void)path_len;
+	const char *name;
+	int dir;
+	int rc;
+
 	*os_error = 0;
 
 	errno = 0;
-	if (unlink(path) != 0)
+	rc = normfs_disk_sys_at(path, path_len, root, &dir, &name);
+	if (rc == 0) {
+		rc = unlinkat(dir, name, 0);
+		normfs_disk_sys_done(dir);
+	}
+	if (rc != 0)
 		return normfs_disk_sys_fail(os_error);
 
 	return 0;

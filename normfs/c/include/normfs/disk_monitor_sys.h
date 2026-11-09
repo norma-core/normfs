@@ -11,7 +11,9 @@
  * never sees; src/disk_monitor.c is proved against these contracts and must
  * never include a system header (normfs/seed_sys.h has the reason). DIR and
  * struct stat stay out of the proved unit: a listing is an opaque handle, an
- * entry is a name, a kind and a size.
+ * entry is a name, a kind and a size. `root` is as in normfs/fs_sys.h: past
+ * the data directory no link is followed, and a path that is not below it
+ * fails with EINVAL.
  */
 
 /* The model excludes external namespace changes between syscalls. Bytes count
@@ -41,7 +43,7 @@ enum normfs_disk_sys_kind {
 };
 
 /* opendir(3). NULL with os_error 0 is a path that is not a directory
- * (ENOENT, ENOTDIR); NULL with os_error > 0 is a failure. */
+ * (ENOENT, ENOTDIR, or ELOOP for a link below the data directory); NULL with os_error > 0 is a failure. */
 /*@ requires path_len < NORMFS_DISK_PATH_MAX;
     requires \valid_read(path + (0 .. path_len));
     requires path[path_len] == 0;
@@ -51,7 +53,7 @@ enum normfs_disk_sys_kind {
     ensures \result == \null ==> *os_error >= 0;
     ensures \result != \null ==> *os_error == 0;
 */
-void *normfs_disk_sys_dir_open(const char *path, size_t path_len,
+void *normfs_disk_sys_dir_open(const char *path, size_t path_len, size_t root,
     int *os_error);
 
 /*
@@ -85,8 +87,9 @@ int normfs_disk_sys_dir_next(void *handle, char *name, size_t name_cap,
 /*@ assigns \nothing; */
 void normfs_disk_sys_dir_close(void *handle);
 
-/* lstat(2): 1 for a regular file with its size, 0 for anything absent or
- * not a regular file, -1 on any other failure. */
+/* lstat(2): 1 for a regular file with its size, 0 for anything absent, not
+ * a regular file, or behind a link below the data directory, -1 on any other
+ * failure. */
 /*@ requires path_len < NORMFS_DISK_PATH_MAX;
     requires \valid_read(path + (0 .. path_len));
     requires path[path_len] == 0;
@@ -103,7 +106,7 @@ void normfs_disk_sys_dir_close(void *handle);
               *size == disk_fs_size(path, path_len) &&
               *size <= disk_fs_bytes;
 */
-int normfs_disk_sys_file_size(const char *path, size_t path_len,
+int normfs_disk_sys_file_size(const char *path, size_t path_len, size_t root,
     uint64_t *size, int *os_error);
 
 /*@ requires path_len < NORMFS_DISK_PATH_MAX;
@@ -123,6 +126,7 @@ int normfs_disk_sys_file_size(const char *path, size_t path_len,
               disk_fs_bytes == \old(disk_fs_bytes) -
                 disk_fs_size{Pre}(path, path_len);
 */
-int normfs_disk_sys_unlink(const char *path, size_t path_len, int *os_error);
+int normfs_disk_sys_unlink(const char *path, size_t path_len, size_t root,
+    int *os_error);
 
 #endif /* NORMFS_DISK_MONITOR_SYS_H */

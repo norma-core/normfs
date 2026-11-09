@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description = "Filesystem layer for NormFS: proved protocol planner and bounded thread-pool executor"
+links = "normfs_fs_c"
 
 [features]
 default = []

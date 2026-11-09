@@ -77,13 +77,15 @@ struct normfs_disk_scan {
  * WAL file when there is none, until `to_free` bytes are gone, an id has
  * neither file, the id passes `bound`, or a file cannot be sized or removed.
  * `next` and `to_free` are updated in place. has_bound == 0 means every id
- * may go: the no-offloader case.
+ * may go: the no-offloader case. `root` is the data directory's length in
+ * both dirs, as in normfs/fs_sys.h; 0 resolves them as given.
  */
 struct normfs_disk_evict_req {
 	const char *store_dir;
 	size_t store_dir_len;
 	const char *wal_dir;
 	size_t wal_dir_len;
+	size_t root;
 	struct normfs_disk_id next;
 	struct normfs_disk_id bound;
 	int has_bound;
@@ -108,12 +110,12 @@ normfs_disk_path(const char *dir, size_t dir_len,
     char *out, size_t out_len, size_t *used);
 
 struct normfs_disk_result
-normfs_disk_file_size(const char *dir, size_t dir_len,
+normfs_disk_file_size(const char *dir, size_t dir_len, size_t root,
     const struct normfs_disk_id *id, int kind, uint64_t *size);
 
 /* A missing directory scans as empty. */
 struct normfs_disk_result
-normfs_disk_scan(const char *dir, size_t dir_len, int kind,
+normfs_disk_scan(const char *dir, size_t dir_len, size_t root, int kind,
     struct normfs_disk_scan *out);
 
 struct normfs_disk_result

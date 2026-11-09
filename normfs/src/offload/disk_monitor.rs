@@ -61,6 +61,7 @@ struct CDiskEvictReq {
     store_dir_len: usize,
     wal_dir: *const c_char,
     wal_dir_len: usize,
+    root: usize,
     next: CDiskId,
     bound: CDiskId,
     has_bound: c_int,
@@ -93,6 +94,7 @@ unsafe extern "C" {
     fn normfs_disk_scan(
         dir: *const c_char,
         dir_len: usize,
+        root: usize,
         kind: c_int,
         out: *mut CDiskScan,
     ) -> CDiskResult;
@@ -258,7 +260,8 @@ pub(crate) struct DirScan {
     pub min: Option<UintN>,
 }
 
-pub(crate) fn scan(dir: &Path, kind: FileKind) -> io::Result<DirScan> {
+/// `root` is the data directory's length in `dir`, from `Fs::root_len`.
+pub(crate) fn scan(dir: &Path, root: usize, kind: FileKind) -> io::Result<DirScan> {
     let dir_c = c_dir(dir)?;
     let mut out = CDiskScan {
         total: 0,
@@ -270,7 +273,15 @@ pub(crate) fn scan(dir: &Path, kind: FileKind) -> io::Result<DirScan> {
     };
 
     // SAFETY: as in file_path.
-    let r = unsafe { normfs_disk_scan(dir_c.as_ptr(), dir_c.as_bytes().len(), kind.c(), &mut out) };
+    let r = unsafe {
+        normfs_disk_scan(
+            dir_c.as_ptr(),
+            dir_c.as_bytes().len(),
+            root,
+            kind.c(),
+            &mut out,
+        )
+    };
     map_status(r)?;
     let min = if out.has_min == 1 {
         Some(from_c_id(&out.min)?)
@@ -313,6 +324,7 @@ pub(crate) struct Eviction {
 pub(crate) fn evict(
     store_dir: &Path,
     wal_dir: &Path,
+    root: usize,
     start: &UintN,
     bound: Option<&UintN>,
     to_free: u64,
@@ -328,6 +340,7 @@ pub(crate) fn evict(
         store_dir_len: store_c.as_bytes().len(),
         wal_dir: wal_c.as_ptr(),
         wal_dir_len: wal_c.as_bytes().len(),
+        root,
         next: c_id(start)?,
         bound: match bound {
             Some(b) => c_id(b)?,
@@ -441,6 +454,8 @@ struct QueueMonitor {
     config: DiskMonitorConfig,
     store_dir: PathBuf,
     wal_dir: PathBuf,
+    /// The data directory's length in both dirs.
+    root: usize,
     offloader: Option<Arc<QueueOffloader>>,
     store_bytes: Arc<QueueBytes>,
     /// The last eviction's `next`. Publication takes `store_bytes`' shared side, so
@@ -475,6 +490,7 @@ impl QueueMonitor {
 
         let store_dir = queue_id.to_store_dir(&root_path);
         let wal_dir = queue_id.to_wal_dir(&root_path);
+        let root = fs.root_len(&store_dir)?;
         let store_bytes = disk_usage.queue(&queue_id);
 
         let monitor = Self {
@@ -483,6 +499,7 @@ impl QueueMonitor {
             config,
             store_dir,
             wal_dir,
+            root,
             offloader,
             store_bytes,
             cursor: std::sync::Mutex::new(None),
@@ -509,16 +526,18 @@ impl QueueMonitor {
 
     async fn scan_dir(&self, dir: &Path, kind: FileKind) -> Result<DirScan, Error> {
         let dir = dir.to_path_buf();
-        Ok(self.fs.run_blocking(move || scan(&dir, kind)).await?)
+        let root = self.root;
+        Ok(self.fs.run_blocking(move || scan(&dir, root, kind)).await?)
     }
 
     async fn rescan_store(&self) -> Result<(), Error> {
         let tracked = self.store_bytes.clone().exclusive().await;
         let dir = self.store_dir.clone();
+        let root = self.root;
         let min = self
             .fs
             .run_blocking(move || {
-                let store = scan(&dir, FileKind::Store)?;
+                let store = scan(&dir, root, FileKind::Store)?;
                 tracked.set(store.total);
                 Ok(store.min)
             })
@@ -550,6 +569,7 @@ impl QueueMonitor {
         let tracked = self.store_bytes.clone().exclusive().await;
         let store_dir = self.store_dir.clone();
         let wal_dir = self.wal_dir.clone();
+        let root = self.root;
         let evicted = self.fs.run_blocking(move || {
             let to_free = tracked
                 .get()
@@ -558,7 +578,7 @@ impl QueueMonitor {
             if to_free == 0 {
                 return Ok(None);
             }
-            let result = evict(&store_dir, &wal_dir, &start, bound.as_ref(), to_free);
+            let result = evict(&store_dir, &wal_dir, root, &start, bound.as_ref(), to_free);
             match &result {
                 Ok(eviction) => {
                     for event in &eviction.events {
@@ -568,7 +588,7 @@ impl QueueMonitor {
                     }
                 }
                 // Deletions before the failure are not reported back.
-                Err(_) => tracked.set(scan(&store_dir, FileKind::Store)?.total),
+                Err(_) => tracked.set(scan(&store_dir, root, FileKind::Store)?.total),
             }
             result.map(Some)
         });
