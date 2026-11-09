@@ -249,3 +249,27 @@ fn test_find_max_id_lexicographic_vs_numeric() {
         "Max should be 0x1000000 (16777216) from '001/000/000.store', not 0xffffff (16777215) from 'fff/fff.store'"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn without_a_data_directory_a_linked_file_or_chunk_is_scanned() {
+    let dir = tempdir().unwrap();
+    let base = dir.path().join("store");
+    let elsewhere = dir.path().join("elsewhere");
+    fs::create_dir_all(base.join("000")).unwrap();
+    fs::create_dir_all(elsewhere.join("chunk")).unwrap();
+    fs::write(base.join("000/001.store"), b"").unwrap();
+    fs::write(elsewhere.join("file.store"), b"").unwrap();
+    fs::write(elsewhere.join("chunk/000.store"), b"").unwrap();
+    std::os::unix::fs::symlink(elsewhere.join("file.store"), base.join("000/002.store")).unwrap();
+    std::os::unix::fs::symlink(elsewhere.join("chunk"), base.join("001")).unwrap();
+
+    match scan_ids(&base, "store", Scan::All, None).unwrap() {
+        ScanResult::All(ids) => assert_eq!(ids.len(), 3),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        scan_ids(&base, "store", Scan::Max, Some(dir.path())).unwrap(),
+        ScanResult::One(UintN::from(1u64))
+    );
+}

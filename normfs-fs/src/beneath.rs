@@ -90,6 +90,11 @@ pub(crate) struct At {
 }
 
 impl At {
+    /// Whether the path is opened by the walk rather than resolved as given.
+    pub(crate) fn walks(&self) -> bool {
+        self.root > 0
+    }
+
     #[cfg(windows)]
     pub(crate) fn new(root: Option<&Path>, path: &Path) -> io::Result<At> {
         let root = root_len(root, path)?;
@@ -106,7 +111,8 @@ impl At {
             io::Error::new(io::ErrorKind::InvalidInput, "path is not valid UTF-8")
         })?;
         // "wal/" names what "wal" does; the walk would see an empty last name.
-        while let [rest @ .., b'/'] = bytes
+        while root > 0
+            && let [rest @ .., b'/'] = bytes
             && rest.len() > root
         {
             bytes = rest;

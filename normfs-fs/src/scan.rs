@@ -23,9 +23,22 @@ pub enum ScanResult {
 }
 
 /// Lists through the walk, so a link under `dir` is neither entered nor
-/// counted as a file.
+/// counted as a file. Resolved as given, a link is followed, as it was before
+/// the walk.
 fn list(dir: &Path, root: Option<&Path>) -> io::Result<Vec<Entry>> {
-    beneath::list(&At::new(root, dir)?)
+    let at = At::new(root, dir)?;
+    let mut entries = beneath::list(&at)?;
+    if !at.walks() {
+        for entry in entries.iter_mut() {
+            if !entry.stat.is_file() && !entry.stat.is_dir() {
+                let target = At::new(root, &dir.join(&entry.name))?;
+                if let Ok(Some(stat)) = beneath::stat_as_given(&target) {
+                    entry.stat = stat;
+                }
+            }
+        }
+    }
+    Ok(entries)
 }
 
 pub(crate) fn scan_ids(

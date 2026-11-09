@@ -633,7 +633,8 @@ impl Fs {
         let fs = self.clone();
         let dir = dir.to_path_buf();
         self.run_blocking(move || {
-            let entries = match beneath::list(&fs.at(&dir)?) {
+            let at = fs.at(&dir)?;
+            let entries = match beneath::list(&at) {
                 Ok(entries) => entries,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
                 Err(e) => return Err(e),
@@ -641,8 +642,14 @@ impl Fs {
             let mut removed = 0;
             for entry in entries {
                 let path = dir.join(entry.name);
-                // A link is unlinked itself; left, it would refuse the next create of its name.
-                if !entry.stat.is_dir() && path.extension().and_then(|s| s.to_str()) == Some(ext) {
+                // Below a data directory a link is unlinked itself; left, it would refuse
+                // the next create of its name. Resolved as given, only files go, as before.
+                let gone = if at.walks() {
+                    !entry.stat.is_dir()
+                } else {
+                    matches!(beneath::stat_as_given(&fs.at(&path)?), Ok(Some(s)) if s.is_file())
+                };
+                if gone && path.extension().and_then(|s| s.to_str()) == Some(ext) {
                     match beneath::unlink(&fs.at(&path)?) {
                         Ok(()) => removed += 1,
                         Err(e) => log::warn!(target: "normfs-fs",
