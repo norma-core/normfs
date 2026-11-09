@@ -71,7 +71,7 @@ void normfs_net_reader_init(struct normfs_net_reader *r);
  * the next header. WOULD_BLOCK keeps the bytes read so far.
  */
 struct normfs_net_result
-normfs_net_read_header(struct normfs_net_reader *r, int fd);
+normfs_net_read_header(struct normfs_net_reader *r, normfs_net_fd fd);
 
 /*
  * Reads the payload announced by the last header into buf, which holds len
@@ -80,13 +80,13 @@ normfs_net_read_header(struct normfs_net_reader *r, int fd);
  * more is to come. YIELD after NORMFS_NET_BATCH reads that left more to come.
  */
 struct normfs_net_result
-normfs_net_read_payload(struct normfs_net_reader *r, int fd, uint8_t *buf,
+normfs_net_read_payload(struct normfs_net_reader *r, normfs_net_fd fd, uint8_t *buf,
     size_t len);
 
 /* Writes buf[*off .. len) until done, the socket would block or a batch of
  * writes is spent (YIELD); *off advances. */
 struct normfs_net_result
-normfs_net_write(int fd, const uint8_t *buf, size_t len, size_t *off);
+normfs_net_write(normfs_net_fd fd, const uint8_t *buf, size_t len, size_t *off);
 
 /* normfs_net_sys_accept, retried while the pending connection failed, at most
  * NORMFS_NET_ACCEPT_TRIES times; 2 when every try failed and more may wait. */

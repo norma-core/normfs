@@ -301,8 +301,8 @@ async fn a_bad_request_drops_replies_a_stalled_client_never_read() {
         .unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // A drain would deliver every queued reply; an abort leaves only what the
-    // kernels already held.
+    // A drain would deliver all 32 replies; an abort leaves only what the
+    // kernels already held, which on Windows can be a whole reply.
     let mut got = 0;
     let mut buf = vec![0; 64 * 1024];
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -313,7 +313,7 @@ async fn a_bad_request_drops_replies_a_stalled_client_never_read() {
     .await
     .expect("the connection stayed open");
     assert!(
-        got < 1024 * 1024,
+        got < 4 * RECORD,
         "{got} bytes reached a client that stopped reading"
     );
 }

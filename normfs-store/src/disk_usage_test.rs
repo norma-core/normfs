@@ -2,6 +2,7 @@ use crate::DiskUsage;
 use bytes::Bytes;
 use normfs_fs::{Fs, FsConfig, PublishSpec, Runs, TmpMode};
 use normfs_types::QueueIdResolver;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
@@ -17,6 +18,7 @@ fn spec(tmp: &Path, dst: &Path, size: usize) -> PublishSpec {
     }
 }
 
+#[cfg(unix)]
 fn synced(tmp: &Path, dst: &Path, size: usize) -> PublishSpec {
     PublishSpec {
         sync: true,
@@ -111,6 +113,7 @@ async fn publications_of_one_queue_do_not_wait_for_each_other() {
     assert_eq!(rescan.await.unwrap().get(), 100);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_rename_is_counted_even_when_the_directory_sync_fails() {
     let dir = tempfile::tempdir().unwrap();

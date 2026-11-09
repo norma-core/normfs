@@ -7,7 +7,13 @@ fn main() {
     let sources = [
         manifest_dir.join("c/src/fs_plan.c"),
         manifest_dir.join("c/src/fs_dir.c"),
-        manifest_dir.join("c/src/fs_sys.c"),
+        manifest_dir.join(
+            if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+                "c/src/fs_sys_win.c"
+            } else {
+                "c/src/fs_sys.c"
+            },
+        ),
     ];
 
     println!("cargo:rerun-if-changed={}", include_dir.display());

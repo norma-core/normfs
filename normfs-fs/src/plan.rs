@@ -183,11 +183,11 @@ pub struct Plan {
 unsafe impl Send for Plan {}
 
 fn cstring(path: &Path) -> Result<CString, PlanError> {
-    use std::os::unix::ffi::OsStrExt;
-    if path.as_os_str().as_bytes().len() >= 4096 {
+    let bytes = crate::os::path_bytes(path).ok_or(PlanError::Path)?;
+    if bytes.len() >= 4096 {
         return Err(PlanError::PathTooLong);
     }
-    CString::new(path.as_os_str().as_bytes()).map_err(|_| PlanError::Path)
+    CString::new(bytes).map_err(|_| PlanError::Path)
 }
 
 fn status(rc: c_int) -> Result<(), PlanError> {
@@ -339,7 +339,11 @@ impl Plan {
 
     /// The operation named by `next` failed with `os_error` (> 0).
     pub fn err(&mut self, os_error: i32) -> Result<(), PlanError> {
-        let os_error = if os_error > 0 { os_error } else { libc::EIO };
+        let os_error = if os_error > 0 {
+            os_error
+        } else {
+            crate::os::EIO
+        };
         // SAFETY: as in `ok`.
         let rc = unsafe {
             match self.kind {

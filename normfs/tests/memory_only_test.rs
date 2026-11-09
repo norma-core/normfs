@@ -75,7 +75,17 @@ async fn memory_only_does_not_reissue_entry_zero_after_a_crash() {
             .await
             .unwrap();
         assert_eq!(first.to_u64().unwrap(), 0);
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Waits for the flusher's write; a fixed 200 ms was missed on a loaded
+        // Windows runner.
+        let pointers = root.join(".memory_pointers");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !std::fs::read_to_string(&pointers).is_ok_and(|s| s.contains("rover/events")) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the pointer was never written"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         drop(fs);
     }
 

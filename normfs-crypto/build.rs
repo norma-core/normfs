@@ -4,10 +4,19 @@ use std::path::PathBuf;
 fn main() {
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let include_dir = manifest_dir.join("c/include");
+    let windows = env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
     let sources = [
         manifest_dir.join("c/src/seed.c"),
-        manifest_dir.join("c/src/seed_sys.c"),
+        manifest_dir.join(if windows {
+            "c/src/seed_sys_win.c"
+        } else {
+            "c/src/seed_sys.c"
+        }),
     ];
+    if windows {
+        println!("cargo:rustc-link-lib=bcrypt");
+        println!("cargo:rustc-link-lib=advapi32");
+    }
 
     println!("cargo:rerun-if-changed={}", include_dir.display());
     for source in &sources {

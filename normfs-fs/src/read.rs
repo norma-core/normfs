@@ -1,7 +1,6 @@
 use std::fs::{File, Metadata};
 use std::future::Future;
 use std::io::{self, SeekFrom};
-use std::os::unix::fs::FileExt;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -109,7 +108,7 @@ impl AsyncRead for ReadFile {
                             buffer.resize(len, 0);
                         }
                         let n = loop {
-                            match file.read_at(&mut buffer[..len], offset) {
+                            match crate::os::read_at(&file, &mut buffer[..len], offset) {
                                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                                 result => break result,
                             }

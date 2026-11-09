@@ -94,12 +94,17 @@ depends on:
   `os_error` postcondition would become *impossible* rather than merely
   unproven. Syscalls go behind hand-written contracts in a `*_sys.h`, with the
   bodies in a `*_sys.c` that WP never sees, discharged by C tests instead.
+  Windows gets its own bodies in `*_sys_win.c`, picked by `build.rs`, with
+  Win32 codes in `os_error` because that is what `from_raw_os_error` reads
+  there; the cargo tests on the Windows CI jobs discharge them.
 - **Every function with a body must be listed in the module's `WP_FCTS` set**,
   statics included. A function left off the list is silently never scheduled,
   and `check-proved.sh` cannot tell that apart from one that was proved.
 - **`-machdep gcc_x86_64` is pinned.** This project is 64-bit only: no 32-bit
   support, no 32-bit tests, no second machine model. Do not add one. (Deployment
-  targets are amd64 and arm64; both are LP64, so one model covers them.)
+  targets are amd64 and arm64; both are LP64, so one model covers them.
+  Windows is LLP64, where `long` is 32 bits: a contract that relies on `long`
+  must stay within 32 bits, as `seed_sys.h`'s `NORMFS_SEED_SYS_IO_MAX` does.)
 - **`frama-c` exits 0 whether or not it proved anything.** The verdict comes
   from `verify/check-proved.sh` ruling on a `-wp-report-json` report. Never
   read success off the console summary.
