@@ -553,19 +553,25 @@ async fn a_buffered_ack_does_not_report_a_pooled_record_durable() {
         )
         .await;
 
-    // Several flush ticks. Entry 1 reaches the file; entry 0 cannot.
-    tokio::time::sleep(Duration::from_millis(80)).await;
+    // Entry 1 reaches the file; entry 0 cannot. A slow runner may need more
+    // than a few ticks, and the ticks after it give a wrong ack time to land.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !read_file_content(&file_path)
+        .await
+        .windows(18)
+        .any(|w| w == b"buffered-entry-one")
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "entry 1 should have been written from the buffer"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(
         pool.durable_before(),
         0,
         "entry 0 was never handed over, so nothing may have written it"
-    );
-    assert!(
-        read_file_content(&file_path)
-            .await
-            .windows(18)
-            .any(|w| w == b"buffered-entry-one"),
-        "entry 1 should have been written from the buffer"
     );
     assert!(
         ack_receiver.try_recv().is_err(),
