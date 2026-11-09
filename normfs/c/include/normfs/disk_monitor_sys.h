@@ -17,7 +17,10 @@
  */
 
 /* The model excludes external namespace changes between syscalls. Bytes count
- * regular-file lengths by directory entry, not allocated blocks or inodes. */
+ * regular-file lengths by directory entry, not allocated blocks or inodes.
+ * With root > 0 a path is resolved below the data directory following no
+ * link, so a file behind a link, or a data directory that does not resolve,
+ * is not present in the model. */
 /*@ ghost extern int normfs_disk_fs_world; */
 /*@ axiomatic NormfsDiskKernel {
       predicate disk_fs_present{L}(char *path, integer len)
@@ -43,8 +46,8 @@ enum normfs_disk_sys_kind {
 };
 
 /* opendir(3). NULL with os_error 0 is a path that is not a directory
- * (ENOENT, ENOTDIR, or ELOOP for a link below the data directory); NULL
- * with os_error > 0 is a failure. */
+ * (ENOENT, ENOTDIR, or with root > 0 ELOOP); NULL with os_error > 0 is a
+ * failure. */
 /*@ requires path_len < NORMFS_DISK_PATH_MAX;
     requires \valid_read(path + (0 .. path_len));
     requires path[path_len] == 0;
