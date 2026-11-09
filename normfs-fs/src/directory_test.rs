@@ -197,6 +197,35 @@ async fn a_link_with_the_extension_is_removed_and_not_its_target() {
     assert_eq!(fs::read(root.path().join("target")).unwrap(), b"kept");
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn without_a_data_directory_only_files_with_the_extension_go() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("tmp");
+    fs::create_dir_all(root.path().join("target")).unwrap();
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("a.tmp"), b"").unwrap();
+    std::os::unix::fs::symlink(root.path().join("target"), dir.join("b.tmp")).unwrap();
+    std::os::unix::fs::symlink(root.path().join("gone"), dir.join("c.tmp")).unwrap();
+
+    assert_eq!(fs().remove_files_with_ext(&dir, "tmp").await.unwrap(), 1);
+    assert!(fs::symlink_metadata(dir.join("b.tmp")).is_ok());
+    assert!(fs::symlink_metadata(dir.join("c.tmp")).is_ok());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn without_a_data_directory_a_trailing_slash_is_kept() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir(root.path().join("target")).unwrap();
+    let link = root.path().join("ln");
+    std::os::unix::fs::symlink(root.path().join("target"), &link).unwrap();
+    let slashed = PathBuf::from(format!("{}/", link.display()));
+
+    assert!(fs().unlink(&slashed).await.is_err());
+    assert!(fs::symlink_metadata(&link).is_ok());
+}
+
 #[test]
 fn an_empty_data_directory_is_refused() {
     let made = Fs::new(crate::FsConfig {
