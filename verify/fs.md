@@ -51,7 +51,9 @@ The assumptions are:
   segments (no ".", "..", '/' or NUL; empty pieces between slashes are
   skipped), to open only segments, and to open
   one more descriptor than it releases when it succeeds and as many as it
-  releases when it fails. That each open, and each `*at` call on the last name, follows no
+  releases when it fails. That the descriptor it returns is the parent of
+  the last name, each segment opened below the one before, is tested, not
+  proved. That each open, and each `*at` call on the last name, follows no
   link is a shim assumption (`O_NOFOLLOW`, `AT_SYMLINK_NOFOLLOW`) checked by
   `tests/test_fs.c`. A link placed or swapped in below the data directory
   then fails the step instead of redirecting it; the data directory itself
