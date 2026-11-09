@@ -519,17 +519,16 @@ fn to_u64(n: &UintN, what: &str) -> Result<u64, Error> {
     })
 }
 
-/// `queue\tid`, `queue\tid\tfile` or `queue\tid\tfile\texact`; the third
-/// column is the cloud-direct queue's last file (0 before the first), the
-/// fourth says it is exact, and a v1 file without them still parses.
 type Parsed = (
     HashMap<String, Pointer>,
     HashSet<String>,
     HashMap<String, u64>,
 );
 
-/// The third map is each memory life's id, taken before two spellings merge
-/// into a line with a file.
+/// `queue\tid`, `queue\tid\tfile` or `queue\tid\tfile\texact`; the third
+/// column is the cloud-direct queue's last file (0 before the first), the
+/// fourth says it is exact, and a v1 file without them still parses. The third
+/// map is each memory life's id, taken before two spellings merge.
 fn parse_pointers(contents: &str) -> Result<Parsed, Error> {
     let mut queues = HashMap::new();
     let mut exact = HashSet::new();
