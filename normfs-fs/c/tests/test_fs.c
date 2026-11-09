@@ -400,6 +400,9 @@ test_walk_follows_no_link_below_the_root(void)
 	CHECK(symlink(path, out) == 0);
 	CHECK(normfs_fs_sys_open_file(out, strlen(out), rl, 0, &e) == -1 && e == ELOOP);
 	CHECK(normfs_fs_sys_open_file(out, strlen(out), rl, 1, &e) == -1 && e == ELOOP);
+	CHECK(normfs_fs_sys_file_len(out, strlen(out), rl, &len, &e) == -1 && e == EEXIST);
+	CHECK(path_in(path, sizeof(path), "walk-link/x"));
+	CHECK(normfs_fs_sys_fsync_parent(path, strlen(path), rl, &e) == -1);
 
 	CHECK(path_in(path, sizeof(path), "walk-link"));
 	CHECK(normfs_fs_sys_stat(path, strlen(path), rl, 0, &len, &e) == 3);
