@@ -1,3 +1,5 @@
+use std::io;
+use std::os::raw::c_int;
 use std::path::Path;
 
 use aes_gcm::{
@@ -23,6 +25,7 @@ pub enum CryptoError {
     Encryption,
     Decryption,
     InvalidNonce,
+    OsRng(io::Error),
     Verification,
 }
 
@@ -34,6 +37,7 @@ impl std::fmt::Display for CryptoError {
             CryptoError::Encryption => write!(f, "Encryption failed"),
             CryptoError::Decryption => write!(f, "Decryption failed"),
             CryptoError::InvalidNonce => write!(f, "Invalid nonce size"),
+            CryptoError::OsRng(e) => write!(f, "OS random source failed: {}", e),
             CryptoError::Verification => write!(f, "Signature verification failed"),
         }
     }
@@ -43,6 +47,7 @@ impl std::error::Error for CryptoError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             CryptoError::Seed(e) => Some(e),
+            CryptoError::OsRng(e) => Some(e),
             _ => None,
         }
     }
@@ -52,6 +57,26 @@ impl From<SeedError> for CryptoError {
     fn from(e: SeedError) -> Self {
         CryptoError::Seed(e)
     }
+}
+
+unsafe extern "C" {
+    fn normfs_seed_sys_entropy(buf: *mut u8, len: usize, os_error: *mut c_int) -> c_int;
+}
+
+/// Random rather than derived from the file: one file id can be sealed twice
+/// with different bytes -- a WAL file migrated again after a crash, under the
+/// compression configured by then -- and a derived nonce would repeat under the
+/// file's key. Readers take the nonce off disk, so files sealed either way open.
+fn fresh_nonce() -> Result<[u8; 12], CryptoError> {
+    let mut nonce = [0u8; 12];
+    let mut os_error: c_int = 0;
+    // SAFETY: `nonce` is 12 writable bytes, inside the shim's 256 byte bound,
+    // and `os_error` is a live int the shim only writes.
+    let r = unsafe { normfs_seed_sys_entropy(nonce.as_mut_ptr(), nonce.len(), &mut os_error) };
+    if r != 0 {
+        return Err(CryptoError::OsRng(io::Error::from_raw_os_error(os_error)));
+    }
+    Ok(nonce)
 }
 
 #[derive(ZeroizeOnDrop)]
@@ -128,20 +153,12 @@ impl CryptoContext {
         Ok(ChaCha20Rng::from_seed(rng_seed))
     }
 
-    fn file_cipher(
-        &self,
-        queue_id: &QueueId,
-        file_id: &UintN,
-    ) -> Result<(Aes256Gcm, [u8; 12]), CryptoError> {
+    fn file_cipher(&self, queue_id: &QueueId, file_id: &UintN) -> Result<Aes256Gcm, CryptoError> {
         let mut rng = self.derive_rng(queue_id, file_id)?;
 
         let mut aes_key = [0u8; 32];
         rng.fill_bytes(&mut aes_key);
-        let cipher = Aes256Gcm::new(&aes_key.into());
-
-        let mut nonce_bytes = [0u8; 12];
-        rng.fill_bytes(&mut nonce_bytes);
-        Ok((cipher, nonce_bytes))
+        Ok(Aes256Gcm::new(&aes_key.into()))
     }
 
     pub fn encrypt(
@@ -150,7 +167,8 @@ impl CryptoContext {
         file_id: &UintN,
         content: &Bytes,
     ) -> Result<(Bytes, Bytes), CryptoError> {
-        let (cipher, nonce_bytes) = self.file_cipher(queue_id, file_id)?;
+        let cipher = self.file_cipher(queue_id, file_id)?;
+        let nonce_bytes = fresh_nonce()?;
         let ciphertext = cipher
             .encrypt(&nonce_bytes.into(), content.as_ref())
             .map_err(|_| CryptoError::Encryption)?;
@@ -169,7 +187,8 @@ impl CryptoContext {
         file_id: &UintN,
         buf: &mut [u8],
     ) -> Result<([u8; 12], [u8; 16]), CryptoError> {
-        let (cipher, nonce_bytes) = self.file_cipher(queue_id, file_id)?;
+        let cipher = self.file_cipher(queue_id, file_id)?;
+        let nonce_bytes = fresh_nonce()?;
         let tag = cipher
             .encrypt_inout_detached(&nonce_bytes.into(), b"", buf.into())
             .map_err(|_| CryptoError::Encryption)?;
@@ -187,12 +206,7 @@ impl CryptoContext {
             return Err(CryptoError::InvalidNonce);
         }
 
-        let mut rng = self.derive_rng(queue_id, file_id)?;
-
-        let mut aes_key = [0u8; 32];
-        rng.fill_bytes(&mut aes_key);
-        let cipher = Aes256Gcm::new(&aes_key.into());
-
+        let cipher = self.file_cipher(queue_id, file_id)?;
         let nonce_array: [u8; 12] = nonce.as_ref().try_into().unwrap();
         let nonce = Nonce::from(nonce_array);
 
@@ -215,7 +229,7 @@ impl CryptoContext {
     ) -> Result<usize, CryptoError> {
         let nonce: [u8; 12] = nonce.try_into().map_err(|_| CryptoError::InvalidNonce)?;
         let len = buf.len().checked_sub(16).ok_or(CryptoError::Decryption)?;
-        let (cipher, _) = self.file_cipher(queue_id, file_id)?;
+        let cipher = self.file_cipher(queue_id, file_id)?;
         let (plaintext, tag) = buf.split_at_mut(len);
         let tag = Tag::try_from(&*tag).map_err(|_| CryptoError::Decryption)?;
         cipher
@@ -292,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn test_encryption_is_deterministic() {
+    fn sealing_one_file_twice_draws_two_nonces() {
         use normfs_types::QueueIdResolver;
 
         let temp_dir = tempfile::tempdir().unwrap();
@@ -305,12 +319,18 @@ mod tests {
         let (nonce1, ciphertext1) = ctx.encrypt(&queue_id, &file_id, &plaintext).unwrap();
         let (nonce2, ciphertext2) = ctx.encrypt(&queue_id, &file_id, &plaintext).unwrap();
 
-        assert_eq!(nonce1, nonce2);
-        assert_eq!(ciphertext1, ciphertext2);
+        assert_ne!(nonce1, nonce2);
+        assert_ne!(ciphertext1, ciphertext2);
+        for (nonce, ciphertext) in [(nonce1, ciphertext1), (nonce2, ciphertext2)] {
+            let opened = ctx
+                .decrypt(&queue_id, &file_id, &nonce, &ciphertext)
+                .unwrap();
+            assert_eq!(opened, plaintext);
+        }
     }
 
     #[test]
-    fn encrypting_in_place_gives_the_same_bytes() {
+    fn in_place_and_allocating_seals_open_each_other() {
         use normfs_types::QueueIdResolver;
 
         let dir = tempfile::tempdir().unwrap();
@@ -319,13 +339,25 @@ mod tests {
         let file_id = UintN::from(7u64);
         let content = Bytes::from_static(b"in place or not, one file format");
 
-        let (nonce, ciphertext) = ctx.encrypt(&queue, &file_id, &content).unwrap();
         let mut buf = content.to_vec();
-        let (nonce2, tag) = ctx.encrypt_in_place(&queue, &file_id, &mut buf).unwrap();
-
-        assert_eq!(&nonce[..], &nonce2[..]);
+        let (nonce, tag) = ctx.encrypt_in_place(&queue, &file_id, &mut buf).unwrap();
         buf.extend_from_slice(&tag);
-        assert_eq!(&ciphertext[..], &buf[..]);
+        let opened = ctx
+            .decrypt(
+                &queue,
+                &file_id,
+                &Bytes::copy_from_slice(&nonce),
+                &Bytes::from(buf),
+            )
+            .unwrap();
+        assert_eq!(opened, content);
+
+        let (nonce, ciphertext) = ctx.encrypt(&queue, &file_id, &content).unwrap();
+        let mut buf = ciphertext.to_vec();
+        let len = ctx
+            .decrypt_in_place(&queue, &file_id, &nonce, &mut buf)
+            .unwrap();
+        assert_eq!(&buf[..len], &content[..]);
     }
 
     #[test]
