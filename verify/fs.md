@@ -58,8 +58,8 @@ The assumptions are:
   `tests/test_fs.c`. A link placed or swapped in below the data directory
   then fails the step instead of redirecting it; the data directory itself
   may be a link. This holds on Unix; on Windows paths are still resolved as
-  given, and the disk monitor and the crypto seed open their paths in their
-  own C without the walk.
+  given. The disk monitor's shims take the same walk; the crypto seed opens
+  its path in its own C without it.
 
 The syscall shims assume ordinary local regular files and directories. A
 backend can claim these guarantees only if its filesystem and storage stack

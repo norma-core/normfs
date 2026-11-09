@@ -244,7 +244,7 @@ test_scan_missing_dir_is_empty(void)
 
 	(void)snprintf(dir, sizeof(dir), "%s/nowhere", root);
 	memset(&s, 0xFF, sizeof(s));
-	r = normfs_disk_scan(dir, strlen(dir), NORMFS_DISK_STORE, &s);
+	r = normfs_disk_scan(dir, strlen(dir), 0u, NORMFS_DISK_STORE, &s);
 	CHECK(r.status == NORMFS_DISK_OK);
 	CHECK(r.os_error == 0);
 	CHECK(s.total == 0u);
@@ -287,14 +287,14 @@ test_scan_sums_and_finds_the_minimum(void)
 	CHECK(put_file(dir, "3", NORMFS_DISK_WAL, 70u) == 0);
 
 	memset(&s, 0, sizeof(s));
-	r = normfs_disk_scan(dir, strlen(dir), NORMFS_DISK_STORE, &s);
+	r = normfs_disk_scan(dir, strlen(dir), 0u, NORMFS_DISK_STORE, &s);
 	CHECK(r.status == NORMFS_DISK_OK);
 	CHECK(s.total == 100u);
 	CHECK(s.has_min == 1);
 	CHECK(id_is(&s.min, "5"));
 
 	memset(&s, 0, sizeof(s));
-	r = normfs_disk_scan(dir, strlen(dir), NORMFS_DISK_WAL, &s);
+	r = normfs_disk_scan(dir, strlen(dir), 0u, NORMFS_DISK_WAL, &s);
 	CHECK(r.status == NORMFS_DISK_OK);
 	CHECK(s.total == 70u);
 	CHECK(id_is(&s.min, "3"));
@@ -316,7 +316,7 @@ test_scan_minimum_is_numeric(void)
 	CHECK(put_file(dir, "0", NORMFS_DISK_STORE, 1u) == 0);
 
 	memset(&s, 0, sizeof(s));
-	CHECK(normfs_disk_scan(dir, strlen(dir), NORMFS_DISK_STORE,
+	CHECK(normfs_disk_scan(dir, strlen(dir), 0u, NORMFS_DISK_STORE,
 	    &s).status == NORMFS_DISK_OK);
 	CHECK(s.total == 3u);
 	CHECK(id_is(&s.min, "0"));
@@ -337,7 +337,7 @@ test_scan_refuses_a_tree_too_deep(void)
 		(void)strcat(deep, "/000");
 	CHECK(mkdir_p(deep) == 0);
 
-	CHECK(normfs_disk_scan(dir, strlen(dir), NORMFS_DISK_STORE,
+	CHECK(normfs_disk_scan(dir, strlen(dir), 0u, NORMFS_DISK_STORE,
 	    &s).status == NORMFS_DISK_ERR_TOO_DEEP);
 	return 0;
 }
@@ -355,13 +355,13 @@ test_file_size(void)
 	CHECK(put_file(dir, "7", NORMFS_DISK_STORE, 123u) == 0);
 
 	i = id("7");
-	r = normfs_disk_file_size(dir, strlen(dir), &i, NORMFS_DISK_STORE,
+	r = normfs_disk_file_size(dir, strlen(dir), 0u, &i, NORMFS_DISK_STORE,
 	    &size);
 	CHECK(r.status == NORMFS_DISK_OK);
 	CHECK(size == 123u);
 
 	i = id("8");
-	r = normfs_disk_file_size(dir, strlen(dir), &i, NORMFS_DISK_STORE,
+	r = normfs_disk_file_size(dir, strlen(dir), 0u, &i, NORMFS_DISK_STORE,
 	    &size);
 	CHECK(r.status == NORMFS_DISK_ERR_NOT_FOUND);
 	CHECK(r.os_error == 0);
@@ -386,21 +386,27 @@ test_unlink_removes_name_but_preserves_other_references(void)
 	CHECK(fd >= 0);
 	CHECK(write(fd, "x", 1) == 1);
 	CHECK(link(path, alias) == 0);
-	CHECK(normfs_disk_sys_file_size(path, strlen(path), &size, &error) == 1);
+	CHECK(normfs_disk_sys_file_size(path, strlen(path), 0u, &size, &error) == 1);
 	CHECK(size == 1u && error == 0);
-	CHECK(normfs_disk_sys_unlink(path, strlen(path), &error) == 0);
+	CHECK(normfs_disk_sys_unlink(path, strlen(path), 0u, &error) == 0);
 	CHECK(error == 0);
 	CHECK(lstat(path, &st) == -1 && errno == ENOENT);
 	CHECK(lstat(alias, &st) == 0 && st.st_size == 1);
 	CHECK(fstat(fd, &st) == 0 && st.st_size == 1);
-	CHECK(normfs_disk_sys_unlink(alias, strlen(alias), &error) == 0);
+	CHECK(normfs_disk_sys_unlink(alias, strlen(alias), 0u, &error) == 0);
 	CHECK(pread(fd, &byte, 1, 0) == 1 && byte == 'x');
-	CHECK(normfs_disk_sys_unlink(path, strlen(path), &error) == -1);
+	CHECK(normfs_disk_sys_unlink(path, strlen(path), 0u, &error) == -1);
 	CHECK(error == ENOENT);
-	CHECK(normfs_disk_sys_file_size(path, strlen(path), &size, &error) == 0);
+	CHECK(normfs_disk_sys_file_size(path, strlen(path), 0u, &size, &error) == 0);
 	CHECK(size == 0u && error == 0);
-	CHECK(normfs_disk_sys_file_size(root, strlen(root), &size, &error) == 0);
+	CHECK(normfs_disk_sys_file_size(root, strlen(root), 0u, &size, &error) == 0);
 	CHECK(size == 0u && error == 0);
+	(void)snprintf(alias, sizeof(alias), "%s/loop", root);
+	CHECK(symlink("loop", alias) == 0);
+	(void)snprintf(path, sizeof(path), "%s/loop/x", root);
+	CHECK(normfs_disk_sys_file_size(path, strlen(path), 0u, &size, &error) == -1);
+	CHECK(error == ELOOP);
+	CHECK(unlink(alias) == 0);
 	CHECK(close(fd) == 0);
 	return 0;
 }
@@ -426,6 +432,7 @@ req(const char *store, const char *wal, const char *next, uint64_t to_free)
 	r.store_dir_len = strlen(store);
 	r.wal_dir = wal;
 	r.wal_dir_len = strlen(wal);
+	r.root = 0u;
 	r.next = id(next);
 	r.to_free = to_free;
 	return r;
@@ -505,6 +512,40 @@ test_evict_takes_wal_only_without_store_and_stops_at_the_gap(void)
 	CHECK(file_exists(wal, "1", NORMFS_DISK_WAL) == 1);
 	CHECK(file_exists(wal, "2", NORMFS_DISK_WAL) == 0);
 	CHECK(file_exists(store, "4", NORMFS_DISK_STORE) == 1);
+	return 0;
+}
+
+static int
+test_evict_keeps_wal_while_the_store_count_is_left(void)
+{
+	char store[640];
+	char wal[640];
+	struct normfs_disk_evict_req rq;
+	struct normfs_disk_event ev[8];
+	size_t count = 99u;
+	int stop = -1;
+
+	CHECK(setup_queue("stale", store, sizeof(store), wal,
+	    sizeof(wal)) == 0);
+	CHECK(put_file(store, "1", NORMFS_DISK_STORE, 10u) == 0);
+	CHECK(put_file(wal, "2", NORMFS_DISK_WAL, 30u) == 0);
+
+	/* 40 counted in the store, 10 of it there. */
+	rq = req(store, wal, "1", 1000u);
+	rq.store_bytes = 50u;
+	CHECK(normfs_disk_evict(&rq, ev, 8u, &count, &stop).status ==
+	    NORMFS_DISK_OK);
+	CHECK(stop == NORMFS_DISK_STOP_STALE);
+	CHECK(count == 1u && ev[0].kind == NORMFS_DISK_STORE);
+	CHECK(id_is(&rq.next, "2"));
+	CHECK(file_exists(wal, "2", NORMFS_DISK_WAL) == 1);
+
+	rq.store_bytes = 0u;
+	CHECK(normfs_disk_evict(&rq, ev, 8u, &count, &stop).status ==
+	    NORMFS_DISK_OK);
+	CHECK(stop == NORMFS_DISK_STOP_GAP);
+	CHECK(count == 1u && ev[0].kind == NORMFS_DISK_WAL);
+	CHECK(file_exists(wal, "2", NORMFS_DISK_WAL) == 0);
 	return 0;
 }
 
@@ -683,6 +724,92 @@ test_evict_rejects_malformed_ids(void)
 	return 0;
 }
 
+static int
+leaf_parent(const char *dir, const char *hex, char *out, size_t out_len)
+{
+	struct normfs_disk_id i = id(hex);
+	size_t used = 0u;
+	char *slash;
+
+	if (normfs_disk_path(dir, strlen(dir), &i, NORMFS_DISK_STORE, out,
+	    out_len, &used).status != NORMFS_DISK_OK)
+		return -1;
+	slash = strrchr(out, '/');
+	if (slash == NULL)
+		return -1;
+	*slash = '\0';
+	return 0;
+}
+
+static int
+test_walk_follows_no_link_below_the_root(void)
+{
+	char data[640];
+	char store[768];
+	char wal[768];
+	char parent[1024];
+	char moved[1024];
+	struct normfs_disk_evict_req rq;
+	struct normfs_disk_event ev[8];
+	struct normfs_disk_scan s;
+	size_t count = 99u;
+	uint64_t size = 1u;
+	int error = -1;
+	int stop = -1;
+
+	(void)snprintf(data, sizeof(data), "%s/linked", root);
+	(void)snprintf(store, sizeof(store), "%s/q/store", data);
+	(void)snprintf(wal, sizeof(wal), "%s/q/wal", data);
+	CHECK(mkdir_p(store) == 0 && mkdir_p(wal) == 0);
+	CHECK(put_file(store, "1", NORMFS_DISK_STORE, 5u) == 0);
+	CHECK(put_file(store, "1000", NORMFS_DISK_STORE, 10u) == 0);
+
+	/* A link in the place of a file is not sized as its target. */
+	(void)snprintf(moved, sizeof(moved), "%s/001.store", store);
+	(void)snprintf(parent, sizeof(parent), "%s/file-link", data);
+	CHECK(symlink(moved, parent) == 0);
+	CHECK(normfs_disk_sys_file_size(parent, strlen(parent), strlen(data),
+	    &size, &error) == 0);
+	CHECK(size == 0u && error == 0);
+	CHECK(unlink(parent) == 0);
+
+	/* A chunk directory moved out and linked back. */
+	CHECK(leaf_parent(store, "1000", parent, sizeof(parent)) == 0);
+	(void)snprintf(moved, sizeof(moved), "%s/chunk-outside", root);
+	CHECK(rename(parent, moved) == 0);
+	CHECK(symlink(moved, parent) == 0);
+
+	rq = req(store, wal, "1000", 1000u);
+	rq.root = strlen(data);
+	CHECK(normfs_disk_evict(&rq, ev, 8u, &count, &stop).status ==
+	    NORMFS_DISK_OK);
+	CHECK(count == 0u && stop == NORMFS_DISK_STOP_GAP);
+
+	/* The whole store directory moved out and linked back. */
+	CHECK(unlink(parent) == 0 && rename(moved, parent) == 0);
+	(void)snprintf(moved, sizeof(moved), "%s/store-outside", root);
+	CHECK(rename(store, moved) == 0);
+	CHECK(symlink(moved, store) == 0);
+
+	rq = req(store, wal, "1000", 1000u);
+	rq.root = strlen(data);
+	CHECK(normfs_disk_evict(&rq, ev, 8u, &count, &stop).status ==
+	    NORMFS_DISK_OK);
+	CHECK(count == 0u && stop == NORMFS_DISK_STOP_GAP);
+	CHECK(normfs_disk_scan(store, strlen(store), strlen(data),
+	    NORMFS_DISK_STORE, &s).status == NORMFS_DISK_OK);
+	CHECK(s.total == 0u && s.has_min == 0);
+	CHECK(file_exists(moved, "1000", NORMFS_DISK_STORE) == 1);
+
+	/* Resolved as given, the same request deletes through the link. */
+	rq = req(store, wal, "1000", 1000u);
+	CHECK(normfs_disk_evict(&rq, ev, 8u, &count, &stop).status ==
+	    NORMFS_DISK_OK);
+	CHECK(count >= 1u && ev[0].deleted == 1);
+	CHECK(file_exists(moved, "1000", NORMFS_DISK_STORE) == 0);
+	return 0;
+}
+
 int
 main(void)
 {
@@ -718,9 +845,13 @@ main(void)
 		return 1;
 	if (test_unlink_removes_name_but_preserves_other_references() != 0)
 		return 1;
+	if (test_walk_follows_no_link_below_the_root() != 0)
+		return 1;
 	if (test_evict_frees_from_the_bottom() != 0)
 		return 1;
 	if (test_evict_takes_wal_only_without_store_and_stops_at_the_gap() != 0)
+		return 1;
+	if (test_evict_keeps_wal_while_the_store_count_is_left() != 0)
 		return 1;
 	if (test_evict_stops_at_the_bound() != 0)
 		return 1;

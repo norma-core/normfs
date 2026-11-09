@@ -674,12 +674,12 @@ normfs_disk_path(const char *dir, size_t dir_len,
     ensures \result >= -1 ==> path[*plen] == 0;
     ensures \result == -1 ==> *os_error > 0;
     ensures \result != -1 ==> *os_error == 0;
-    ensures \result == 1 ==> disk_fs_present(path, *plen) &&
-              disk_fs_regular(path, *plen) &&
-              *size == disk_fs_size(path, *plen) && *size <= disk_fs_bytes;
+    ensures \result == 1 ==> disk_fs_present(path, *plen, root) &&
+              disk_fs_regular(path, *plen, root) &&
+              *size == disk_fs_size(path, *plen, root) && *size <= disk_fs_bytes;
 */
 static int
-normfs_disk_probe(const char *dir, size_t dir_len,
+normfs_disk_probe(const char *dir, size_t dir_len, size_t root,
     const struct normfs_disk_id *id, int kind, char *path, size_t *plen,
     uint64_t *size, int *os_error)
 {
@@ -692,7 +692,7 @@ normfs_disk_probe(const char *dir, size_t dir_len,
 	if (pr.status != NORMFS_DISK_OK)
 		return -2;
 
-	return normfs_disk_sys_file_size(path, *plen, size, os_error);
+	return normfs_disk_sys_file_size(path, *plen, root, size, os_error);
 }
 
 /*@ requires \valid_read(dir + (0 .. dir_len));
@@ -711,7 +711,7 @@ normfs_disk_probe(const char *dir, size_t dir_len,
     ensures \result.status != NORMFS_DISK_ERR_IO ==> \result.os_error == 0;
 */
 struct normfs_disk_result
-normfs_disk_file_size(const char *dir, size_t dir_len,
+normfs_disk_file_size(const char *dir, size_t dir_len, size_t root,
     const struct normfs_disk_id *id, int kind, uint64_t *size)
 {
 	struct normfs_disk_result r;
@@ -731,7 +731,8 @@ normfs_disk_file_size(const char *dir, size_t dir_len,
 		return r;
 	}
 
-	rc = normfs_disk_probe(dir, dir_len, id, kind, path, &plen, &found, &e);
+	rc = normfs_disk_probe(dir, dir_len, root, id, kind, path, &plen,
+	    &found, &e);
 	if (rc == -2) {
 		r.status = NORMFS_DISK_ERR_PATH_TOO_LONG;
 	} else if (rc == -1) {
@@ -775,7 +776,7 @@ normfs_disk_file_size(const char *dir, size_t dir_len,
     ensures acc->has_min == 1 ==> DISK_ID_WF(&acc->min);
 */
 static int
-normfs_disk_list_dir(const char *path, size_t path_len, int kind,
+normfs_disk_list_dir(const char *path, size_t path_len, size_t root, int kind,
     uint16_t *chunks, size_t depth, struct normfs_disk_level *lv,
     struct normfs_disk_scan *acc, int *os_error)
 {
@@ -801,7 +802,7 @@ normfs_disk_list_dir(const char *path, size_t path_len, int kind,
 	for (i = 0u; i < (size_t)(NORMFS_DISK_CHUNKS / 64); i++)
 		lv->dirs[i] = 0u;
 
-	h = normfs_disk_sys_dir_open(path, path_len, os_error);
+	h = normfs_disk_sys_dir_open(path, path_len, root, os_error);
 	if (h == NULL) {
 		/* Absent is empty: not written yet, or gone since the parent
 		 * was listed. */
@@ -883,7 +884,7 @@ normfs_disk_list_dir(const char *path, size_t path_len, int kind,
     ensures out->has_min == 1 ==> DISK_ID_WF(&out->min);
 */
 struct normfs_disk_result
-normfs_disk_scan(const char *dir, size_t dir_len, int kind,
+normfs_disk_scan(const char *dir, size_t dir_len, size_t root, int kind,
     struct normfs_disk_scan *out)
 {
 	struct normfs_disk_result r;
@@ -923,8 +924,8 @@ normfs_disk_scan(const char *dir, size_t dir_len, int kind,
 	path[dir_len] = '\0';
 
 	levels[0].path_len = dir_len;
-	st = normfs_disk_list_dir(path, dir_len, kind, chunks, 0u, &levels[0],
-	    out, &e);
+	st = normfs_disk_list_dir(path, dir_len, root, kind, chunks, 0u,
+	    &levels[0], out, &e);
 	if (st != NORMFS_DISK_OK) {
 		r.os_error = e;
 		r.status = st;
@@ -985,7 +986,7 @@ normfs_disk_scan(const char *dir, size_t dir_len, int kind,
 
 		chunks[depth] = (uint16_t)idx;
 		levels[depth + 1u].path_len = plen + 4u;
-		st = normfs_disk_list_dir(path, plen + 4u, kind, chunks,
+		st = normfs_disk_list_dir(path, plen + 4u, root, kind, chunks,
 		    depth + 1u, &levels[depth + 1u], out, &e);
 		if (st != NORMFS_DISK_OK) {
 			r.os_error = e;
@@ -1026,7 +1027,10 @@ normfs_disk_scan(const char *dir, size_t dir_len, int kind,
               (*stop == NORMFS_DISK_STOP_MORE ||
                *stop == NORMFS_DISK_STOP_GAP ||
                *stop == NORMFS_DISK_STOP_BOUND ||
-               *stop == NORMFS_DISK_STOP_ERROR);
+               *stop == NORMFS_DISK_STOP_ERROR ||
+               *stop == NORMFS_DISK_STOP_STALE);
+    ensures \result == NORMFS_DISK_OK && *stop == NORMFS_DISK_STOP_STALE ==>
+              store_left > 0;
     ensures \result == NORMFS_DISK_OK &&
             (*stop == NORMFS_DISK_STOP_MORE || *stop == NORMFS_DISK_STOP_ERROR) ==>
               DISK_EVENT_WF(ev) && DISK_SAME_ID(&ev->id, &req->next) &&
@@ -1044,7 +1048,8 @@ normfs_disk_scan(const char *dir, size_t dir_len, int kind,
 */
 static int
 normfs_disk_evict_one(struct normfs_disk_evict_req *req,
-    struct normfs_disk_event *ev, int *stop, uint64_t freed)
+    struct normfs_disk_event *ev, int *stop, uint64_t freed,
+    uint64_t store_left)
 {
 	char path[NORMFS_DISK_PATH_MAX];
 	size_t plen = 0u;
@@ -1057,20 +1062,25 @@ normfs_disk_evict_one(struct normfs_disk_evict_req *req,
 
 	*stop = NORMFS_DISK_STOP_MORE;
 
-	rc = normfs_disk_probe(req->store_dir, req->store_dir_len, &req->next,
-	    NORMFS_DISK_STORE, path, &plen, &size, &e);
+	rc = normfs_disk_probe(req->store_dir, req->store_dir_len, req->root,
+	    &req->next, NORMFS_DISK_STORE, path, &plen, &size, &e);
 	if (rc == -2)
 		return NORMFS_DISK_ERR_PATH_TOO_LONG;
 	kind = NORMFS_DISK_STORE;
 
 	if (rc == 0) {
 		rc = normfs_disk_probe(req->wal_dir, req->wal_dir_len,
-		    &req->next, NORMFS_DISK_WAL, path, &plen, &size, &e);
+		    req->root, &req->next, NORMFS_DISK_WAL, path, &plen, &size,
+		    &e);
 		if (rc == -2)
 			return NORMFS_DISK_ERR_PATH_TOO_LONG;
 		kind = NORMFS_DISK_WAL;
 		if (rc == 0) {
 			*stop = NORMFS_DISK_STOP_GAP;
+			return NORMFS_DISK_OK;
+		}
+		if (rc > 0 && store_left > 0u) {
+			*stop = NORMFS_DISK_STOP_STALE;
 			return NORMFS_DISK_OK;
 		}
 	}
@@ -1082,9 +1092,10 @@ normfs_disk_evict_one(struct normfs_disk_evict_req *req,
 	}
 
 	if (rc > 0) {
-		unlink_result = normfs_disk_sys_unlink(path, plen, &e);
+		unlink_result = normfs_disk_sys_unlink(path, plen, req->root,
+		    &e);
 		if (unlink_result == 0) {
-			/*@ assert !disk_fs_present(&path[0], plen); */
+			/*@ assert !disk_fs_present(&path[0], plen, req->root); */
 			/*@ assert disk_fs_bytes == \at(disk_fs_bytes, Pre) - size; */
 			deleted = 1;
 			req->to_free = (size >= req->to_free) ? 0u : req->to_free - size;
@@ -1192,7 +1203,8 @@ normfs_disk_event_append(struct normfs_disk_event *events, size_t index,
                *stop == NORMFS_DISK_STOP_FREED ||
                *stop == NORMFS_DISK_STOP_GAP ||
                *stop == NORMFS_DISK_STOP_BOUND ||
-               *stop == NORMFS_DISK_STOP_ERROR);
+               *stop == NORMFS_DISK_STOP_ERROR ||
+               *stop == NORMFS_DISK_STOP_STALE);
     ensures \result.status == NORMFS_DISK_OK && *stop == NORMFS_DISK_STOP_MORE
               ==> *count == cap;
     ensures \result.status == NORMFS_DISK_OK && *stop == NORMFS_DISK_STOP_FREED
@@ -1229,6 +1241,7 @@ normfs_disk_evict(struct normfs_disk_evict_req *req,
 	/* Zeroed: append copies all of hex, used or not, to the Rust buffer. */
 	struct normfs_disk_event event = {0};
 	uint64_t freed = 0u;
+	uint64_t store_left = req->store_bytes;
 	int st;
 	int inc;
 	int one = NORMFS_DISK_STOP_MORE;
@@ -1262,8 +1275,8 @@ normfs_disk_evict(struct normfs_disk_evict_req *req,
 	    loop invariant *count > 0 ==> events[0].freed == DISK_DELTA(&events[0]);
 	    loop invariant \forall integer k; 0 < k < *count ==>
 	      events[k].freed == events[k - 1].freed + DISK_DELTA(&events[k]);
-	    loop assigns *count, st, inc, one, event, freed, req->next, req->to_free,
-	                 events[0 .. cap - 1], normfs_disk_fs_world;
+	    loop assigns *count, st, inc, one, event, freed, store_left, req->next,
+	                 req->to_free, events[0 .. cap - 1], normfs_disk_fs_world;
 	    loop variant cap - *count;
 	*/
 	while (*count < cap) {
@@ -1272,12 +1285,13 @@ normfs_disk_evict(struct normfs_disk_evict_req *req,
 			return r;
 		}
 
-		st = normfs_disk_evict_one(req, &event, &one, freed);
+		st = normfs_disk_evict_one(req, &event, &one, freed, store_left);
 		if (st != NORMFS_DISK_OK) {
 			r.status = st;
 			return r;
 		}
-		if (one == NORMFS_DISK_STOP_GAP || one == NORMFS_DISK_STOP_BOUND) {
+		if (one == NORMFS_DISK_STOP_GAP || one == NORMFS_DISK_STOP_BOUND ||
+		    one == NORMFS_DISK_STOP_STALE) {
 			*stop = one;
 			return r;
 		}
@@ -1288,6 +1302,9 @@ normfs_disk_evict(struct normfs_disk_evict_req *req,
 			return r;
 		}
 
+		if (event.kind == NORMFS_DISK_STORE)
+			store_left = (event.size >= store_left) ?
+			    0u : store_left - event.size;
 		/* Before the append: a char write after it would have the
 		 * provers frame every event's digit clauses. */
 		inc = normfs_disk_id_increment(&req->next);

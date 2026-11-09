@@ -254,7 +254,9 @@ impl Fs {
         beneath::At::new(self.root.as_deref(), path)
     }
 
-    fn root_len(&self, path: &Path) -> io::Result<usize> {
+    /// How many leading bytes of `path` are the data directory, for C that walks
+    /// below it; 0 resolves the path as given.
+    pub fn root_len(&self, path: &Path) -> io::Result<usize> {
         beneath::root_len(self.root.as_deref(), path)
     }
 
