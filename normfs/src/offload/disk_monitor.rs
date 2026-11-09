@@ -531,6 +531,13 @@ impl QueueMonitor {
     }
 
     async fn rescan_store(&self) -> Result<(), Error> {
+        let min = self.recount_store().await?;
+        *self.cursor.lock().unwrap() = min;
+        Ok(())
+    }
+
+    /// Sets the tracked store bytes to what is there and returns the oldest id.
+    async fn recount_store(&self) -> Result<Option<UintN>, Error> {
         let tracked = self.store_bytes.clone().exclusive().await;
         let dir = self.store_dir.clone();
         let root = self.root;
@@ -542,8 +549,7 @@ impl QueueMonitor {
                 Ok(store.min)
             })
             .await?;
-        *self.cursor.lock().unwrap() = min;
-        Ok(())
+        Ok(min)
     }
 
     /// Only the minimum is wanted, so the walk runs without the lock.
@@ -755,7 +761,13 @@ impl QueueMonitor {
             self.rescan_store().await?;
         }
         let wal_scan = self.scan_dir(&self.wal_dir, FileKind::Wal).await?;
-        let current_size = self.store_bytes.bytes().saturating_add(wal_scan.total);
+        let mut current_size = self.store_bytes.bytes().saturating_add(wal_scan.total);
+        // The tracked bytes may still count store files removed by hand or now
+        // behind a link; no WAL file may go for them.
+        if current_size > self.config.max_size as u64 && !rescan {
+            self.recount_store().await?;
+            current_size = self.store_bytes.bytes().saturating_add(wal_scan.total);
+        }
 
         if current_size > self.config.max_size as u64 {
             self.cleanup_oldest_files(current_size, wal_scan).await?;

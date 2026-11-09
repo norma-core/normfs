@@ -322,7 +322,7 @@ async fn publish_store_file(monitor: &QueueMonitor, root: &Path, queue: &QueueId
 }
 
 #[tokio::test]
-async fn cleanup_resumes_at_the_cursor_without_walking_the_store() {
+async fn cleanup_resumes_at_the_cursor() {
     let temp = tempfile::TempDir::new().unwrap();
     let root = temp.path();
     let queue = QueueIdResolver::new("inst").resolve("cam");
@@ -333,15 +333,17 @@ async fn cleanup_resumes_at_the_cursor_without_walking_the_store() {
     monitor.check_and_cleanup(false).await.unwrap();
     assert!(!store_file_exists(root, &queue, 2));
 
-    // Behind the cursor and never reported: only a walk would find it.
+    // Behind the cursor and never reported: the recount sizes it, but
+    // eviction still starts at the cursor.
     write_store_file(root, &queue, 1, 100);
     publish_store_file(&monitor, root, &queue, 5).await;
     monitor.check_and_cleanup(false).await.unwrap();
 
     assert!(store_file_exists(root, &queue, 1));
     assert!(!store_file_exists(root, &queue, 3));
-    assert!(store_file_exists(root, &queue, 4));
-    assert_eq!(*monitor.cursor.lock().unwrap(), Some(UintN::from(4u64)));
+    assert!(!store_file_exists(root, &queue, 4));
+    assert!(store_file_exists(root, &queue, 5));
+    assert_eq!(*monitor.cursor.lock().unwrap(), Some(UintN::from(5u64)));
 }
 
 #[tokio::test]
@@ -562,8 +564,7 @@ async fn a_held_cleanup_is_reported_once_until_it_moves() {
 }
 
 #[cfg(unix)]
-#[tokio::test]
-async fn files_behind_a_link_found_after_counting_do_not_cost_wal_files() {
+async fn store_moved_behind_a_link_after_counting(wal_ids: std::ops::RangeInclusive<u64>) {
     let data = tempfile::TempDir::new().unwrap();
     let outside = tempfile::TempDir::new().unwrap();
     let queue = QueueIdResolver::new("inst").resolve("cam");
@@ -596,7 +597,7 @@ async fn files_behind_a_link_found_after_counting_do_not_cost_wal_files() {
     let moved = outside.path().join("store");
     std::fs::rename(&store, &moved).unwrap();
     std::os::unix::fs::symlink(&moved, &store).unwrap();
-    for id in 5..=8u64 {
+    for id in wal_ids.clone() {
         let p = queue.to_wal_path(data.path(), &UintN::from(id));
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(p, vec![0u8; 200]).unwrap();
@@ -604,8 +605,15 @@ async fn files_behind_a_link_found_after_counting_do_not_cost_wal_files() {
     // 800 bytes of WAL under a limit of 1000; the 400 counted in the store are gone.
     monitor.check_and_cleanup(false).await.unwrap();
 
-    for id in 5..=8u64 {
+    for id in wal_ids {
         assert!(queue.to_wal_path(data.path(), &UintN::from(id)).exists());
     }
     assert_eq!(monitor.store_bytes.bytes(), 0);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn files_behind_a_link_found_after_counting_do_not_cost_wal_files() {
+    store_moved_behind_a_link_after_counting(5..=8).await;
+    store_moved_behind_a_link_after_counting(1..=4).await;
 }
