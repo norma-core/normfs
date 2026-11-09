@@ -656,10 +656,16 @@ impl QueueMonitor {
                     return Err(e);
                 }
             };
-            // Nothing at the cursor: files removed by hand, or a WAL file
-            // older than the store.
+            // Nothing at the cursor: files removed by hand or behind a link, or
+            // a WAL file older than the store. The tracked bytes may still count
+            // the missing files, so they are recounted before anything else goes.
             if from_cursor && eviction.stop == Stop::Gap && eviction.events.is_empty() {
-                let oldest = self.locate_oldest(wal_scan.min.clone()).await?;
+                self.rescan_store().await?;
+                if self.store_bytes.bytes().saturating_add(wal_scan.total) <= max_size {
+                    *self.blocked.lock().unwrap() = None;
+                    return Ok(());
+                }
+                let oldest = earliest(self.cursor.lock().unwrap().clone(), wal_scan.min.clone());
                 if oldest != start {
                     start = oldest;
                     from_cursor = false;

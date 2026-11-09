@@ -359,6 +359,7 @@ async fn a_cursor_left_on_a_gap_is_moved_to_the_oldest_file() {
 
     std::fs::remove_file(queue.to_store_path(root, &UintN::from(4u64))).unwrap();
     publish_store_file(&monitor, root, &queue, 7).await;
+    publish_store_file(&monitor, root, &queue, 8).await;
     monitor.check_and_cleanup(false).await.unwrap();
 
     assert!(!store_file_exists(root, &queue, 5));
@@ -558,4 +559,53 @@ async fn a_held_cleanup_is_reported_once_until_it_moves() {
     assert!(after
         .iter()
         .all(|e| matches!(e, SystemEvent::FileEvicted { .. })));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn files_behind_a_link_found_after_counting_do_not_cost_wal_files() {
+    let data = tempfile::TempDir::new().unwrap();
+    let outside = tempfile::TempDir::new().unwrap();
+    let queue = QueueIdResolver::new("inst").resolve("cam");
+    for id in 1..=4 {
+        write_store_file(data.path(), &queue, id, 100);
+    }
+    let fs = Fs::new(normfs_fs::FsConfig {
+        root: Some(data.path().to_path_buf()),
+        ..normfs_fs::FsConfig::default()
+    })
+    .unwrap();
+    let monitor = QueueMonitor::new(
+        fs,
+        queue.clone(),
+        DiskMonitorConfig {
+            max_size: 1000,
+            check_interval: Duration::from_secs(60),
+            wal_settings: WalSettings::default(),
+            offload: false,
+        },
+        data.path().to_path_buf(),
+        None,
+        None,
+        Arc::new(DiskUsage::default()),
+        events::discard(),
+    )
+    .await
+    .unwrap();
+    let store = queue.to_store_dir(data.path());
+    let moved = outside.path().join("store");
+    std::fs::rename(&store, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &store).unwrap();
+    for id in 5..=8u64 {
+        let p = queue.to_wal_path(data.path(), &UintN::from(id));
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, vec![0u8; 200]).unwrap();
+    }
+    // 800 bytes of WAL under a limit of 1000; the 400 counted in the store are gone.
+    monitor.check_and_cleanup(false).await.unwrap();
+
+    for id in 5..=8u64 {
+        assert!(queue.to_wal_path(data.path(), &UintN::from(id)).exists());
+    }
+    assert_eq!(monitor.store_bytes.bytes(), 0);
 }
