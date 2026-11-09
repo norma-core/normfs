@@ -401,6 +401,12 @@ test_unlink_removes_name_but_preserves_other_references(void)
 	CHECK(size == 0u && error == 0);
 	CHECK(normfs_disk_sys_file_size(root, strlen(root), 0u, &size, &error) == 0);
 	CHECK(size == 0u && error == 0);
+	(void)snprintf(alias, sizeof(alias), "%s/loop", root);
+	CHECK(symlink("loop", alias) == 0);
+	(void)snprintf(path, sizeof(path), "%s/loop/x", root);
+	CHECK(normfs_disk_sys_file_size(path, strlen(path), 0u, &size, &error) == -1);
+	CHECK(error == ELOOP);
+	CHECK(unlink(alias) == 0);
 	CHECK(close(fd) == 0);
 	return 0;
 }
