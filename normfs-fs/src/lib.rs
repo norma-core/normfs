@@ -582,7 +582,12 @@ impl Fs {
         let fs = self.clone();
         let path = path.to_path_buf();
         self.run_blocking(move || {
-            let removed = fs.remove_tree(&path);
+            // Without the walk, std's removal is the one that does not follow a
+            // directory swapped for a link while it runs.
+            let removed = match fs.root_len(&path)? {
+                0 => std::fs::remove_dir_all(&path),
+                _ => fs.remove_tree(&path),
+            };
             // A creation that finished while the removal ran may have cached
             // its directory. Clearing here, on the executor, holds even if the
             // caller stopped waiting.

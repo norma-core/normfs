@@ -562,6 +562,58 @@ async fn remove_dir_all_takes_a_link_and_not_what_it_points_at() {
     assert!(std::fs::symlink_metadata(&link).is_err());
 }
 
+/// A subdirectory swapped for a link to `outside` while the removal runs.
+#[cfg(unix)]
+async fn swap_during_remove_dir_all(rooted: bool) -> usize {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let mut lost = 0;
+    for _ in 0..200 {
+        let base = tempfile::tempdir().unwrap();
+        let outside = base.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("keep"), b"x").unwrap();
+        let top = base.path().join("top");
+        let sub = top.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        for i in 0..50 {
+            std::fs::write(sub.join(format!("f{i}")), b"").unwrap();
+        }
+        std::fs::write(sub.join("keep"), b"y").unwrap();
+        let fs = Fs::new(FsConfig {
+            root: rooted.then(|| base.path().to_path_buf()),
+            ..FsConfig::default()
+        })
+        .unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let swapper = {
+            let (stop, sub, outside) = (stop.clone(), sub.clone(), outside.clone());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    if std::fs::rename(&sub, sub.with_file_name("moved")).is_ok() {
+                        let _ = std::os::unix::fs::symlink(&outside, &sub);
+                        return;
+                    }
+                }
+            })
+        };
+        let _ = fs.remove_dir_all(&top).await;
+        stop.store(true, Ordering::Relaxed);
+        swapper.join().unwrap();
+        if !outside.join("keep").exists() {
+            lost += 1;
+        }
+    }
+    lost
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn remove_dir_all_deletes_nothing_through_a_directory_swapped_for_a_link() {
+    assert_eq!(swap_during_remove_dir_all(false).await, 0);
+    assert_eq!(swap_during_remove_dir_all(true).await, 0);
+}
+
 #[tokio::test]
 async fn remove_dir_all_refuses_a_file() {
     let dir = tempfile::tempdir().unwrap();
