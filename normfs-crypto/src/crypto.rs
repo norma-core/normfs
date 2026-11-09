@@ -63,10 +63,7 @@ unsafe extern "C" {
     fn normfs_seed_sys_entropy(buf: *mut u8, len: usize, os_error: *mut c_int) -> c_int;
 }
 
-/// Random rather than derived from the file: one file id can be sealed twice
-/// with different bytes -- a WAL file migrated again after a crash, under the
-/// compression configured by then -- and a derived nonce would repeat under the
-/// file's key. Readers take the nonce off disk, so files sealed either way open.
+/// Random: one file id can be sealed twice with different bytes.
 fn fresh_nonce() -> Result<[u8; 12], CryptoError> {
     let mut nonce = [0u8; 12];
     let mut os_error: c_int = 0;
