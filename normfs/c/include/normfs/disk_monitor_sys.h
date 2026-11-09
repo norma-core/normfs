@@ -43,7 +43,8 @@ enum normfs_disk_sys_kind {
 };
 
 /* opendir(3). NULL with os_error 0 is a path that is not a directory
- * (ENOENT, ENOTDIR, or ELOOP for a link below the data directory); NULL with os_error > 0 is a failure. */
+ * (ENOENT, ENOTDIR, or ELOOP for a link below the data directory); NULL
+ * with os_error > 0 is a failure. */
 /*@ requires path_len < NORMFS_DISK_PATH_MAX;
     requires \valid_read(path + (0 .. path_len));
     requires path[path_len] == 0;

@@ -58,6 +58,15 @@ normfs_disk_sys_at(const char *path, size_t path_len, size_t root, int *dir,
 	return 0;
 }
 
+/* errno for a path that is not there; ELOOP below the data directory is a
+ * link the walk refused. */
+static int
+normfs_disk_sys_absent(size_t root)
+{
+	return errno == ENOENT || errno == ENOTDIR ||
+	    (errno == ELOOP && root != 0u);
+}
+
 static void
 normfs_disk_sys_done(int dir)
 {
@@ -95,7 +104,7 @@ normfs_disk_sys_dir_open(const char *path, size_t path_len, size_t root,
 		}
 	}
 	if (d == NULL) {
-		if (errno != ENOENT && errno != ENOTDIR && errno != ELOOP)
+		if (!normfs_disk_sys_absent(root))
 			(void)normfs_disk_sys_fail(os_error);
 		return NULL;
 	}
@@ -187,7 +196,7 @@ normfs_disk_sys_file_size(const char *path, size_t path_len, size_t root,
 		normfs_disk_sys_done(dir);
 	}
 	if (rc != 0) {
-		if (errno == ENOENT || errno == ENOTDIR || errno == ELOOP)
+		if (normfs_disk_sys_absent(root))
 			return 0;
 		return normfs_disk_sys_fail(os_error);
 	}
