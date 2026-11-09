@@ -714,7 +714,7 @@ test_walk_follows_no_link_below_the_root(void)
 	char store[768];
 	char wal[768];
 	char parent[1024];
-	char moved[768];
+	char moved[1024];
 	struct normfs_disk_evict_req rq;
 	struct normfs_disk_event ev[8];
 	struct normfs_disk_scan s;
