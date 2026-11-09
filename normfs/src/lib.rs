@@ -133,10 +133,8 @@ pub enum Error {
     /// The queue is NormFS's own ([`SYSTEM_QUEUE`]): it can be read, but
     /// only NormFS writes or closes it.
     ReservedQueue,
-    /// The queue's name would put its directory outside the data directory or
-    /// onto a path NormFS keeps for itself: a `.` or `..` segment, a `wal`,
-    /// `store` or `closed` segment, a first segment `tmp` or starting with a
-    /// dot, a NUL, or on Windows a drive, a backslash or a trailing dot or space.
+    /// The queue's name fails [`QueueId::name_ok`]: its directory would leave the
+    /// data directory or land on a path NormFS keeps for itself.
     BadQueueName(String),
     /// [`NormFS::close`] has begun: no more writes are taken.
     Closing,
