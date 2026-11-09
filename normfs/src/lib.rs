@@ -133,6 +133,9 @@ pub enum Error {
     /// The queue is NormFS's own ([`SYSTEM_QUEUE`]): it can be read, but
     /// only NormFS writes or closes it.
     ReservedQueue,
+    /// The queue's name fails [`QueueId::name_ok`]: its directory would leave the
+    /// data directory or land on a path NormFS keeps for itself.
+    BadQueueName(String),
     /// [`NormFS::close`] has begun: no more writes are taken.
     Closing,
     /// `max_memory_usage` cannot hold the two pages a single queue needs to
@@ -181,6 +184,9 @@ impl std::fmt::Display for Error {
             Error::NotInFile => write!(f, "Record would not join the file the caller saw"),
             Error::QueueClosed => write!(f, "Queue is closed and accepts no more writes"),
             Error::ReservedQueue => write!(f, "Queue is written by NormFS itself"),
+            Error::BadQueueName(name) => {
+                write!(f, "Queue name is not allowed: {name:?}")
+            }
             Error::Closing => write!(f, "NormFS is closing and accepts no more writes"),
             Error::MemoryBelowFloor {
                 max_memory_usage,
@@ -221,12 +227,20 @@ impl std::error::Error for Error {
             Error::NotInFile => None,
             Error::QueueClosed => None,
             Error::ReservedQueue => None,
+            Error::BadQueueName(_) => None,
             Error::Closing => None,
             Error::MemoryBelowFloor { .. } => None,
             Error::BucketUnreachable { .. } => None,
             Error::PageBelowMinimum { .. } => None,
         }
     }
+}
+
+fn refuse_bad_name(queue: &QueueId) -> Result<(), Error> {
+    if !queue.name_ok() {
+        return Err(Error::BadQueueName(queue.as_str().to_string()));
+    }
+    Ok(())
 }
 
 /// Writes in progress, and whether [`NormFS::close`] has begun.
@@ -878,6 +892,7 @@ impl NormFS {
     }
 
     pub async fn ensure_queue_exists_for_read(&self, queue: &QueueId) -> Result<(), Error> {
+        refuse_bad_name(queue)?;
         let queue_lock = self.queue_init_lock(queue);
         let _guard = queue_lock.lock().await;
 
@@ -894,6 +909,7 @@ impl NormFS {
     }
 
     pub async fn ensure_queue_exists_for_write(&self, queue: &QueueId) -> Result<(), Error> {
+        refuse_bad_name(queue)?;
         let _write = self.writes.enter()?;
         let queue_lock = self.queue_init_lock(queue);
         let _guard = queue_lock.lock().await;
@@ -1472,7 +1488,10 @@ impl NormFS {
         // A seed made by this run is a namespace nothing was written to.
         // Only for its first start in this run: after that the pointer says
         // what it wrote.
-        if self.fresh_instance && queue.as_str().starts_with(&self.instance_prefix()) && !recorded {
+        if self.fresh_instance
+            && format!("{}/", queue.as_str()).starts_with(&self.instance_prefix())
+            && !recorded
+        {
             self.memory_pointers
                 .record(queue)
                 .await
@@ -2061,6 +2080,7 @@ impl NormFS {
         step: u64,
         sender: tokio::sync::mpsc::Sender<ReadEntry>,
     ) -> Result<bool, Error> {
+        refuse_bad_name(queue)?;
         log::debug!(target: "normfs",
             "Reading entries - Queue: '{}', Position: {:?}, Limit: {}, Step: {}",
             queue.short(), position, limit, step);
@@ -2076,6 +2096,7 @@ impl NormFS {
     /// and complete the file, then the marker, so a marker on disk implies
     /// the data reached it. Memory is released last.
     pub async fn close_queue(&self, queue: &QueueId) -> Result<(), Error> {
+        refuse_bad_name(queue)?;
         self.refuse_reserved(queue)?;
         let _write = self.writes.enter()?;
         let queue_lock = self.queue_init_lock(queue);

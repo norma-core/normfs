@@ -1,6 +1,7 @@
 use bytes::Bytes;
 use normfs_fs::{Fs, PublishSpec, Runs, TmpMode};
-use normfs_types::QueueId;
+use normfs_types::{QueueId, QueueIdResolver};
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::io::{Error, ErrorKind};
 use std::path::{Path, PathBuf};
@@ -79,9 +80,9 @@ impl MemoryPointers {
     pub(crate) async fn open(fs: Fs, root: &Path) -> Result<Self, Error> {
         let path = root.join(POINTERS_FILE);
         let tmp_path = root.join(POINTERS_TMP_FILE);
-        let (queues, exact) = match read_optional(&fs, &path).await? {
+        let (queues, exact, memory_floor) = match read_optional(&fs, &path).await? {
             Some(contents) => parse_pointers(&contents)?,
-            None => (HashMap::new(), HashSet::new()),
+            None => (HashMap::new(), HashSet::new(), HashMap::new()),
         };
         // A bare record never had an upload start: the bucket holds nothing
         // of it. A memory life's line names no file.
@@ -91,11 +92,6 @@ impl MemoryPointers {
             .map(|(queue, _)| queue.clone())
             .collect();
 
-        let memory_floor = queues
-            .iter()
-            .filter(|(_, p)| p.file.is_none())
-            .map(|(queue, p)| (queue.clone(), p.id))
-            .collect();
         let written = queues.clone();
         Ok(Self {
             fs,
@@ -522,12 +518,21 @@ fn to_u64(n: &UintN, what: &str) -> Result<u64, Error> {
     })
 }
 
+type Parsed = (
+    HashMap<String, Pointer>,
+    HashSet<String>,
+    HashMap<String, u64>,
+);
+
 /// `queue\tid`, `queue\tid\tfile` or `queue\tid\tfile\texact`; the third
 /// column is the cloud-direct queue's last file (0 before the first), the
-/// fourth says it is exact, and a v1 file without them still parses.
-fn parse_pointers(contents: &str) -> Result<(HashMap<String, Pointer>, HashSet<String>), Error> {
+/// fourth says it is exact, and a v1 file without them still parses. The third
+/// map is each memory life's id, taken before two spellings merge.
+fn parse_pointers(contents: &str) -> Result<Parsed, Error> {
     let mut queues = HashMap::new();
     let mut exact = HashSet::new();
+    let mut memory_floor = HashMap::new();
+    let mut merged = HashSet::new();
     for (line_no, line) in contents.lines().enumerate() {
         let line = line.trim_end();
         if line.is_empty() || line.starts_with('#') {
@@ -551,10 +556,41 @@ fn parse_pointers(contents: &str) -> Result<(HashMap<String, Pointer>, HashSet<S
         };
         let id = parse(id, "id")?;
         let file = cols.next().map(|f| parse(f, "file id")).transpose()?;
-        if cols.next() == Some(EXACT) {
-            exact.insert(queue.to_string());
+        // Lines are absolute ids; a//b written before ids were canonical is a/b
+        // now. Two such lines keep the higher pointer and lose exact, so the
+        // bucket decides; a bare record never hides a used id.
+        let queue = QueueIdResolver::new("").resolve(queue).as_str().to_string();
+        let line = Pointer { id, file };
+        let line_exact = cols.next() == Some(EXACT);
+        if file.is_none() {
+            let floor = memory_floor.entry(queue.clone()).or_insert(id);
+            *floor = (*floor).max(id);
         }
-        queues.insert(queue.to_string(), Pointer { id, file });
+        match queues.entry(queue.clone()) {
+            Entry::Vacant(slot) => {
+                slot.insert(line);
+                if line_exact {
+                    exact.insert(queue);
+                }
+            }
+            Entry::Occupied(mut slot) => {
+                let held = *slot.get();
+                if !line.is_bare() {
+                    *slot.get_mut() = if held.is_bare() {
+                        line
+                    } else {
+                        Pointer {
+                            id: held.id.max(line.id),
+                            file: held.file.max(line.file),
+                        }
+                    };
+                }
+                merged.insert(queue);
+            }
+        }
     }
-    Ok((queues, exact))
+    for queue in &merged {
+        exact.remove(queue);
+    }
+    Ok((queues, exact, memory_floor))
 }
