@@ -615,3 +615,78 @@ async fn files_behind_a_link_found_after_counting_do_not_cost_wal_files() {
     store_moved_behind_a_link_after_counting(5..=8).await;
     store_moved_behind_a_link_after_counting(1..=4).await;
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn store_files_behind_a_link_do_not_cost_other_store_files() {
+    let data = tempfile::TempDir::new().unwrap();
+    let outside = tempfile::TempDir::new().unwrap();
+    let queue = QueueIdResolver::new("inst").resolve("cam");
+    for id in [1u64, 2, 0x1000, 0x1001, 0x1002, 0x1003] {
+        write_store_file(data.path(), &queue, id, 100);
+    }
+    let fs = Fs::new(normfs_fs::FsConfig {
+        root: Some(data.path().to_path_buf()),
+        ..normfs_fs::FsConfig::default()
+    })
+    .unwrap();
+    let monitor = QueueMonitor::new(
+        fs,
+        queue.clone(),
+        DiskMonitorConfig {
+            max_size: 500,
+            check_interval: Duration::from_secs(60),
+            wal_settings: WalSettings::default(),
+            offload: false,
+        },
+        data.path().to_path_buf(),
+        None,
+        None,
+        Arc::new(DiskUsage::default()),
+        events::discard(),
+    )
+    .await
+    .unwrap();
+    let chunk = queue
+        .to_store_path(data.path(), &UintN::from(0x1000u64))
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    std::fs::rename(&chunk, outside.path().join("chunk")).unwrap();
+    std::os::unix::fs::symlink(outside.path().join("chunk"), &chunk).unwrap();
+
+    // 200 bytes left in reach of a limit of 500; 600 were counted.
+    monitor.check_and_cleanup(false).await.unwrap();
+
+    assert!(store_file_exists(data.path(), &queue, 1));
+    assert!(store_file_exists(data.path(), &queue, 2));
+    assert_eq!(monitor.store_bytes.bytes(), 200);
+}
+
+#[test]
+fn the_store_count_left_carries_over_full_event_batches() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let root = temp.path();
+    let queue = QueueIdResolver::new("inst").resolve("cam");
+    for id in 1..=65u64 {
+        write_store_file(root, &queue, id, 1);
+    }
+    let wal = queue.to_wal_path(root, &UintN::from(66u64));
+    std::fs::create_dir_all(wal.parent().unwrap()).unwrap();
+    std::fs::write(&wal, b"w").unwrap();
+
+    let eviction = evict(
+        &queue.to_store_dir(root),
+        &queue.to_wal_dir(root),
+        0,
+        &UintN::from(1u64),
+        None,
+        66,
+        65,
+    )
+    .unwrap();
+
+    assert_eq!(eviction.stop, Stop::Freed);
+    assert_eq!(eviction.events.len(), 66);
+    assert!(!wal.exists());
+}

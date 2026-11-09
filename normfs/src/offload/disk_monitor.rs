@@ -379,6 +379,9 @@ pub(crate) fn evict(
         };
         let base = freed;
         for event in &buf[..count.min(buf.len())] {
+            if event.deleted == 1 && event.kind == FileKind::Store.c() {
+                req.store_bytes = req.store_bytes.saturating_sub(event.size);
+            }
             freed = base.saturating_add(event.freed);
             events.push(EvictEvent {
                 id: from_c_id(&event.id)?,
@@ -542,6 +545,24 @@ impl QueueMonitor {
     async fn rescan_store(&self) -> Result<(), Error> {
         let min = self.recount_store().await?;
         *self.cursor.lock().unwrap() = min;
+        Ok(())
+    }
+
+    /// Lowers the tracked store bytes to what a scan finds, if that is less:
+    /// files gone by hand or behind a link must not be paid for with others.
+    /// The scan holds no lock, so a file published during it may be missed and
+    /// left uncounted until the next rescan, which errs toward deleting less.
+    async fn reconcile_store(&self) -> Result<(), Error> {
+        let dir = self.store_dir.clone();
+        let root = self.root;
+        let found = self
+            .fs
+            .run_blocking(move || Ok(scan(&dir, root, FileKind::Store)?.total))
+            .await?;
+        let tracked = self.store_bytes.clone().exclusive().await;
+        if found < tracked.get() {
+            tracked.set(found);
+        }
         Ok(())
     }
 
@@ -815,7 +836,11 @@ impl QueueMonitor {
             self.rescan_store().await?;
         }
         let wal_scan = self.scan_dir(&self.wal_dir, FileKind::Wal).await?;
-        let current_size = self.store_bytes.bytes().saturating_add(wal_scan.total);
+        let mut current_size = self.store_bytes.bytes().saturating_add(wal_scan.total);
+        if current_size > self.config.max_size as u64 && !rescan {
+            self.reconcile_store().await?;
+            current_size = self.store_bytes.bytes().saturating_add(wal_scan.total);
+        }
 
         if current_size > self.config.max_size as u64 {
             self.cleanup_oldest_files(current_size, wal_scan).await?;
