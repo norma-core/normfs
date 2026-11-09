@@ -165,7 +165,7 @@ runs only when the C layer changes (`*/c/**`, `**.c`, `**.h`, `verify/**`);
 
 ## Secrets
 
-`normfs-crypto` handles the root secret. Two rules that have already been
+`normfs-crypto` handles the root secret. Three rules that have already been
 broken once:
 
 - A type holding key material gets a hand-written `Drop` that wipes. A
@@ -174,6 +174,9 @@ broken once:
 - Never derive `Debug` on a type holding key material — it puts the secret in
   any log line that formats it. This is why some tests must `match` rather than
   `expect_err`.
+- Never derive a GCM nonce from the file. One file id can be sealed twice with
+  different bytes (a WAL file migrated again after a crash), and a repeated
+  nonce under the file's key gives away both plaintexts' XOR.
 
 ## Commands
 
