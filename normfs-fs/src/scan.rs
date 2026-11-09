@@ -23,16 +23,19 @@ pub enum ScanResult {
 }
 
 /// Lists through the walk, so a link under `dir` is neither entered nor
-/// counted as a file. Resolved as given, a link is followed, as it was before
-/// the walk.
-fn list(dir: &Path, root: Option<&Path>) -> io::Result<Vec<Entry>> {
+/// counted as a file. Resolved as given it is followed as before the walk:
+/// to a file always, to a directory only when `enter_links` (the min and max
+/// walks did, the full walk did not).
+fn list(dir: &Path, root: Option<&Path>, enter_links: bool) -> io::Result<Vec<Entry>> {
     let at = At::new(root, dir)?;
     let mut entries = beneath::list(&at)?;
     if !at.walks() {
         for entry in entries.iter_mut() {
             if !entry.stat.is_file() && !entry.stat.is_dir() {
                 let target = At::new(root, &dir.join(&entry.name))?;
-                if let Ok(Some(stat)) = beneath::stat_as_given(&target) {
+                if let Ok(Some(stat)) = beneath::stat_as_given(&target)
+                    && (stat.is_file() || enter_links)
+                {
                     entry.stat = stat;
                 }
             }
@@ -124,7 +127,7 @@ pub(crate) fn get_files_ids(
     let mut dirs = vec![PathBuf::new()];
 
     while let Some(rel) = dirs.pop() {
-        let entries = match list(&base_path.join(&rel), root) {
+        let entries = match list(&base_path.join(&rel), root, false) {
             Ok(entries) => entries,
             // A directory removed during the walk, as eviction does.
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -170,7 +173,7 @@ fn find_max_id_recursive(
     extension: &str,
     root: Option<&Path>,
 ) -> Result<PathBuf, PathError> {
-    let entries = list(current_path, root)?;
+    let entries = list(current_path, root, true)?;
     let max_from_dirs = entries
         .iter()
         .filter(|e| e.stat.is_dir())
@@ -215,7 +218,7 @@ fn find_min_id_recursive(
     extension: &str,
     root: Option<&Path>,
 ) -> Result<PathBuf, PathError> {
-    let entries = list(current_path, root)?;
+    let entries = list(current_path, root, true)?;
     let min_from_dirs = entries
         .iter()
         .filter(|e| e.stat.is_dir())
