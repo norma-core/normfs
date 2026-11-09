@@ -160,6 +160,7 @@ impl QueueIdResolver {
     /// Resolve a queue path to a QueueId with absolute path
     /// Relative paths are prefixed with /instance_id/, absolute paths (starting with /) are used as-is.
     /// Repeated and trailing slashes are dropped, so `a//b` and `a/b/` name the queue `a/b`.
+    /// Bytes are not folded: on a case-folding volume `Cam` and `cam` are two ids on one directory.
     pub fn resolve(&self, path: &str) -> QueueId {
         if path.starts_with('/') {
             QueueId {
