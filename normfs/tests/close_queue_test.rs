@@ -457,24 +457,22 @@ async fn a_closed_queues_file_migrates_to_the_store() {
 }
 
 #[tokio::test]
-async fn a_queue_named_like_a_marker_does_not_close_its_parent() {
+async fn a_queue_named_like_a_marker_is_refused() {
     let temp = tempfile::TempDir::new().unwrap();
     let fs = NormFS::new(temp.path().to_path_buf(), NormFsSettings::all_active())
         .await
         .unwrap();
 
-    // "parent/closed" is a legitimate queue name; its *directory* must not
-    // read as parent's closed *marker*.
     let inner = fs.resolve("parent/closed");
-    fs.ensure_queue_exists_for_write(&inner).await.unwrap();
-    fs.enqueue(&inner, Bytes::from_static(b"data"))
-        .await
-        .unwrap();
+    assert!(matches!(
+        fs.ensure_queue_exists_for_write(&inner).await,
+        Err(Error::BadQueueName(_))
+    ));
 
     let parent = fs.resolve("parent");
     fs.ensure_queue_exists_for_write(&parent)
         .await
-        .expect("a child queue named 'closed' must not close its parent");
+        .expect("a refused child must not close its parent");
     fs.enqueue(&parent, Bytes::from_static(b"alive"))
         .await
         .unwrap();
@@ -542,14 +540,9 @@ async fn a_colliding_marker_path_fails_the_close_and_leaves_the_queue_writable()
         .await
         .unwrap();
 
-    let child = fs.resolve("parent/closed");
-    fs.ensure_queue_exists_for_write(&child).await.unwrap();
-    fs.enqueue(&child, Bytes::from_static(b"child"))
-        .await
-        .unwrap();
-
     let parent = fs.resolve("parent");
     fs.ensure_queue_exists_for_write(&parent).await.unwrap();
+    std::fs::create_dir_all(parent.to_fs_path(temp.path()).join("closed")).unwrap();
     fs.enqueue(&parent, Bytes::from_static(b"one"))
         .await
         .unwrap();
@@ -557,7 +550,7 @@ async fn a_colliding_marker_path_fails_the_close_and_leaves_the_queue_writable()
     let refused = fs.close_queue(&parent).await;
     assert!(
         refused.is_err(),
-        "the child dir occupies the marker path; close must refuse, got Ok"
+        "a dir occupies the marker path; close must refuse, got Ok"
     );
 
     // Refused before anything changed: the parent still accepts writes.

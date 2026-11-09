@@ -151,3 +151,20 @@ fn test_queue_id_short_drops_only_this_instance_id() {
     assert_eq!(own, same);
     assert_eq!(same.short(), same.as_str());
 }
+
+#[test]
+fn repeated_and_trailing_slashes_resolve_to_one_queue() {
+    let resolver = QueueIdResolver::new("inst");
+    for name in ["a/b", "a//b", "a/b/", "a//b//"] {
+        let queue = resolver.resolve(name);
+        assert_eq!(queue.as_str(), "/inst/a/b", "{name}");
+        assert_eq!(queue.short(), "a/b", "{name}");
+    }
+    assert_eq!(resolver.resolve("//x/y/").as_str(), "/x/y");
+    assert_eq!(resolver.resolve("").short(), "");
+    assert_eq!(resolver.resolve("/").as_str(), "");
+    assert_eq!(resolver.resolve("кир//ил/").as_str(), "/inst/кир/ил");
+
+    assert_eq!(QueueIdResolver::new("").resolve("é").short(), "é");
+    assert_eq!(QueueIdResolver::new("a//b/").resolve("é/x").short(), "é/x");
+}
