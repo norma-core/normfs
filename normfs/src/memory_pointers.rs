@@ -500,14 +500,13 @@ impl normfs_store::LandedIndex for MemoryPointers {
 }
 
 async fn read_optional(fs: &Fs, path: &Path) -> Result<Option<String>, Error> {
-    let path = path.to_path_buf();
-    fs.run_blocking(move || match std::fs::read_to_string(&path) {
-        Ok(contents) => Ok(Some(contents)),
-        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e),
-    })
-    .await
-    .map_err(Error::from)
+    match fs.read_whole(path).await {
+        Ok(bytes) => String::from_utf8(bytes.to_vec())
+            .map(Some)
+            .map_err(|e| Error::new(ErrorKind::InvalidData, e)),
+        Err(normfs_fs::FsError::Os(e)) if e.kind() == ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(Error::from(e)),
+    }
 }
 
 fn to_u64(n: &UintN, what: &str) -> Result<u64, Error> {

@@ -536,3 +536,89 @@ async fn remove_frees_the_name_while_a_reader_holds_the_file() {
     drop(reader);
     assert_eq!(std::fs::read(&path).unwrap(), b"new");
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn remove_dir_all_takes_a_link_and_not_what_it_points_at() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    std::fs::write(real.join("kept"), b"x").unwrap();
+    let link = dir.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let rooted = Fs::new(FsConfig {
+        root: Some(dir.path().to_path_buf()),
+        ..FsConfig::default()
+    })
+    .unwrap();
+
+    fs().remove_dir_all(&link).await.unwrap();
+    assert!(real.join("kept").exists());
+    assert!(std::fs::symlink_metadata(&link).is_err());
+
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    rooted.remove_dir_all(&link).await.unwrap();
+    assert!(real.join("kept").exists());
+    assert!(std::fs::symlink_metadata(&link).is_err());
+}
+
+/// A subdirectory swapped for a link to `outside` while the removal runs.
+#[cfg(unix)]
+async fn swap_during_remove_dir_all(rooted: bool) -> usize {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let mut lost = 0;
+    for _ in 0..200 {
+        let base = tempfile::tempdir().unwrap();
+        let outside = base.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("keep"), b"x").unwrap();
+        let top = base.path().join("top");
+        let sub = top.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        for i in 0..50 {
+            std::fs::write(sub.join(format!("f{i}")), b"").unwrap();
+        }
+        std::fs::write(sub.join("keep"), b"y").unwrap();
+        let fs = Fs::new(FsConfig {
+            root: rooted.then(|| base.path().to_path_buf()),
+            ..FsConfig::default()
+        })
+        .unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let swapper = {
+            let (stop, sub, outside) = (stop.clone(), sub.clone(), outside.clone());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    if std::fs::rename(&sub, sub.with_file_name("moved")).is_ok() {
+                        let _ = std::os::unix::fs::symlink(&outside, &sub);
+                        return;
+                    }
+                }
+            })
+        };
+        let _ = fs.remove_dir_all(&top).await;
+        stop.store(true, Ordering::Relaxed);
+        swapper.join().unwrap();
+        if !outside.join("keep").exists() {
+            lost += 1;
+        }
+    }
+    lost
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn remove_dir_all_deletes_nothing_through_a_directory_swapped_for_a_link() {
+    assert_eq!(swap_during_remove_dir_all(false).await, 0);
+    assert_eq!(swap_during_remove_dir_all(true).await, 0);
+}
+
+#[tokio::test]
+async fn remove_dir_all_refuses_a_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("file");
+    std::fs::write(&file, b"x").unwrap();
+    assert!(fs().remove_dir_all(&file).await.is_err());
+    assert!(file.exists());
+}

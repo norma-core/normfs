@@ -13,12 +13,14 @@
 use std::collections::HashSet;
 use std::fs::{File, Metadata};
 use std::io;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use tokio::sync::{Semaphore, oneshot};
 
+mod beneath;
 mod dir_sync;
 mod directory;
 mod executor;
@@ -28,8 +30,11 @@ mod plan;
 mod pool;
 mod read;
 mod scan;
+pub use beneath::Stat;
 pub use read::ReadFile;
 
+#[cfg(test)]
+mod beneath_test;
 #[cfg(test)]
 mod dir_sync_test;
 #[cfg(test)]
@@ -60,6 +65,10 @@ pub struct FsConfig {
     pub backend: Backend,
     /// Executor threads. Zero picks a default sized for the machine.
     pub threads: usize,
+    /// The data directory. On Unix, paths below it are opened one directory
+    /// at a time following no link. It and its ancestors are resolved as
+    /// given, and any other path is refused.
+    pub root: Option<PathBuf>,
 }
 
 impl Default for FsConfig {
@@ -67,6 +76,7 @@ impl Default for FsConfig {
         FsConfig {
             backend: Backend::Pool,
             threads: 0,
+            root: None,
         }
     }
 }
@@ -170,6 +180,7 @@ pub struct Fs {
     slots: Arc<Semaphore>,
     // Avoid repeated pool round trips for already provisioned store directories.
     provisioned: Arc<Mutex<Provisioned>>,
+    root: Option<Arc<Path>>,
 }
 
 #[derive(Default)]
@@ -197,6 +208,27 @@ impl std::fmt::Debug for Fs {
 
 impl Fs {
     pub fn new(cfg: FsConfig) -> io::Result<Fs> {
+        if cfg
+            .root
+            .as_deref()
+            .is_some_and(|r| r.has_root() && r.parent().is_none())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the data directory cannot be a filesystem root",
+            ));
+        }
+        // Below "" every path is a bare name, which root_len cannot tell from one outside it.
+        if cfg
+            .root
+            .as_deref()
+            .is_some_and(|r| r.as_os_str().is_empty())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the data directory is empty; give \".\" for the working directory",
+            ));
+        }
         let threads = if cfg.threads == 0 {
             default_threads()
         } else {
@@ -210,11 +242,20 @@ impl Fs {
             exec,
             slots: Arc::new(Semaphore::new(threads.saturating_mul(32).clamp(1, 1024))),
             provisioned: Arc::new(Mutex::new(Provisioned::default())),
+            root: cfg.root.map(Arc::from),
         })
     }
 
     pub fn backend(&self) -> &'static str {
         self.exec.name()
+    }
+
+    fn at(&self, path: &Path) -> io::Result<beneath::At> {
+        beneath::At::new(self.root.as_deref(), path)
+    }
+
+    fn root_len(&self, path: &Path) -> io::Result<usize> {
+        beneath::root_len(self.root.as_deref(), path)
     }
 
     async fn submit(&self, task: Task) -> Result<(), FsError> {
@@ -288,6 +329,7 @@ impl Fs {
             file: Some(file),
             runs: runs.0,
             sync,
+            root: self.root_len(path)?,
         };
         let fin = self.run_plan(plan, res, None).await?;
         Ok(match fin.plan.next()? {
@@ -319,6 +361,7 @@ impl Fs {
             file: Some(file),
             runs: Vec::new(),
             sync: true,
+            root: self.root_len(path)?,
         };
         let fin = self.run_plan(plan, res, None).await?;
         finished(&fin.plan)
@@ -347,10 +390,18 @@ impl Fs {
         } else {
             spec.runs.0
         };
+        let root = self.root_len(&spec.dst)?;
+        if self.root_len(&spec.tmp)? != root {
+            return Err(FsError::Os(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "publish paths on two sides of the data directory",
+            )));
+        }
         let res = Resources {
             file: None,
             runs,
             sync: spec.sync,
+            root,
         };
         let fin = self.run_plan(plan, res, then).await?;
         finished(&fin.plan)?;
@@ -388,6 +439,7 @@ impl Fs {
             file: None,
             runs: runs.0,
             sync,
+            root: self.root_len(path)?,
         };
         let fin = self.run_plan(plan, res, None).await?;
         finished(&fin.plan)?;
@@ -405,6 +457,7 @@ impl Fs {
             file: None,
             runs: Vec::new(),
             sync,
+            root: self.root_len(path)?,
         };
         let fin = self.run_plan(plan, res, None).await?;
         finished(&fin.plan)?;
@@ -429,9 +482,18 @@ impl Fs {
     }
 
     pub async fn open_read(&self, path: &Path) -> io::Result<ReadFile> {
-        let path = path.to_path_buf();
-        let file = self.run_blocking(move || File::open(path)).await?;
+        let file = self.open(path, false).await?;
         Ok(ReadFile::new(self.clone(), file))
+    }
+
+    pub async fn open(&self, path: &Path, write: bool) -> io::Result<File> {
+        let at = self.at(path)?;
+        Ok(self.run_blocking(move || beneath::open(&at, write)).await?)
+    }
+
+    /// [`Fs::open`] for a caller already on an executor thread.
+    pub fn open_blocking(&self, path: &Path, write: bool) -> io::Result<File> {
+        beneath::open(&self.at(path)?, write)
     }
 
     pub async fn metadata(&self, file: Arc<File>) -> Result<Metadata, FsError> {
@@ -445,27 +507,22 @@ impl Fs {
     }
 
     pub async fn directory_size(&self, path: &Path) -> Result<u64, FsError> {
-        let root = path.to_path_buf();
+        let fs = self.clone();
+        let top = path.to_path_buf();
         self.run_blocking(move || {
             let mut total = 0u64;
-            let mut dirs = vec![root];
+            let mut dirs = vec![top];
             while let Some(dir) = dirs.pop() {
-                let entries = match std::fs::read_dir(dir) {
+                let entries = match beneath::list(&fs.at(&dir)?) {
                     Ok(entries) => entries,
                     Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
                     Err(e) => return Err(e),
                 };
                 for entry in entries {
-                    let entry = entry?;
-                    let metadata = match entry.metadata() {
-                        Ok(m) => m,
-                        Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-                        Err(e) => return Err(e),
-                    };
-                    if metadata.is_dir() {
-                        dirs.push(entry.path());
-                    } else if metadata.is_file() {
-                        total = total.saturating_add(metadata.len());
+                    if entry.stat.is_dir() {
+                        dirs.push(dir.join(entry.name));
+                    } else if entry.stat.is_file() {
+                        total = total.saturating_add(entry.stat.size());
                     }
                 }
             }
@@ -475,20 +532,19 @@ impl Fs {
     }
 
     pub async fn read_whole(&self, path: &Path) -> Result<Bytes, FsError> {
-        let path = path.to_path_buf();
-        self.run_blocking(move || std::fs::read(&path).map(Bytes::from))
-            .await
-    }
-
-    /// `None` when nothing is at `path`.
-    pub async fn stat(&self, path: &Path) -> Result<Option<Metadata>, FsError> {
-        let path = path.to_path_buf();
-        self.run_blocking(move || match std::fs::symlink_metadata(&path) {
-            Ok(m) => Ok(Some(m)),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e),
+        let at = self.at(path)?;
+        self.run_blocking(move || {
+            let mut buf = Vec::new();
+            beneath::open(&at, false)?.read_to_end(&mut buf)?;
+            Ok(Bytes::from(buf))
         })
         .await
+    }
+
+    /// `None` when nothing is at `path`. A link there is not followed.
+    pub async fn stat(&self, path: &Path) -> Result<Option<Stat>, FsError> {
+        let at = self.at(path)?;
+        self.run_blocking(move || beneath::stat(&at)).await
     }
 
     /// Creates durable directories below an already durable, provisioned ancestor.
@@ -502,7 +558,8 @@ impl Fs {
         };
         let key = path.to_path_buf();
         let path = key.clone();
-        self.run_blocking(move || directory::mkdir_all(&path))
+        let root = self.root.clone();
+        self.run_blocking(move || directory::mkdir_all(&path, root.as_deref()))
             .await?;
         let mut provisioned = self.provisioned.lock().unwrap();
         if provisioned.generation == generation {
@@ -514,23 +571,54 @@ impl Fs {
     /// unlink without a directory sync: for eviction, where the name coming
     /// back after a crash costs nothing but another eviction.
     pub async fn unlink(&self, path: &Path) -> Result<(), FsError> {
-        let path = path.to_path_buf();
-        self.run_blocking(move || std::fs::remove_file(&path)).await
+        let at = self.at(path)?;
+        self.run_blocking(move || beneath::unlink(&at)).await
     }
 
     pub async fn remove_dir_all(&self, path: &Path) -> Result<(), FsError> {
         self.provisioned.lock().unwrap().forget(path);
-        let provisioned = self.provisioned.clone();
+        let fs = self.clone();
         let path = path.to_path_buf();
         self.run_blocking(move || {
-            let removed = std::fs::remove_dir_all(&path);
+            // Without the walk, std's removal is the one that does not follow a
+            // directory swapped for a link while it runs.
+            let removed = match fs.root_len(&path)? {
+                0 => std::fs::remove_dir_all(&path),
+                _ => fs.remove_tree(&path),
+            };
             // A creation that finished while the removal ran may have cached
             // its directory. Clearing here, on the executor, holds even if the
             // caller stopped waiting.
-            provisioned.lock().unwrap().forget(&path);
+            fs.provisioned.lock().unwrap().forget(&path);
             removed
         })
         .await
+    }
+
+    /// A link, inside or at `dir`, is removed and never followed.
+    fn remove_tree(&self, dir: &Path) -> io::Result<()> {
+        let at = self.at(dir)?;
+        match beneath::stat(&at)? {
+            None => return Err(io::ErrorKind::NotFound.into()),
+            Some(top) if top.is_file() => {
+                return Err(io::Error::from_raw_os_error(os::ENOTDIR));
+            }
+            Some(top) if !top.is_dir() => return beneath::unlink(&at),
+            Some(_) => {}
+        }
+        for entry in beneath::list(&at)? {
+            let path = dir.join(&entry.name);
+            let removed = if entry.stat.is_dir() {
+                self.remove_tree(&path)
+            } else {
+                beneath::unlink(&self.at(&path)?)
+            };
+            match removed {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                _ => {}
+            }
+        }
+        beneath::rmdir(&at)
     }
 
     /// Unlinks the `.{ext}` files directly under `dir` and returns how many
@@ -540,18 +628,27 @@ impl Fs {
         dir: &Path,
         ext: &'static str,
     ) -> Result<usize, FsError> {
+        let fs = self.clone();
         let dir = dir.to_path_buf();
         self.run_blocking(move || {
-            let entries = match std::fs::read_dir(&dir) {
+            let at = fs.at(&dir)?;
+            let entries = match beneath::list(&at) {
                 Ok(entries) => entries,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
                 Err(e) => return Err(e),
             };
             let mut removed = 0;
             for entry in entries {
-                let path = entry?.path();
-                if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some(ext) {
-                    match std::fs::remove_file(&path) {
+                let path = dir.join(entry.name);
+                // Below a data directory a link is unlinked itself; left, it would refuse
+                // the next create of its name. Resolved as given, only files go, as before.
+                let gone = if at.walks() {
+                    !entry.stat.is_dir()
+                } else {
+                    matches!(beneath::stat_as_given(&fs.at(&path)?), Ok(Some(s)) if s.is_file())
+                };
+                if gone && path.extension().and_then(|s| s.to_str()) == Some(ext) {
+                    match beneath::unlink(&fs.at(&path)?) {
                         Ok(()) => removed += 1,
                         Err(e) => log::warn!(target: "normfs-fs",
                             "failed to remove {}: {e}", path.display()),
@@ -570,8 +667,9 @@ impl Fs {
         ext: &'static str,
         which: Scan,
     ) -> Result<ScanResult, FsError> {
+        let root = self.root.clone();
         let dir = dir.to_path_buf();
-        self.run_blocking(move || scan::scan_ids(&dir, ext, which))
+        self.run_blocking(move || scan::scan_ids(&dir, ext, which, root.as_deref()))
             .await
     }
 }

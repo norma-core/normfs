@@ -534,9 +534,19 @@ impl NormFS {
         mut settings: NormFsSettings,
     ) -> Result<Self, Error> {
         let path = path.as_ref().to_path_buf();
+        // Below "" every path is a bare name, which Fs cannot tell from one outside it.
+        let path = if path.as_os_str().is_empty() {
+            std::path::PathBuf::from(".")
+        } else {
+            path
+        };
         log::debug!(target: "normfs", "Creating new NormFS at path: {:?}", path);
 
-        let fs = Fs::new(FsConfig::default()).map_err(Error::Io)?;
+        let fs = Fs::new(FsConfig {
+            root: Some(path.clone()),
+            ..FsConfig::default()
+        })
+        .map_err(Error::Io)?;
         fs.mkdir_all(&path).await?;
 
         let crypto_path = path.clone();

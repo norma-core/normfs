@@ -196,7 +196,12 @@ void normfs_fs_world_unlink_ok(const char *path, size_t path_len);
 /* ------------------------------------------------------------------------
  * Shims for the thread-pool executor. Paths are (pointer, length) with an
  * explicit NUL; results are long so this header needs no <sys/types.h>. Every
- * failure leaves *os_error > 0, EIO where errno said nothing. */
+ * failure leaves *os_error > 0, EIO where errno said nothing.
+ *
+ * With root > 0 a path is the data directory path[0 .. root), which may be a
+ * link, then segments opened with normfs_fs_open_parent: no link below the
+ * data directory is followed.
+ * With root 0 the path is resolved as given. */
 
 #define NORMFS_FS_TMP_EXCL 0
 #define NORMFS_FS_TMP_TRUNC 1
@@ -206,6 +211,7 @@ void normfs_fs_world_unlink_ok(const char *path, size_t path_len);
 /*@ requires path_len < NORMFS_FS_PATH_MAX;
     requires \valid_read(path + (0 .. path_len));
     requires path[path_len] == 0;
+    requires root == 0 || root < path_len;
     requires mode == NORMFS_FS_TMP_EXCL || mode == NORMFS_FS_TMP_TRUNC;
     requires \valid(ino);
     requires \valid(os_error);
@@ -215,8 +221,8 @@ void normfs_fs_world_unlink_ok(const char *path, size_t path_len);
     ensures \result >= 0 ==> *os_error == 0 && *ino > 0;
     ensures \result == -1 ==> *os_error > 0;
 */
-normfs_fs_fd normfs_fs_sys_open_create(const char *path, size_t path_len, int mode,
-    uint64_t *ino, int *os_error);
+normfs_fs_fd normfs_fs_sys_open_create(const char *path, size_t path_len,
+    size_t root, int mode, uint64_t *ino, int *os_error);
 
 struct normfs_fs_iov {
 	const uint8_t *base;
@@ -261,6 +267,7 @@ int normfs_fs_sys_close(normfs_fs_fd fd, int *os_error);
 /*@ requires path_len < NORMFS_FS_PATH_MAX;
     requires \valid_read(path + (0 .. path_len));
     requires path[path_len] == 0;
+    requires root == 0 || root < path_len;
     requires \valid(len);
     requires \valid(os_error);
     requires \separated(len, os_error, path + (0 .. path_len));
@@ -269,13 +276,14 @@ int normfs_fs_sys_close(normfs_fs_fd fd, int *os_error);
     ensures \result >= 0 ==> *os_error == 0;
     ensures \result == -1 ==> *os_error > 0;
 */
-int normfs_fs_sys_file_len(const char *path, size_t path_len, uint64_t *len,
-    int *os_error);
+int normfs_fs_sys_file_len(const char *path, size_t path_len, size_t root,
+    uint64_t *len, int *os_error);
 
 /*@ requires src_len < NORMFS_FS_PATH_MAX && dst_len < NORMFS_FS_PATH_MAX;
     requires \valid_read(src + (0 .. src_len));
     requires \valid_read(dst + (0 .. dst_len));
     requires src[src_len] == 0 && dst[dst_len] == 0;
+    requires root == 0 || (root < src_len && root < dst_len);
     requires \valid(os_error);
     requires \separated(os_error, src + (0 .. src_len), dst + (0 .. dst_len));
     assigns *os_error;
@@ -284,13 +292,15 @@ int normfs_fs_sys_file_len(const char *path, size_t path_len, uint64_t *len,
     ensures \result == -1 ==> *os_error > 0;
 */
 int normfs_fs_sys_rename(const char *src, size_t src_len, const char *dst,
-    size_t dst_len, int *os_error);
+    size_t dst_len, size_t root, int *os_error);
 
 /* open(O_RDONLY|O_DIRECTORY) + fsync + close on the directory holding `path`:
- * everything up to the last '/' of path, or "." when there is none. */
+ * everything up to the last '/' of path, or "." when there is none. With
+ * root > 0 that is the directory normfs_fs_open_parent opens. */
 /*@ requires path_len < NORMFS_FS_PATH_MAX;
     requires \valid_read(path + (0 .. path_len));
     requires path[path_len] == 0;
+    requires root == 0 || root < path_len;
     requires \valid(os_error);
     requires \separated(os_error, path + (0 .. path_len));
     assigns *os_error;
@@ -298,7 +308,7 @@ int normfs_fs_sys_rename(const char *src, size_t src_len, const char *dst,
     ensures \result == 0 ==> *os_error == 0;
     ensures \result == -1 ==> *os_error > 0;
 */
-int normfs_fs_sys_fsync_parent(const char *path, size_t path_len,
+int normfs_fs_sys_fsync_parent(const char *path, size_t path_len, size_t root,
     int *os_error);
 
 /*@ requires \valid(os_error);
@@ -313,6 +323,7 @@ int normfs_fs_sys_ftruncate(normfs_fs_fd fd, uint64_t len, int *os_error);
 /*@ requires path_len < NORMFS_FS_PATH_MAX;
     requires \valid_read(path + (0 .. path_len));
     requires path[path_len] == 0;
+    requires root == 0 || root < path_len;
     requires \valid(os_error);
     requires \separated(os_error, path + (0 .. path_len));
     assigns *os_error;
@@ -320,11 +331,13 @@ int normfs_fs_sys_ftruncate(normfs_fs_fd fd, uint64_t len, int *os_error);
     ensures \result >= 0 ==> *os_error == 0;
     ensures \result == -1 ==> *os_error > 0;
 */
-int normfs_fs_sys_unlink(const char *path, size_t path_len, int *os_error);
+int normfs_fs_sys_unlink(const char *path, size_t path_len, size_t root,
+    int *os_error);
 
 /*@ requires path_len < NORMFS_FS_PATH_MAX;
     requires \valid_read(path + (0 .. path_len));
     requires path[path_len] == 0;
+    requires root == 0 || root < path_len;
     requires \valid(os_error);
     requires \separated(os_error, path + (0 .. path_len));
     assigns *os_error;
@@ -332,6 +345,133 @@ int normfs_fs_sys_unlink(const char *path, size_t path_len, int *os_error);
     ensures \result == 0 ==> *os_error == 0;
     ensures \result == -1 ==> *os_error > 0;
 */
-int normfs_fs_sys_sync_dir(const char *path, size_t path_len, int *os_error);
+int normfs_fs_sys_sync_dir(const char *path, size_t path_len, size_t root,
+    int *os_error);
+
+/* fstatat(2): 0 absent, 1 a regular file of *len bytes, 2 a directory, 3
+ * anything else. A link at the name is followed only with follow set and root
+ * 0, where the path is resolved as given. */
+/*@ requires path_len < NORMFS_FS_PATH_MAX;
+    requires \valid_read(path + (0 .. path_len));
+    requires path[path_len] == 0;
+    requires root == 0 || root < path_len;
+    requires \valid(len);
+    requires \valid(os_error);
+    requires \separated(len, os_error, path + (0 .. path_len));
+    assigns *len, *os_error;
+    ensures -1 <= \result <= 3;
+    ensures \result >= 0 ==> *os_error == 0;
+    ensures \result == -1 ==> *os_error > 0;
+*/
+int normfs_fs_sys_stat(const char *path, size_t path_len, size_t root,
+    int follow, uint64_t *len, int *os_error);
+
+/* open(O_RDONLY or O_WRONLY, O_CLOEXEC) of an existing file, with O_NOFOLLOW
+ * when root > 0. */
+/*@ requires path_len < NORMFS_FS_PATH_MAX;
+    requires \valid_read(path + (0 .. path_len));
+    requires path[path_len] == 0;
+    requires root == 0 || root < path_len;
+    requires \valid(os_error);
+    requires \separated(os_error, path + (0 .. path_len));
+    assigns *os_error;
+    ensures \result >= 0 || \result == -1;
+    ensures \result >= 0 ==> *os_error == 0;
+    ensures \result == -1 ==> *os_error > 0;
+*/
+normfs_fs_fd normfs_fs_sys_open_file(const char *path, size_t path_len,
+    size_t root, int write, int *os_error);
+
+/* mkdir(2) with mode 0777 or rmdir(2). */
+/*@ requires path_len < NORMFS_FS_PATH_MAX;
+    requires \valid_read(path + (0 .. path_len));
+    requires path[path_len] == 0;
+    requires root == 0 || root < path_len;
+    requires \valid(os_error);
+    requires \separated(os_error, path + (0 .. path_len));
+    assigns *os_error;
+    ensures \result == 0 || \result == -1;
+    ensures \result == 0 ==> *os_error == 0;
+    ensures \result == -1 ==> *os_error > 0;
+*/
+int normfs_fs_sys_mkdir(const char *path, size_t path_len, size_t root,
+    int remove, int *os_error);
+
+/* A listing of the directory at path, or NULL. */
+/*@ requires path_len < NORMFS_FS_PATH_MAX;
+    requires \valid_read(path + (0 .. path_len));
+    requires path[path_len] == 0;
+    requires root == 0 || root < path_len;
+    requires \valid(os_error);
+    requires \separated(os_error, path + (0 .. path_len));
+    assigns *os_error;
+    ensures \result != \null ==> *os_error == 0;
+    ensures \result == \null ==> *os_error > 0;
+*/
+void *normfs_fs_sys_list_open(const char *path, size_t path_len, size_t root,
+    int *os_error);
+
+/* The next entry other than . and .., with its kind as normfs_fs_sys_stat
+ * gives it and the name in name[0 .. *name_len): 1 an entry, 0 the end. A
+ * name gone before it was looked at is skipped. */
+/*@ requires cap > 0 && \valid(name + (0 .. cap - 1));
+    requires \valid(name_len) && \valid(kind) && \valid(len) && \valid(os_error);
+    requires \separated(name + (0 .. cap - 1), name_len, kind, len, os_error);
+    assigns name[0 .. cap - 1], *name_len, *kind, *len, *os_error;
+    ensures -1 <= \result <= 1;
+    ensures \result == 1 ==> *name_len <= cap && 1 <= *kind <= 3 && *os_error == 0;
+    ensures \result == 0 ==> *os_error == 0;
+    ensures \result == -1 ==> *os_error > 0;
+*/
+int normfs_fs_sys_list_next(void *list, char *name, size_t cap,
+    size_t *name_len, int *kind, uint64_t *len, int *os_error);
+
+/*@ assigns \nothing; */
+void normfs_fs_sys_list_close(void *list);
+
+/* ------------------------------------------------------------------------
+ * The walk below the data directory, for normfs_fs_open_parent. Each open
+ * adds one to normfs_fs_held and each release takes one: the count of opens
+ * less releases, not which descriptor was released. */
+
+/*@ ghost extern int normfs_fs_held; */
+
+/*@ predicate fs_segment(char *s, integer n) =
+      n > 0 && (\forall integer k; 0 <= k < n ==> s[k] != '/' && s[k] != 0) &&
+      !(n == 1 && s[0] == '.') && !(n == 2 && s[0] == '.' && s[1] == '.');
+*/
+
+/* open(O_RDONLY|O_DIRECTORY|O_CLOEXEC) of path[0 .. len), following links. */
+/*@ requires 0 < len < NORMFS_FS_PATH_MAX;
+    requires \valid_read(path + (0 .. len - 1));
+    requires \valid(os_error);
+    requires \separated(os_error, path + (0 .. len - 1));
+    assigns *os_error, normfs_fs_held;
+    ensures \result >= 0 || \result == -1;
+    ensures \result >= 0 ==> *os_error == 0 && normfs_fs_held == \old(normfs_fs_held) + 1;
+    ensures \result == -1 ==> *os_error > 0 && normfs_fs_held == \old(normfs_fs_held);
+*/
+normfs_fs_fd normfs_fs_sys_open_root(const char *path, size_t len, int *os_error);
+
+/* openat(dir, name, O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC). */
+/*@ requires 0 < len < NORMFS_FS_PATH_MAX;
+    requires \valid_read(name + (0 .. len - 1));
+    requires fs_segment(name, len);
+    requires \valid(os_error);
+    requires \separated(os_error, name + (0 .. len - 1));
+    assigns *os_error, normfs_fs_held;
+    ensures \result >= 0 || \result == -1;
+    ensures \result >= 0 ==> *os_error == 0 && normfs_fs_held == \old(normfs_fs_held) + 1;
+    ensures \result == -1 ==> *os_error > 0 && normfs_fs_held == \old(normfs_fs_held);
+*/
+normfs_fs_fd normfs_fs_sys_open_below(normfs_fs_fd dir, const char *name,
+    size_t len, int *os_error);
+
+/* close(2); a walk has no use for its error. */
+/*@ requires fd >= 0;
+    assigns normfs_fs_held;
+    ensures normfs_fs_held == \old(normfs_fs_held) - 1;
+*/
+void normfs_fs_sys_release(normfs_fs_fd fd);
 
 #endif /* NORMFS_FS_SYS_H */
