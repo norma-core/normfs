@@ -361,7 +361,13 @@ async fn recorded(root: &Path, cloud: &CloudSettings) -> normfs::QueueId {
 fn refusing() -> CloudSettings {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
-    std::thread::spawn(move || listener.incoming().for_each(drop));
+    std::thread::spawn(move || {
+        for conn in listener.incoming() {
+            if conn.is_err() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    });
     unreachable(endpoint)
 }
 
