@@ -202,7 +202,11 @@ pub unsafe extern "C" fn normfs_flush(fs: *mut Handle, queue: *const c_char) -> 
             (Ok(h), Ok(q)) => (h, h.fs.resolve(q)),
             (Err(code), _) | (_, Err(code)) => return code,
         };
-        if let Err(e) = h.rt.block_on(h.fs.flush_queue(&queue)) {
+        let flushed = h.rt.block_on(async {
+            h.fs.ensure_queue_exists_for_read(&queue).await?;
+            h.fs.flush_queue(&queue).await
+        });
+        if let Err(e) = flushed {
             return fail_with(e);
         }
         // A WAL queue has nothing to seal: its writer syncs within a few ms.
@@ -262,6 +266,8 @@ fn read_records(
     cb: RecordCb,
     ctx: *mut c_void,
 ) -> c_int {
+    // Before anything that can wait, so a stop sent from now on is seen.
+    let mut stop = h.stop_follows.subscribe();
     let Some(cb) = cb else {
         return fail(NORMFS_ERR_INVALID, "the callback is NULL");
     };
@@ -269,7 +275,6 @@ fn read_records(
         return fail_with(e);
     }
     let follow = limit == 0;
-    let mut stop = h.stop_follows.subscribe();
     let mut next = from;
     loop {
         // Keeps `next + limit - 1` inside 64 bits.
@@ -406,5 +411,7 @@ pub unsafe extern "C" fn normfs_stop_follows(fs: *mut Handle) -> c_int {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn normfs_last_error() -> *const c_char {
-    LAST_ERROR.with(|e| e.borrow().as_ptr())
+    LAST_ERROR
+        .try_with(|e| e.borrow().as_ptr())
+        .unwrap_or(c"the thread is exiting".as_ptr())
 }

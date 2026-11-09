@@ -24,7 +24,7 @@ enum normfs_status {
 	NORMFS_ERR_INVALID = 1,    /* NULL argument, bad UTF-8 or queue name */
 	NORMFS_ERR_NOT_FOUND = 2,  /* record does not exist */
 	NORMFS_ERR_EMPTY = 3,      /* queue has no record yet */
-	NORMFS_ERR_TOO_LARGE = 4,  /* record does not fit a 256 KiB memory page */
+	NORMFS_ERR_TOO_LARGE = 4,  /* record and its framing exceed a 256 KiB page */
 	NORMFS_ERR_CLOSED = 5,     /* the instance is closing */
 	NORMFS_ERR_ID_RANGE = 6,   /* id does not fit 64 bits */
 	NORMFS_ERR_IO = 7,         /* disk, cloud or any other failure */
@@ -57,8 +57,8 @@ int normfs_flush(normfs_t *fs, const char *queue);
 /* The id of the newest record in `queue`. */
 int normfs_last_id(normfs_t *fs, const char *queue, uint64_t *id);
 
-/* Calls `cb` for up to `limit` records from id `from` on, then returns. A queue
- * never written reads as empty. */
+/* Calls `cb` for up to `limit` records from id `from` on, then returns; a
+ * `limit` of 0 reads nothing. A queue never written reads as empty. */
 int normfs_read(normfs_t *fs, const char *queue, uint64_t from,
     uint64_t limit, normfs_record_cb cb, void *ctx);
 

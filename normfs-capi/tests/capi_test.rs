@@ -267,6 +267,10 @@ fn errors_come_back_as_codes_with_a_message() {
     let rc = unsafe { normfs_append(fs.0, bad.as_ptr(), b"x".as_ptr(), 1, &mut id) };
     assert_eq!(rc, NORMFS_ERR_INVALID);
     assert!(!last_error().is_empty());
+    assert_eq!(
+        unsafe { normfs_flush(fs.0, bad.as_ptr()) },
+        NORMFS_ERR_INVALID
+    );
 
     assert_eq!(
         unsafe { normfs_append(fs.0, ptr::null(), b"x".as_ptr(), 1, &mut id) },
