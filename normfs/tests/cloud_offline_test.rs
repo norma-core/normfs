@@ -356,13 +356,13 @@ async fn recorded(root: &Path, cloud: &CloudSettings) -> normfs::QueueId {
     queue
 }
 
+/// Holds the port and drops every connection: a port given back could be
+/// handed to a `fake_bucket` of a test running alongside, which answers.
 fn refusing() -> CloudSettings {
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    unreachable(format!("http://127.0.0.1:{port}"))
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || listener.incoming().for_each(drop));
+    unreachable(endpoint)
 }
 
 /// An S3 lookalike that answers every request the same way.
