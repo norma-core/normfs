@@ -252,7 +252,7 @@ fn test_find_max_id_lexicographic_vs_numeric() {
 
 #[cfg(unix)]
 #[test]
-fn without_a_data_directory_a_linked_file_or_chunk_is_scanned() {
+fn without_a_data_directory_links_are_scanned_as_on_dev() {
     let dir = tempdir().unwrap();
     let base = dir.path().join("store");
     let elsewhere = dir.path().join("elsewhere");
@@ -265,11 +265,30 @@ fn without_a_data_directory_a_linked_file_or_chunk_is_scanned() {
     std::os::unix::fs::symlink(elsewhere.join("chunk"), base.join("001")).unwrap();
 
     match scan_ids(&base, "store", Scan::All, None).unwrap() {
-        ScanResult::All(ids) => assert_eq!(ids.len(), 3),
+        ScanResult::All(ids) => assert_eq!(ids.len(), 2, "the full walk enters no linked chunk"),
         other => panic!("{other:?}"),
     }
     assert_eq!(
+        scan_ids(&base, "store", Scan::Max, None).unwrap(),
+        ScanResult::One(UintN::from(0x1000u64))
+    );
+    assert_eq!(
         scan_ids(&base, "store", Scan::Max, Some(dir.path())).unwrap(),
         ScanResult::One(UintN::from(1u64))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn without_a_data_directory_a_directory_link_loop_is_not_entered_by_the_full_walk() {
+    let dir = tempdir().unwrap();
+    let base = dir.path().join("wal");
+    fs::create_dir_all(&base).unwrap();
+    fs::write(base.join("001.wal"), b"").unwrap();
+    std::os::unix::fs::symlink(".", base.join("000")).unwrap();
+
+    assert_eq!(
+        scan_ids(&base, "wal", Scan::All, None).unwrap(),
+        ScanResult::All(vec![UintN::from(1u64)])
     );
 }
