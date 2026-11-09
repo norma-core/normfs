@@ -639,6 +639,7 @@ async fn an_entry_buffered_during_a_flush_is_not_acked_by_it() {
     };
 
     const ENTRIES: u64 = 20;
+    let mut highest = None;
     for i in 0..ENTRIES {
         let body = Bytes::from(payload(i));
         writer
@@ -651,7 +652,8 @@ async fn an_entry_buffered_during_a_flush_is_not_acked_by_it() {
                 .windows(body.len())
                 .any(|w| w == &body[..]);
             while let Ok((_, id)) = ack_receiver.try_recv() {
-                assert_acked_bytes_on_disk(id);
+                assert_acked_bytes_on_disk(id.clone());
+                highest = Some(id.to_u64().unwrap());
             }
             if on_disk {
                 break;
@@ -665,7 +667,6 @@ async fn an_entry_buffered_during_a_flush_is_not_acked_by_it() {
     }
 
     writer.close().await.unwrap();
-    let mut highest = None;
     while let Ok((_, id)) = ack_receiver.try_recv() {
         assert_acked_bytes_on_disk(id.clone());
         highest = Some(id.to_u64().unwrap());
@@ -673,7 +674,7 @@ async fn an_entry_buffered_during_a_flush_is_not_acked_by_it() {
     assert_eq!(
         highest,
         Some(ENTRIES - 1),
-        "the closing flush reports the last entry once its bytes are down"
+        "every entry is acked by the time the writer closes"
     );
 }
 
