@@ -26,6 +26,8 @@ fn main() {
         .include(&include_dir)
         .opt_level(3)
         .compile("normfs_fs_c");
+
+    println!("cargo:include={}", include_dir.display());
 }
 
 /// cl has its own flags; /WX holds the C to the same no-warnings bar as -Werror.

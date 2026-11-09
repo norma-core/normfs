@@ -37,6 +37,8 @@ if(FRAMAC)
     # check-proved.sh cannot tell that apart from one that was proved.
     set(NORMFS_FS_WP_FCTS
         normfs_fs_sync_created_dir
+        normfs_fs_is_segment
+        normfs_fs_open_parent
         normfs_fs_append_crash_prefix
         normfs_fs_publish_crash_safe
         normfs_fs_rename_equal_paths

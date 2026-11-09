@@ -138,7 +138,7 @@ async fn eviction_never_passes_the_offloaded_bound() {
     let wal = queue.to_wal_dir(root);
 
     let bound = UintN::from(2u64);
-    let eviction = evict(&store, &wal, &UintN::from(1u64), Some(&bound), 1000).unwrap();
+    let eviction = evict(&store, &wal, 0, &UintN::from(1u64), Some(&bound), 1000, 0).unwrap();
     assert_eq!(eviction.stop, Stop::Bound);
     assert_eq!(eviction.next, UintN::from(3u64));
     assert_eq!(eviction.events.len(), 2);
@@ -146,12 +146,12 @@ async fn eviction_never_passes_the_offloaded_bound() {
     assert!(!store_file_exists(root, &queue, 2));
     assert!(store_file_exists(root, &queue, 3));
 
-    let eviction = evict(&store, &wal, &UintN::from(3u64), None, 150).unwrap();
+    let eviction = evict(&store, &wal, 0, &UintN::from(3u64), None, 150, 0).unwrap();
     assert_eq!(eviction.stop, Stop::Freed);
     assert_eq!(eviction.next, UintN::from(5u64));
     assert!(!store_file_exists(root, &queue, 4));
 
-    let eviction = evict(&store, &wal, &UintN::from(5u64), None, 150).unwrap();
+    let eviction = evict(&store, &wal, 0, &UintN::from(5u64), None, 150, 0).unwrap();
     assert_eq!(eviction.stop, Stop::Gap);
     assert!(eviction.events.is_empty());
 }
@@ -256,7 +256,7 @@ async fn concurrent_rescans_and_out_of_order_publications_preserve_usage() {
     tokio::join!(publish, rescan);
     assert_eq!(monitor.get_queue_size().await.unwrap(), 3200);
     assert_eq!(
-        scan(&queue.to_store_dir(root), FileKind::Store)
+        scan(&queue.to_store_dir(root), 0, FileKind::Store)
             .unwrap()
             .total,
         3200
@@ -359,6 +359,7 @@ async fn a_cursor_left_on_a_gap_is_moved_to_the_oldest_file() {
 
     std::fs::remove_file(queue.to_store_path(root, &UintN::from(4u64))).unwrap();
     publish_store_file(&monitor, root, &queue, 7).await;
+    publish_store_file(&monitor, root, &queue, 8).await;
     monitor.check_and_cleanup(false).await.unwrap();
 
     assert!(!store_file_exists(root, &queue, 5));
@@ -409,6 +410,48 @@ async fn a_file_that_cannot_be_deleted_holds_cleanup_at_its_id() {
     assert!(!store_file_exists(root, &queue, 0x1fff));
     assert!(!store_file_exists(root, &queue, 0x2000));
     assert!(store_file_exists(root, &queue, 0x2001));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cleanup_deletes_nothing_behind_a_link_below_the_data_directory() {
+    let data = tempfile::TempDir::new().unwrap();
+    let outside = tempfile::TempDir::new().unwrap();
+    let queue = QueueIdResolver::new("inst").resolve("cam");
+    for id in 1..=4 {
+        write_store_file(outside.path(), &queue, id, 100);
+    }
+    let store = queue.to_store_dir(data.path());
+    std::fs::create_dir_all(store.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(queue.to_store_dir(outside.path()), &store).unwrap();
+    let fs = Fs::new(normfs_fs::FsConfig {
+        root: Some(data.path().to_path_buf()),
+        ..normfs_fs::FsConfig::default()
+    })
+    .unwrap();
+
+    let monitor = QueueMonitor::new(
+        fs,
+        queue.clone(),
+        DiskMonitorConfig {
+            max_size: 150,
+            check_interval: Duration::from_secs(60),
+            wal_settings: WalSettings::default(),
+            offload: false,
+        },
+        data.path().to_path_buf(),
+        None,
+        None,
+        Arc::new(DiskUsage::default()),
+        events::discard(),
+    )
+    .await
+    .unwrap();
+    monitor.check_and_cleanup(false).await.unwrap();
+
+    for id in 1..=4 {
+        assert!(store_file_exists(outside.path(), &queue, id));
+    }
 }
 
 #[tokio::test]
@@ -516,4 +559,134 @@ async fn a_held_cleanup_is_reported_once_until_it_moves() {
     assert!(after
         .iter()
         .all(|e| matches!(e, SystemEvent::FileEvicted { .. })));
+}
+
+#[cfg(unix)]
+async fn store_moved_behind_a_link_after_counting(wal_ids: std::ops::RangeInclusive<u64>) {
+    let data = tempfile::TempDir::new().unwrap();
+    let outside = tempfile::TempDir::new().unwrap();
+    let queue = QueueIdResolver::new("inst").resolve("cam");
+    for id in 1..=4 {
+        write_store_file(data.path(), &queue, id, 100);
+    }
+    let fs = Fs::new(normfs_fs::FsConfig {
+        root: Some(data.path().to_path_buf()),
+        ..normfs_fs::FsConfig::default()
+    })
+    .unwrap();
+    let monitor = QueueMonitor::new(
+        fs,
+        queue.clone(),
+        DiskMonitorConfig {
+            max_size: 1000,
+            check_interval: Duration::from_secs(60),
+            wal_settings: WalSettings::default(),
+            offload: false,
+        },
+        data.path().to_path_buf(),
+        None,
+        None,
+        Arc::new(DiskUsage::default()),
+        events::discard(),
+    )
+    .await
+    .unwrap();
+    let store = queue.to_store_dir(data.path());
+    let moved = outside.path().join("store");
+    std::fs::rename(&store, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &store).unwrap();
+    for id in wal_ids.clone() {
+        let p = queue.to_wal_path(data.path(), &UintN::from(id));
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, vec![0u8; 200]).unwrap();
+    }
+    // 800 bytes of WAL under a limit of 1000; the 400 counted in the store are gone.
+    monitor.check_and_cleanup(false).await.unwrap();
+
+    for id in wal_ids {
+        assert!(queue.to_wal_path(data.path(), &UintN::from(id)).exists());
+    }
+    assert_eq!(monitor.store_bytes.bytes(), 0);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn files_behind_a_link_found_after_counting_do_not_cost_wal_files() {
+    store_moved_behind_a_link_after_counting(5..=8).await;
+    store_moved_behind_a_link_after_counting(1..=4).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn store_files_behind_a_link_do_not_cost_other_store_files() {
+    let data = tempfile::TempDir::new().unwrap();
+    let outside = tempfile::TempDir::new().unwrap();
+    let queue = QueueIdResolver::new("inst").resolve("cam");
+    for id in [1u64, 2, 0x1000, 0x1001, 0x1002, 0x1003] {
+        write_store_file(data.path(), &queue, id, 100);
+    }
+    let fs = Fs::new(normfs_fs::FsConfig {
+        root: Some(data.path().to_path_buf()),
+        ..normfs_fs::FsConfig::default()
+    })
+    .unwrap();
+    let monitor = QueueMonitor::new(
+        fs,
+        queue.clone(),
+        DiskMonitorConfig {
+            max_size: 500,
+            check_interval: Duration::from_secs(60),
+            wal_settings: WalSettings::default(),
+            offload: false,
+        },
+        data.path().to_path_buf(),
+        None,
+        None,
+        Arc::new(DiskUsage::default()),
+        events::discard(),
+    )
+    .await
+    .unwrap();
+    let chunk = queue
+        .to_store_path(data.path(), &UintN::from(0x1000u64))
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    std::fs::rename(&chunk, outside.path().join("chunk")).unwrap();
+    std::os::unix::fs::symlink(outside.path().join("chunk"), &chunk).unwrap();
+
+    // 200 bytes left in reach of a limit of 500; 600 were counted.
+    monitor.check_and_cleanup(false).await.unwrap();
+
+    assert!(store_file_exists(data.path(), &queue, 1));
+    assert!(store_file_exists(data.path(), &queue, 2));
+    assert_eq!(monitor.store_bytes.bytes(), 200);
+}
+
+#[test]
+fn the_store_count_left_carries_over_full_event_batches() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let root = temp.path();
+    let queue = QueueIdResolver::new("inst").resolve("cam");
+    for id in 1..=65u64 {
+        write_store_file(root, &queue, id, 1);
+    }
+    let wal = queue.to_wal_path(root, &UintN::from(66u64));
+    std::fs::create_dir_all(wal.parent().unwrap()).unwrap();
+    std::fs::write(&wal, b"w").unwrap();
+
+    let eviction = evict(
+        &queue.to_store_dir(root),
+        &queue.to_wal_dir(root),
+        0,
+        &UintN::from(1u64),
+        None,
+        66,
+        65,
+    )
+    .unwrap();
+
+    assert_eq!(eviction.stop, Stop::Freed);
+    assert_eq!(eviction.events.len(), 66);
+    assert!(!wal.exists());
 }

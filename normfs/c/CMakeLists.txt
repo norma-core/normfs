@@ -9,12 +9,17 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 set(NORMFS_UINTN_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../../uintn-rs/c/include"
     CACHE PATH "Path to the uintn C include directory")
+set(NORMFS_FS_C "${CMAKE_CURRENT_SOURCE_DIR}/../../normfs-fs/c"
+    CACHE PATH "Path to the normfs-fs C directory")
 
+# The disk monitor walks below the data directory with normfs-fs's walk.
 add_library(normfs_c STATIC src/disk_monitor.c src/disk_monitor_sys.c src/frame.c
-    src/conn.c src/net.c src/net_sys.c src/request.c src/response.c src/walk.c)
+    src/conn.c src/net.c src/net_sys.c src/request.c src/response.c src/walk.c
+    ${NORMFS_FS_C}/src/fs_dir.c ${NORMFS_FS_C}/src/fs_sys.c)
 target_include_directories(normfs_c PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<BUILD_INTERFACE:${NORMFS_UINTN_INCLUDE}>
+    $<BUILD_INTERFACE:${NORMFS_FS_C}/include>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/gremlin>
     $<INSTALL_INTERFACE:include>
 )

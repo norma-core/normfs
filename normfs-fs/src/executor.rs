@@ -20,6 +20,8 @@ pub(crate) struct Resources {
     /// With this off the fsync steps are reported done without being done,
     /// and nothing proved about durability applies to the plan.
     pub sync: bool,
+    /// The data directory's length in the plan's paths, 0 for none.
+    pub root: usize,
 }
 
 pub(crate) struct Finished {

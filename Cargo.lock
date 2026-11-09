@@ -1554,7 +1554,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "uintn",
- "walkdir",
  "windows-sys 0.61.2",
 ]
 
@@ -1593,6 +1592,7 @@ name = "normfs-types"
 version = "0.4.7"
 dependencies = [
  "bytes",
+ "cc",
  "uintn",
 ]
 

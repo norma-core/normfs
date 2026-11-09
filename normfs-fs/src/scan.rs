@@ -1,11 +1,11 @@
 //! Directory walks over the 3-hex-chunk layout `UintN::to_file_path` writes.
 
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use uintn::UintN;
-use walkdir::WalkDir;
+
+use crate::beneath::{self, At, Entry};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scan {
@@ -22,17 +22,43 @@ pub enum ScanResult {
     All(Vec<UintN>),
 }
 
-pub(crate) fn scan_ids(dir: &Path, ext: &str, which: Scan) -> io::Result<ScanResult> {
-    match std::fs::metadata(dir) {
-        Ok(m) if m.is_dir() => {}
-        Ok(_) => {
+/// Lists through the walk, so a link under `dir` is neither entered nor
+/// counted as a file. Resolved as given it is followed as before the walk:
+/// to a file always, to a directory only when `enter_links` (the min and max
+/// walks did, the full walk did not).
+fn list(dir: &Path, root: Option<&Path>, enter_links: bool) -> io::Result<Vec<Entry>> {
+    let at = At::new(root, dir)?;
+    let mut entries = beneath::list(&at)?;
+    if !at.walks() {
+        for entry in entries.iter_mut() {
+            if !entry.stat.is_file() && !entry.stat.is_dir() {
+                let target = At::new(root, &dir.join(&entry.name))?;
+                if let Ok(Some(stat)) = beneath::stat_as_given(&target)
+                    && (stat.is_file() || enter_links)
+                {
+                    entry.stat = stat;
+                }
+            }
+        }
+    }
+    Ok(entries)
+}
+
+pub(crate) fn scan_ids(
+    dir: &Path,
+    ext: &str,
+    which: Scan,
+    root: Option<&Path>,
+) -> io::Result<ScanResult> {
+    match beneath::stat_as_given(&At::new(root, dir)?)? {
+        Some(m) if m.is_dir() => {}
+        Some(_) => {
             return Err(io::Error::new(
                 io::ErrorKind::NotADirectory,
                 "scan root is not a directory",
             ));
         }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(ScanResult::None),
-        Err(e) => return Err(e),
+        None => return Ok(ScanResult::None),
     }
     let one = |r: Result<UintN, PathError>| match r {
         Ok(id) => Ok(ScanResult::One(id)),
@@ -41,9 +67,9 @@ pub(crate) fn scan_ids(dir: &Path, ext: &str, which: Scan) -> io::Result<ScanRes
         Err(e) => Err(io::Error::new(io::ErrorKind::InvalidData, e)),
     };
     match which {
-        Scan::Min => one(find_min_id(dir, ext)),
-        Scan::Max => one(find_max_id(dir, ext)),
-        Scan::All => match get_files_ids(dir, ext) {
+        Scan::Min => one(find_min_id(dir, ext, root)),
+        Scan::Max => one(find_max_id(dir, ext, root)),
+        Scan::All => match get_files_ids(dir, ext, root) {
             Ok(ids) if ids.is_empty() => Ok(ScanResult::None),
             Ok(ids) => Ok(ScanResult::All(ids)),
             Err(PathError::NoFilesFound) => Ok(ScanResult::None),
@@ -92,25 +118,34 @@ impl From<uintn::Error> for PathError {
     }
 }
 
-pub(crate) fn get_files_ids(base_path: &Path, extension: &str) -> Result<Vec<UintN>, PathError> {
+pub(crate) fn get_files_ids(
+    base_path: &Path,
+    extension: &str,
+    root: Option<&Path>,
+) -> Result<Vec<UintN>, PathError> {
     let mut ids = Vec::new();
+    let mut dirs = vec![PathBuf::new()];
 
-    for entry in WalkDir::new(base_path) {
-        let entry = match entry {
-            Ok(entry) => entry,
-            // A file or directory removed during the walk, as eviction does.
-            Err(e) if e.io_error().map(io::Error::kind) == Some(io::ErrorKind::NotFound) => {
+    while let Some(rel) = dirs.pop() {
+        let entries = match list(&base_path.join(&rel), root, false) {
+            Ok(entries) => entries,
+            // A directory removed during the walk, as eviction does.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 continue;
             }
-            Err(e) => return Err(PathError::Io(e.into())),
+            Err(e) => return Err(PathError::Io(e)),
         };
-        let path = entry.path();
-
-        if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some(extension) {
-            let relative_path = match path.strip_prefix(base_path) {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
+        for entry in entries {
+            let relative_path = rel.join(&entry.name);
+            if entry.stat.is_dir() {
+                dirs.push(relative_path);
+                continue;
+            }
+            if !entry.stat.is_file()
+                || relative_path.extension().and_then(|s| s.to_str()) != Some(extension)
+            {
+                continue;
+            }
 
             let mut hex_string = String::new();
             for component in relative_path.components() {
@@ -133,20 +168,19 @@ pub(crate) fn get_files_ids(base_path: &Path, extension: &str) -> Result<Vec<Uin
     Ok(ids)
 }
 
-fn find_max_id_recursive(current_path: &Path, extension: &str) -> Result<PathBuf, PathError> {
-    let max_from_dirs = fs::read_dir(current_path)?
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .filter_map(|p| {
-            find_max_id_recursive(&p, extension).ok().map(|sub_path| {
-                let mut result_path = PathBuf::new();
-                if let Some(dir_name) = p.file_name() {
-                    result_path.push(dir_name);
-                    result_path.push(sub_path);
-                }
-                result_path
-            })
+fn find_max_id_recursive(
+    current_path: &Path,
+    extension: &str,
+    root: Option<&Path>,
+) -> Result<PathBuf, PathError> {
+    let entries = list(current_path, root, true)?;
+    let max_from_dirs = entries
+        .iter()
+        .filter(|e| e.stat.is_dir())
+        .filter_map(|e| {
+            find_max_id_recursive(&current_path.join(&e.name), extension, root)
+                .ok()
+                .map(|sub_path| Path::new(&e.name).join(sub_path))
         })
         .max_by(|a, b| {
             let id_a = path_to_id(a, extension).unwrap_or(UintN::zero());
@@ -154,11 +188,13 @@ fn find_max_id_recursive(current_path: &Path, extension: &str) -> Result<PathBuf
             id_a.cmp(&id_b)
         });
 
-    let max_from_files = fs::read_dir(current_path)?
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| p.is_file() && p.extension().and_then(|s| s.to_str()) == Some(extension))
-        .filter_map(|p| p.file_name().map(PathBuf::from))
+    let max_from_files = entries
+        .iter()
+        .map(|e| (e, PathBuf::from(&e.name)))
+        .filter(|(e, p)| {
+            e.stat.is_file() && p.extension().and_then(|s| s.to_str()) == Some(extension)
+        })
+        .map(|(_, p)| p)
         .max_by(|a, b| {
             let id_a = path_to_id(a, extension).unwrap_or(UintN::zero());
             let id_b = path_to_id(b, extension).unwrap_or(UintN::zero());
@@ -177,20 +213,19 @@ fn find_max_id_recursive(current_path: &Path, extension: &str) -> Result<PathBuf
     }
 }
 
-fn find_min_id_recursive(current_path: &Path, extension: &str) -> Result<PathBuf, PathError> {
-    let min_from_dirs = fs::read_dir(current_path)?
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .filter_map(|p| {
-            find_min_id_recursive(&p, extension).ok().map(|sub_path| {
-                let mut result_path = PathBuf::new();
-                if let Some(dir_name) = p.file_name() {
-                    result_path.push(dir_name);
-                    result_path.push(sub_path);
-                }
-                result_path
-            })
+fn find_min_id_recursive(
+    current_path: &Path,
+    extension: &str,
+    root: Option<&Path>,
+) -> Result<PathBuf, PathError> {
+    let entries = list(current_path, root, true)?;
+    let min_from_dirs = entries
+        .iter()
+        .filter(|e| e.stat.is_dir())
+        .filter_map(|e| {
+            find_min_id_recursive(&current_path.join(&e.name), extension, root)
+                .ok()
+                .map(|sub_path| Path::new(&e.name).join(sub_path))
         })
         .min_by(|a, b| {
             let id_a = path_to_id(a, extension).unwrap_or(UintN::zero());
@@ -198,11 +233,13 @@ fn find_min_id_recursive(current_path: &Path, extension: &str) -> Result<PathBuf
             id_a.cmp(&id_b)
         });
 
-    let min_from_files = fs::read_dir(current_path)?
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| p.is_file() && p.extension().and_then(|s| s.to_str()) == Some(extension))
-        .filter_map(|p| p.file_name().map(PathBuf::from))
+    let min_from_files = entries
+        .iter()
+        .map(|e| (e, PathBuf::from(&e.name)))
+        .filter(|(e, p)| {
+            e.stat.is_file() && p.extension().and_then(|s| s.to_str()) == Some(extension)
+        })
+        .map(|(_, p)| p)
         .min_by(|a, b| {
             // Compare by parsing the IDs, not lexicographically
             let id_a = path_to_id(a, extension).unwrap_or(UintN::zero());
@@ -222,15 +259,19 @@ fn find_min_id_recursive(current_path: &Path, extension: &str) -> Result<PathBuf
     }
 }
 
-pub(crate) fn find_max_id(base_path: &Path, extension: &str) -> Result<UintN, PathError> {
-    if !base_path.exists() {
+pub(crate) fn find_max_id(
+    base_path: &Path,
+    extension: &str,
+    root: Option<&Path>,
+) -> Result<UintN, PathError> {
+    if beneath::stat_as_given(&At::new(root, base_path)?)?.is_none() {
         return Err(PathError::Io(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "Base path does not exist",
         )));
     }
 
-    let relative_path = find_max_id_recursive(base_path, extension)?;
+    let relative_path = find_max_id_recursive(base_path, extension, root)?;
 
     let mut hex_string = String::new();
     for component in relative_path.components() {
@@ -245,15 +286,19 @@ pub(crate) fn find_max_id(base_path: &Path, extension: &str) -> Result<UintN, Pa
     Ok(UintN::from_hex_digits(&hex_string)?)
 }
 
-pub(crate) fn find_min_id(base_path: &Path, extension: &str) -> Result<UintN, PathError> {
-    if !base_path.exists() {
+pub(crate) fn find_min_id(
+    base_path: &Path,
+    extension: &str,
+    root: Option<&Path>,
+) -> Result<UintN, PathError> {
+    if beneath::stat_as_given(&At::new(root, base_path)?)?.is_none() {
         return Err(PathError::Io(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "Base path does not exist",
         )));
     }
 
-    let relative_path = find_min_id_recursive(base_path, extension)?;
+    let relative_path = find_min_id_recursive(base_path, extension, root)?;
 
     let mut hex_string = String::new();
     for component in relative_path.components() {

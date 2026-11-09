@@ -618,7 +618,7 @@ impl Backend for Local {
     ) -> BackendFuture<'a, Option<u64>> {
         Box::pin(async move {
             let meta = self.fs.stat(&self.path(queue, file_id)).await?;
-            Ok(meta.map(|m| m.len()))
+            Ok(meta.map(|m| m.size()))
         })
     }
 
@@ -678,11 +678,7 @@ impl Backend for Local {
     ) -> BackendFuture<'a, Arc<dyn AppendTarget>> {
         Box::pin(async move {
             let path = self.path(queue, file_id);
-            let open = path.clone();
-            let file = self
-                .fs
-                .run_blocking(move || std::fs::OpenOptions::new().write(true).open(&open))
-                .await?;
+            let file = self.fs.open(&path, true).await?;
             let file = Arc::new(file);
             let inode = self.fs.inode(file.clone()).await?;
             let target: Arc<dyn AppendTarget> =
@@ -715,10 +711,11 @@ impl Backend for Local {
     ) -> BackendFuture<'a, (PackSlot, Fill)> {
         Box::pin(async move {
             let path = self.path(queue, file_id);
+            let fs = self.fs.clone();
             Ok(self
                 .fs
                 .run_blocking(move || {
-                    let file = File::open(&path)?;
+                    let file = fs.open_blocking(&path, false)?;
                     let len = file.metadata()?.len();
                     if len > cap.min(slot.buf().len()) as u64 {
                         return Ok((slot, Fill::TooLarge(len)));

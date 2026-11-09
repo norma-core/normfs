@@ -553,19 +553,25 @@ async fn a_buffered_ack_does_not_report_a_pooled_record_durable() {
         )
         .await;
 
-    // Several flush ticks. Entry 1 reaches the file; entry 0 cannot.
-    tokio::time::sleep(Duration::from_millis(80)).await;
+    // Entry 1 reaches the file; entry 0 cannot. A slow runner may need more
+    // than a few ticks, and the ticks after it give a wrong ack time to land.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !read_file_content(&file_path)
+        .await
+        .windows(18)
+        .any(|w| w == b"buffered-entry-one")
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "entry 1 should have been written from the buffer"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(
         pool.durable_before(),
         0,
         "entry 0 was never handed over, so nothing may have written it"
-    );
-    assert!(
-        read_file_content(&file_path)
-            .await
-            .windows(18)
-            .any(|w| w == b"buffered-entry-one"),
-        "entry 1 should have been written from the buffer"
     );
     assert!(
         ack_receiver.try_recv().is_err(),
@@ -639,6 +645,7 @@ async fn an_entry_buffered_during_a_flush_is_not_acked_by_it() {
     };
 
     const ENTRIES: u64 = 20;
+    let mut highest = None;
     for i in 0..ENTRIES {
         let body = Bytes::from(payload(i));
         writer
@@ -651,7 +658,8 @@ async fn an_entry_buffered_during_a_flush_is_not_acked_by_it() {
                 .windows(body.len())
                 .any(|w| w == &body[..]);
             while let Ok((_, id)) = ack_receiver.try_recv() {
-                assert_acked_bytes_on_disk(id);
+                assert_acked_bytes_on_disk(id.clone());
+                highest = Some(id.to_u64().unwrap());
             }
             if on_disk {
                 break;
@@ -665,7 +673,6 @@ async fn an_entry_buffered_during_a_flush_is_not_acked_by_it() {
     }
 
     writer.close().await.unwrap();
-    let mut highest = None;
     while let Ok((_, id)) = ack_receiver.try_recv() {
         assert_acked_bytes_on_disk(id.clone());
         highest = Some(id.to_u64().unwrap());
@@ -673,7 +680,7 @@ async fn an_entry_buffered_during_a_flush_is_not_acked_by_it() {
     assert_eq!(
         highest,
         Some(ENTRIES - 1),
-        "the closing flush reports the last entry once its bytes are down"
+        "every entry is acked by the time the writer closes"
     );
 }
 

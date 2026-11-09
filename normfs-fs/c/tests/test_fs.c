@@ -92,17 +92,17 @@ test_open_create_excl_then_trunc(void)
 	struct stat st;
 
 	CHECK(path_in(path, sizeof(path), "excl"));
-	fd = normfs_fs_sys_open_create(path, strlen(path), NORMFS_FS_TMP_EXCL,
+	fd = normfs_fs_sys_open_create(path, strlen(path), 0u, NORMFS_FS_TMP_EXCL,
 	    &ino, &e);
 	CHECK(fd >= 0 && e == 0 && ino > 0u);
 	CHECK(write(fd, "abc", 3) == 3);
 	CHECK(normfs_fs_sys_close(fd, &e) == 0 && e == 0);
 
-	fd2 = normfs_fs_sys_open_create(path, strlen(path), NORMFS_FS_TMP_EXCL,
+	fd2 = normfs_fs_sys_open_create(path, strlen(path), 0u, NORMFS_FS_TMP_EXCL,
 	    &ino2, &e);
 	CHECK(fd2 == -1 && e == EEXIST && ino2 == 0u);
 
-	fd2 = normfs_fs_sys_open_create(path, strlen(path), NORMFS_FS_TMP_TRUNC,
+	fd2 = normfs_fs_sys_open_create(path, strlen(path), 0u, NORMFS_FS_TMP_TRUNC,
 	    &ino2, &e);
 	CHECK(fd2 >= 0 && e == 0 && ino2 == ino);
 	CHECK(fstat(fd2, &st) == 0 && st.st_size == 0);
@@ -141,7 +141,7 @@ test_pwritev_all_writes_every_run(void)
 	iov[2].len = sizeof(c);
 
 	CHECK(path_in(path, sizeof(path), "runs"));
-	fd = normfs_fs_sys_open_create(path, strlen(path), NORMFS_FS_TMP_EXCL,
+	fd = normfs_fs_sys_open_create(path, strlen(path), 0u, NORMFS_FS_TMP_EXCL,
 	    &ino, &e);
 	CHECK(fd >= 0);
 	CHECK(normfs_fs_sys_pwritev_all(fd, iov, 3u, 16u, &e) == 0 && e == 0);
@@ -181,7 +181,7 @@ test_pwritev_all_reports_a_short_write(void)
 	iov[1].len = 4096u;
 
 	CHECK(path_in(path, sizeof(path), "short"));
-	fd = normfs_fs_sys_open_create(path, strlen(path), NORMFS_FS_TMP_EXCL,
+	fd = normfs_fs_sys_open_create(path, strlen(path), 0u, NORMFS_FS_TMP_EXCL,
 	    &ino, &e);
 	CHECK(fd >= 0);
 
@@ -224,20 +224,20 @@ test_file_len_distinguishes_absent_regular_and_other(void)
 	int fd;
 
 	CHECK(path_in(path, sizeof(path), "len"));
-	CHECK(normfs_fs_sys_file_len(path, strlen(path), &len, &e) == 0);
+	CHECK(normfs_fs_sys_file_len(path, strlen(path), 0u, &len, &e) == 0);
 	CHECK(len == 0u && e == 0);
 
-	fd = normfs_fs_sys_open_create(path, strlen(path), NORMFS_FS_TMP_EXCL,
+	fd = normfs_fs_sys_open_create(path, strlen(path), 0u, NORMFS_FS_TMP_EXCL,
 	    &ino, &e);
 	CHECK(fd >= 0);
 	CHECK(write(fd, "12345", 5) == 5);
 	CHECK(normfs_fs_sys_close(fd, &e) == 0);
-	CHECK(normfs_fs_sys_file_len(path, strlen(path), &len, &e) == 1);
+	CHECK(normfs_fs_sys_file_len(path, strlen(path), 0u, &len, &e) == 1);
 	CHECK(len == 5u && e == 0);
 
 	CHECK(path_in(dir, sizeof(dir), "lendir"));
 	CHECK(mkdir(dir, 0700) == 0);
-	CHECK(normfs_fs_sys_file_len(dir, strlen(dir), &len, &e) == -1);
+	CHECK(normfs_fs_sys_file_len(dir, strlen(dir), 0u, &len, &e) == -1);
 	CHECK(e > 0);
 	return 0;
 }
@@ -256,33 +256,33 @@ test_rename_replaces_and_fsync_parent_syncs(void)
 
 	CHECK(path_in(src, sizeof(src), "ren.tmp"));
 	CHECK(path_in(dst, sizeof(dst), "ren.dst"));
-	fd = normfs_fs_sys_open_create(dst, strlen(dst), NORMFS_FS_TMP_EXCL,
+	fd = normfs_fs_sys_open_create(dst, strlen(dst), 0u, NORMFS_FS_TMP_EXCL,
 	    &ino, &e);
 	CHECK(fd >= 0 && write(fd, "old", 3) == 3);
 	CHECK(normfs_fs_sys_close(fd, &e) == 0);
-	fd = normfs_fs_sys_open_create(src, strlen(src), NORMFS_FS_TMP_EXCL,
+	fd = normfs_fs_sys_open_create(src, strlen(src), 0u, NORMFS_FS_TMP_EXCL,
 	    &ino, &e);
 	CHECK(fd >= 0 && write(fd, "new!", 4) == 4);
 	CHECK(normfs_fs_sys_close(fd, &e) == 0);
 
-	CHECK(normfs_fs_sys_rename(src, strlen(src), dst, strlen(dst), &e) == 0);
+	CHECK(normfs_fs_sys_rename(src, strlen(src), dst, strlen(dst), 0u, &e) == 0);
 	CHECK(e == 0);
 	CHECK(access(src, F_OK) == -1 && errno == ENOENT);
 	CHECK(read_whole(dst, back, sizeof(back), &got) == 0);
 	CHECK(got == 4u && memcmp(back, "new!", 4) == 0);
 
-	CHECK(normfs_fs_sys_fsync_parent(dst, strlen(dst), &e) == 0 && e == 0);
+	CHECK(normfs_fs_sys_fsync_parent(dst, strlen(dst), 0u, &e) == 0 && e == 0);
 	CHECK(path_in(sub, sizeof(sub), "subdir"));
 	CHECK(mkdir(sub, 0700) == 0);
 	CHECK(path_in(sub, sizeof(sub), "subdir/leaf"));
-	CHECK(normfs_fs_sys_fsync_parent(sub, strlen(sub), &e) == 0 && e == 0);
-	CHECK(normfs_fs_sys_fsync_parent("leaf", 4u, &e) == 0 && e == 0);
+	CHECK(normfs_fs_sys_fsync_parent(sub, strlen(sub), 0u, &e) == 0 && e == 0);
+	CHECK(normfs_fs_sys_fsync_parent("leaf", 4u, 0u, &e) == 0 && e == 0);
 
 	CHECK(path_in(sub, sizeof(sub), "ren.dst/x"));
-	CHECK(normfs_fs_sys_fsync_parent(sub, strlen(sub), &e) == -1);
+	CHECK(normfs_fs_sys_fsync_parent(sub, strlen(sub), 0u, &e) == -1);
 	CHECK(e == ENOTDIR);
 
-	CHECK(normfs_fs_sys_rename(src, strlen(src), dst, strlen(dst), &e) == -1);
+	CHECK(normfs_fs_sys_rename(src, strlen(src), dst, strlen(dst), 0u, &e) == -1);
 	CHECK(e == ENOENT);
 	return 0;
 }
@@ -298,7 +298,7 @@ test_ftruncate_keeps_the_prefix(void)
 	int fd;
 
 	CHECK(path_in(path, sizeof(path), "trunc"));
-	fd = normfs_fs_sys_open_create(path, strlen(path), NORMFS_FS_TMP_EXCL,
+	fd = normfs_fs_sys_open_create(path, strlen(path), 0u, NORMFS_FS_TMP_EXCL,
 	    &ino, &e);
 	CHECK(fd >= 0 && write(fd, "0123456789", 10) == 10);
 	CHECK(normfs_fs_sys_ftruncate(fd, 4u, &e) == 0 && e == 0);
@@ -317,14 +317,14 @@ test_unlink_reports_absent(void)
 	int fd;
 
 	CHECK(path_in(path, sizeof(path), "unlink"));
-	CHECK(normfs_fs_sys_unlink(path, strlen(path), &e) == 1 && e == 0);
-	fd = normfs_fs_sys_open_create(path, strlen(path), NORMFS_FS_TMP_EXCL,
+	CHECK(normfs_fs_sys_unlink(path, strlen(path), 0u, &e) == 1 && e == 0);
+	fd = normfs_fs_sys_open_create(path, strlen(path), 0u, NORMFS_FS_TMP_EXCL,
 	    &ino, &e);
 	CHECK(fd >= 0);
 	CHECK(normfs_fs_sys_close(fd, &e) == 0);
-	CHECK(normfs_fs_sys_unlink(path, strlen(path), &e) == 0 && e == 0);
+	CHECK(normfs_fs_sys_unlink(path, strlen(path), 0u, &e) == 0 && e == 0);
 	CHECK(access(path, F_OK) == -1 && errno == ENOENT);
-	CHECK(normfs_fs_sys_unlink(path, strlen(path), &e) == 1 && e == 0);
+	CHECK(normfs_fs_sys_unlink(path, strlen(path), 0u, &e) == 1 && e == 0);
 	return 0;
 }
 
@@ -336,13 +336,13 @@ test_sync_dir_rejects_missing_and_regular_paths(void)
 	int fd;
 	int e;
 
-	CHECK(normfs_fs_sys_sync_dir(root, strlen(root), &e) == 0 && e == 0);
+	CHECK(normfs_fs_sys_sync_dir(root, strlen(root), 0u, &e) == 0 && e == 0);
 	CHECK(path_in(path, sizeof(path), "sync-dir-file"));
-	CHECK(normfs_fs_sys_sync_dir(path, strlen(path), &e) == -1 && e == ENOENT);
-	fd = normfs_fs_sys_open_create(path, strlen(path), NORMFS_FS_TMP_EXCL, &ino, &e);
+	CHECK(normfs_fs_sys_sync_dir(path, strlen(path), 0u, &e) == -1 && e == ENOENT);
+	fd = normfs_fs_sys_open_create(path, strlen(path), 0u, NORMFS_FS_TMP_EXCL, &ino, &e);
 	CHECK(fd >= 0);
 	CHECK(normfs_fs_sys_close(fd, &e) == 0);
-	CHECK(normfs_fs_sys_sync_dir(path, strlen(path), &e) == -1 && e == ENOTDIR);
+	CHECK(normfs_fs_sys_sync_dir(path, strlen(path), 0u, &e) == -1 && e == ENOTDIR);
 	return 0;
 }
 
@@ -357,9 +357,113 @@ test_open_does_not_follow_a_symlink(void)
 	CHECK(path_in(target, sizeof(target), "symlink-target"));
 	CHECK(path_in(link, sizeof(link), "symlink-temp"));
 	CHECK(symlink(target, link) == 0);
-	CHECK(normfs_fs_sys_open_create(link, strlen(link), NORMFS_FS_TMP_TRUNC,
+	CHECK(normfs_fs_sys_open_create(link, strlen(link), 0u, NORMFS_FS_TMP_TRUNC,
 		&ino, &e) == -1 && e == ELOOP);
 	CHECK(access(target, F_OK) == -1 && errno == ENOENT);
+	return 0;
+}
+
+static int
+test_walk_follows_no_link_below_the_root(void)
+{
+	char out[512];
+	char path[768];
+	uint64_t ino;
+	uint64_t len;
+	size_t rl = strlen(root);
+	int fd;
+	int e;
+
+	CHECK(path_in(out, sizeof(out), "walk-out"));
+	CHECK(mkdir(out, 0755) == 0);
+	CHECK(path_in(path, sizeof(path), "walk-in"));
+	CHECK(mkdir(path, 0755) == 0);
+	CHECK(path_in(path, sizeof(path), "walk-link"));
+	CHECK(symlink(out, path) == 0);
+
+	CHECK(path_in(path, sizeof(path), "walk-link/x"));
+	fd = normfs_fs_sys_open_create(path, strlen(path), rl, NORMFS_FS_TMP_EXCL, &ino, &e);
+	CHECK(fd == -1 && (e == ELOOP || e == ENOTDIR));
+	CHECK(normfs_fs_sys_mkdir(path, strlen(path), rl, 0, &e) == -1);
+	CHECK(normfs_fs_sys_stat(path, strlen(path), rl, 0, &len, &e) == -1);
+	CHECK(path_in(path, sizeof(path), "walk-out/x"));
+	CHECK(access(path, F_OK) == -1 && errno == ENOENT);
+	fd = normfs_fs_sys_open_create(path, strlen(path), 0u, NORMFS_FS_TMP_EXCL, &ino, &e);
+	CHECK(fd >= 0);
+	CHECK(normfs_fs_sys_close(fd, &e) == 0);
+	CHECK(path_in(path, sizeof(path), "walk-link/x"));
+	CHECK(normfs_fs_sys_open_file(path, strlen(path), rl, 0, &e) == -1);
+	CHECK(normfs_fs_sys_unlink(path, strlen(path), rl, &e) == -1);
+	CHECK(path_in(path, sizeof(path), "walk-out/x"));
+	CHECK(access(path, F_OK) == 0);
+	CHECK(path_in(out, sizeof(out), "walk-file-link"));
+	CHECK(symlink(path, out) == 0);
+	CHECK(normfs_fs_sys_open_file(out, strlen(out), rl, 0, &e) == -1 && e == ELOOP);
+	CHECK(normfs_fs_sys_open_file(out, strlen(out), rl, 1, &e) == -1 && e == ELOOP);
+	CHECK(normfs_fs_sys_file_len(out, strlen(out), rl, &len, &e) == -1 && e == EEXIST);
+	CHECK(path_in(path, sizeof(path), "walk-link/x"));
+	CHECK(normfs_fs_sys_fsync_parent(path, strlen(path), rl, &e) == -1);
+
+	CHECK(path_in(path, sizeof(path), "walk-link"));
+	CHECK(normfs_fs_sys_stat(path, strlen(path), rl, 0, &len, &e) == 3);
+	CHECK(normfs_fs_sys_stat(path, strlen(path), 0u, 0, &len, &e) == 3);
+	CHECK(normfs_fs_sys_stat(path, strlen(path), 0u, 1, &len, &e) == 2);
+	CHECK(normfs_fs_sys_stat(path, strlen(path), rl, 1, &len, &e) == 3);
+	CHECK(normfs_fs_sys_sync_dir(path, strlen(path), rl, &e) == -1);
+	CHECK(normfs_fs_sys_list_open(path, strlen(path), rl, &e) == NULL);
+
+	CHECK(path_in(path, sizeof(path), "walk-in/../walk-out/y"));
+	fd = normfs_fs_sys_open_create(path, strlen(path), rl, NORMFS_FS_TMP_EXCL, &ino, &e);
+	CHECK(fd == -1 && e == EINVAL);
+	CHECK(path_in(path, sizeof(path), "walk-in//z"));
+	fd = normfs_fs_sys_open_create(path, strlen(path), rl, NORMFS_FS_TMP_EXCL, &ino, &e);
+	CHECK(fd >= 0);
+	CHECK(normfs_fs_sys_close(fd, &e) == 0);
+	CHECK(normfs_fs_sys_stat(path, strlen(path), rl, 0, &len, &e) == 1 && len == 0u);
+	CHECK(normfs_fs_sys_fsync_parent(path, strlen(path), rl, &e) == 0);
+	CHECK(path_in(path, sizeof(path), "walk-gone/x"));
+	CHECK(normfs_fs_sys_stat(path, strlen(path), rl, 0, &len, &e) == 0 && e == 0);
+	CHECK(normfs_fs_sys_file_len(path, strlen(path), rl, &len, &e) == 0 && e == 0);
+	CHECK(normfs_fs_sys_unlink(path, strlen(path), rl, &e) == 1 && e == 0);
+	return 0;
+}
+
+static int
+test_walk_lists_and_makes_directories(void)
+{
+	char path[768];
+	char name[256];
+	uint64_t len;
+	size_t rl = strlen(root);
+	size_t n;
+	void *list;
+	int kind;
+	int seen = 0;
+	int rc;
+	int e;
+
+	CHECK(path_in(path, sizeof(path), "list"));
+	CHECK(normfs_fs_sys_mkdir(path, strlen(path), rl, 0, &e) == 0);
+	CHECK(normfs_fs_sys_mkdir(path, strlen(path), rl, 0, &e) == -1 && e == EEXIST);
+	CHECK(normfs_fs_sys_stat(path, strlen(path), rl, 0, &len, &e) == 2);
+	CHECK(path_in(path, sizeof(path), "list/sub"));
+	CHECK(normfs_fs_sys_mkdir(path, strlen(path), rl, 0, &e) == 0);
+	CHECK(path_in(path, sizeof(path), "list/link"));
+	CHECK(symlink("sub", path) == 0);
+	CHECK(path_in(path, sizeof(path), "list"));
+	list = normfs_fs_sys_list_open(path, strlen(path), rl, &e);
+	CHECK(list != NULL);
+	while ((rc = normfs_fs_sys_list_next(list, name, sizeof(name), &n, &kind, &len, &e)) == 1) {
+		if (n == 3 && memcmp(name, "sub", 3) == 0 && kind == 2)
+			seen |= 1;
+		if (n == 4 && memcmp(name, "link", 4) == 0 && kind == 3)
+			seen |= 2;
+	}
+	normfs_fs_sys_list_close(list);
+	CHECK(rc == 0 && seen == 3);
+	CHECK(path_in(path, sizeof(path), "list/sub"));
+	CHECK(normfs_fs_sys_mkdir(path, strlen(path), rl, 1, &e) == 0);
+	CHECK(normfs_fs_sys_stat(path, strlen(path), rl, 0, &len, &e) == 0);
 	return 0;
 }
 
@@ -386,6 +490,8 @@ main(void)
 	failed |= test_unlink_reports_absent();
 	failed |= test_sync_dir_rejects_missing_and_regular_paths();
 	failed |= test_open_does_not_follow_a_symlink();
+	failed |= test_walk_follows_no_link_below_the_root();
+	failed |= test_walk_lists_and_makes_directories();
 
 	if (failed == 0)
 		printf("fs: all tests passed\n");

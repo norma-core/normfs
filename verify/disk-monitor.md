@@ -13,10 +13,16 @@ Syscalls may fail; their contracts do not require eventual success.
 
 The model excludes external namespace and file-size changes between probing
 and unlinking, including replacement of the file or its parent directories.
-The existing pathname-based TOCTOU remains. Bytes denote regular-file lengths
-summed over directory entries, not allocated disk blocks. Hard links and open
-descriptors can keep data alive after unlink; the native shim test checks this
-boundary as well as name disappearance and repeated-unlink failure.
+The existing pathname-based TOCTOU remains within the data directory: on Unix
+the shims open below it with `normfs_fs_open_parent` and follow no link (see
+`fs.md`), so a link swapped in is never entered: opening through it fails
+with `ENOTDIR` or `ELOOP`, and like any path that is not a directory it reads
+as absent, so its files are neither counted nor evicted.
+`tests/test_disk_monitor.c` checks this. Bytes denote
+regular-file lengths summed over directory entries, not allocated disk blocks.
+Hard links and open descriptors can keep data alive after unlink; the native
+shim test checks this boundary as well as name disappearance and
+repeated-unlink failure.
 
 ## Proved properties
 
