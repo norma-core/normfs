@@ -516,6 +516,41 @@ test_evict_takes_wal_only_without_store_and_stops_at_the_gap(void)
 }
 
 static int
+test_evict_keeps_wal_while_the_store_count_is_left(void)
+{
+	char store[640];
+	char wal[640];
+	struct normfs_disk_evict_req rq;
+	struct normfs_disk_event ev[8];
+	size_t count = 99u;
+	int stop = -1;
+
+	CHECK(setup_queue("stale", store, sizeof(store), wal,
+	    sizeof(wal)) == 0);
+	CHECK(put_file(store, "1", NORMFS_DISK_STORE, 10u) == 0);
+	CHECK(put_file(wal, "2", NORMFS_DISK_WAL, 30u) == 0);
+
+	/* 40 counted in the store, 10 of it there. */
+	rq = req(store, wal, "1", 1000u);
+	rq.store_bytes = 50u;
+	CHECK(normfs_disk_evict(&rq, ev, 8u, &count, &stop).status ==
+	    NORMFS_DISK_OK);
+	CHECK(stop == NORMFS_DISK_STOP_STALE);
+	CHECK(count == 1u && ev[0].kind == NORMFS_DISK_STORE);
+	CHECK(rq.store_bytes == 40u);
+	CHECK(id_is(&rq.next, "2"));
+	CHECK(file_exists(wal, "2", NORMFS_DISK_WAL) == 1);
+
+	rq.store_bytes = 0u;
+	CHECK(normfs_disk_evict(&rq, ev, 8u, &count, &stop).status ==
+	    NORMFS_DISK_OK);
+	CHECK(stop == NORMFS_DISK_STOP_GAP);
+	CHECK(count == 1u && ev[0].kind == NORMFS_DISK_WAL);
+	CHECK(file_exists(wal, "2", NORMFS_DISK_WAL) == 0);
+	return 0;
+}
+
+static int
 test_evict_stops_at_the_bound(void)
 {
 	char store[640];
@@ -816,6 +851,8 @@ main(void)
 	if (test_evict_frees_from_the_bottom() != 0)
 		return 1;
 	if (test_evict_takes_wal_only_without_store_and_stops_at_the_gap() != 0)
+		return 1;
+	if (test_evict_keeps_wal_while_the_store_count_is_left() != 0)
 		return 1;
 	if (test_evict_stops_at_the_bound() != 0)
 		return 1;

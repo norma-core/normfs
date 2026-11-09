@@ -138,7 +138,7 @@ async fn eviction_never_passes_the_offloaded_bound() {
     let wal = queue.to_wal_dir(root);
 
     let bound = UintN::from(2u64);
-    let eviction = evict(&store, &wal, 0, &UintN::from(1u64), Some(&bound), 1000).unwrap();
+    let eviction = evict(&store, &wal, 0, &UintN::from(1u64), Some(&bound), 1000, 0).unwrap();
     assert_eq!(eviction.stop, Stop::Bound);
     assert_eq!(eviction.next, UintN::from(3u64));
     assert_eq!(eviction.events.len(), 2);
@@ -146,12 +146,12 @@ async fn eviction_never_passes_the_offloaded_bound() {
     assert!(!store_file_exists(root, &queue, 2));
     assert!(store_file_exists(root, &queue, 3));
 
-    let eviction = evict(&store, &wal, 0, &UintN::from(3u64), None, 150).unwrap();
+    let eviction = evict(&store, &wal, 0, &UintN::from(3u64), None, 150, 0).unwrap();
     assert_eq!(eviction.stop, Stop::Freed);
     assert_eq!(eviction.next, UintN::from(5u64));
     assert!(!store_file_exists(root, &queue, 4));
 
-    let eviction = evict(&store, &wal, 0, &UintN::from(5u64), None, 150).unwrap();
+    let eviction = evict(&store, &wal, 0, &UintN::from(5u64), None, 150, 0).unwrap();
     assert_eq!(eviction.stop, Stop::Gap);
     assert!(eviction.events.is_empty());
 }
@@ -322,7 +322,7 @@ async fn publish_store_file(monitor: &QueueMonitor, root: &Path, queue: &QueueId
 }
 
 #[tokio::test]
-async fn cleanup_resumes_at_the_cursor() {
+async fn cleanup_resumes_at_the_cursor_without_walking_the_store() {
     let temp = tempfile::TempDir::new().unwrap();
     let root = temp.path();
     let queue = QueueIdResolver::new("inst").resolve("cam");
@@ -333,17 +333,15 @@ async fn cleanup_resumes_at_the_cursor() {
     monitor.check_and_cleanup(false).await.unwrap();
     assert!(!store_file_exists(root, &queue, 2));
 
-    // Behind the cursor and never reported: the recount sizes it, but
-    // eviction still starts at the cursor.
+    // Behind the cursor and never reported: only a walk would find it.
     write_store_file(root, &queue, 1, 100);
     publish_store_file(&monitor, root, &queue, 5).await;
     monitor.check_and_cleanup(false).await.unwrap();
 
     assert!(store_file_exists(root, &queue, 1));
     assert!(!store_file_exists(root, &queue, 3));
-    assert!(!store_file_exists(root, &queue, 4));
-    assert!(store_file_exists(root, &queue, 5));
-    assert_eq!(*monitor.cursor.lock().unwrap(), Some(UintN::from(5u64)));
+    assert!(store_file_exists(root, &queue, 4));
+    assert_eq!(*monitor.cursor.lock().unwrap(), Some(UintN::from(4u64)));
 }
 
 #[tokio::test]

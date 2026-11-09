@@ -674,9 +674,9 @@ normfs_disk_path(const char *dir, size_t dir_len,
     ensures \result >= -1 ==> path[*plen] == 0;
     ensures \result == -1 ==> *os_error > 0;
     ensures \result != -1 ==> *os_error == 0;
-    ensures \result == 1 ==> disk_fs_present(path, *plen) &&
-              disk_fs_regular(path, *plen) &&
-              *size == disk_fs_size(path, *plen) && *size <= disk_fs_bytes;
+    ensures \result == 1 ==> disk_fs_present(path, *plen, root) &&
+              disk_fs_regular(path, *plen, root) &&
+              *size == disk_fs_size(path, *plen, root) && *size <= disk_fs_bytes;
 */
 static int
 normfs_disk_probe(const char *dir, size_t dir_len, size_t root,
@@ -1020,14 +1020,17 @@ normfs_disk_scan(const char *dir, size_t dir_len, size_t root, int kind,
     requires freed + disk_fs_bytes <= UINT64_MAX;
     assigns ev->id.hex[0 .. NORMFS_DISK_ID_MAX - 1], ev->id.len,
             ev->size, ev->freed, ev->kind, ev->deleted, ev->os_error,
-            req->to_free, *stop, normfs_disk_fs_world;
+            req->to_free, req->store_bytes, *stop, normfs_disk_fs_world;
     ensures \result == NORMFS_DISK_OK ||
             \result == NORMFS_DISK_ERR_PATH_TOO_LONG;
     ensures \result == NORMFS_DISK_OK ==>
               (*stop == NORMFS_DISK_STOP_MORE ||
                *stop == NORMFS_DISK_STOP_GAP ||
                *stop == NORMFS_DISK_STOP_BOUND ||
-               *stop == NORMFS_DISK_STOP_ERROR);
+               *stop == NORMFS_DISK_STOP_ERROR ||
+               *stop == NORMFS_DISK_STOP_STALE);
+    ensures \result == NORMFS_DISK_OK && *stop == NORMFS_DISK_STOP_STALE ==>
+              \old(req->store_bytes) > 0;
     ensures \result == NORMFS_DISK_OK &&
             (*stop == NORMFS_DISK_STOP_MORE || *stop == NORMFS_DISK_STOP_ERROR) ==>
               DISK_EVENT_WF(ev) && DISK_SAME_ID(&ev->id, &req->next) &&
@@ -1042,6 +1045,7 @@ normfs_disk_scan(const char *dir, size_t dir_len, size_t root, int kind,
               req->to_free == \old(req->to_free) &&
               disk_fs_bytes == \old(disk_fs_bytes);
     ensures req->to_free <= \old(req->to_free);
+    ensures req->store_bytes <= \old(req->store_bytes);
 */
 static int
 normfs_disk_evict_one(struct normfs_disk_evict_req *req,
@@ -1075,6 +1079,10 @@ normfs_disk_evict_one(struct normfs_disk_evict_req *req,
 			*stop = NORMFS_DISK_STOP_GAP;
 			return NORMFS_DISK_OK;
 		}
+		if (rc > 0 && req->store_bytes > 0u) {
+			*stop = NORMFS_DISK_STOP_STALE;
+			return NORMFS_DISK_OK;
+		}
 	}
 
 	if (req->has_bound != 0 &&
@@ -1087,10 +1095,13 @@ normfs_disk_evict_one(struct normfs_disk_evict_req *req,
 		unlink_result = normfs_disk_sys_unlink(path, plen, req->root,
 		    &e);
 		if (unlink_result == 0) {
-			/*@ assert !disk_fs_present(&path[0], plen); */
+			/*@ assert !disk_fs_present(&path[0], plen, req->root); */
 			/*@ assert disk_fs_bytes == \at(disk_fs_bytes, Pre) - size; */
 			deleted = 1;
 			req->to_free = (size >= req->to_free) ? 0u : req->to_free - size;
+			if (kind == NORMFS_DISK_STORE)
+				req->store_bytes = (size >= req->store_bytes) ?
+				    0u : req->store_bytes - size;
 		}
 	}
 
@@ -1179,8 +1190,8 @@ normfs_disk_event_append(struct normfs_disk_event *events, size_t index,
     requires \separated(req, count, stop, events + (0 .. cap - 1),
                         req->store_dir + (0 .. req->store_dir_len),
                         req->wal_dir + (0 .. req->wal_dir_len));
-    assigns req->next, req->to_free, events[0 .. cap - 1], *count, *stop,
-            normfs_disk_fs_world;
+    assigns req->next, req->to_free, req->store_bytes, events[0 .. cap - 1],
+            *count, *stop, normfs_disk_fs_world;
     ensures \result.os_error == 0;
     ensures \result.status == NORMFS_DISK_OK ||
             \result.status == NORMFS_DISK_ERR_INVALID_ARG ||
@@ -1195,7 +1206,8 @@ normfs_disk_event_append(struct normfs_disk_event *events, size_t index,
                *stop == NORMFS_DISK_STOP_FREED ||
                *stop == NORMFS_DISK_STOP_GAP ||
                *stop == NORMFS_DISK_STOP_BOUND ||
-               *stop == NORMFS_DISK_STOP_ERROR);
+               *stop == NORMFS_DISK_STOP_ERROR ||
+               *stop == NORMFS_DISK_STOP_STALE);
     ensures \result.status == NORMFS_DISK_OK && *stop == NORMFS_DISK_STOP_MORE
               ==> *count == cap;
     ensures \result.status == NORMFS_DISK_OK && *stop == NORMFS_DISK_STOP_FREED
@@ -1249,7 +1261,8 @@ normfs_disk_evict(struct normfs_disk_evict_req *req,
 
 	/*@ loop invariant 0 <= *count <= cap;
 	    loop invariant \separated(&req->next, &req->bound, &req->to_free,
-	                              count, events + (0 .. cap - 1));
+	                              &req->store_bytes, count,
+	                              events + (0 .. cap - 1));
 	    loop invariant DISK_ID_WF(&req->next);
 	    loop invariant req->has_bound == 0 || DISK_ID_WF(&req->bound);
 	    loop invariant req->to_free <= \at(req->to_free, Pre);
@@ -1266,7 +1279,8 @@ normfs_disk_evict(struct normfs_disk_evict_req *req,
 	    loop invariant \forall integer k; 0 < k < *count ==>
 	      events[k].freed == events[k - 1].freed + DISK_DELTA(&events[k]);
 	    loop assigns *count, st, inc, one, event, freed, req->next, req->to_free,
-	                 events[0 .. cap - 1], normfs_disk_fs_world;
+	                 req->store_bytes, events[0 .. cap - 1],
+	                 normfs_disk_fs_world;
 	    loop variant cap - *count;
 	*/
 	while (*count < cap) {
@@ -1280,7 +1294,8 @@ normfs_disk_evict(struct normfs_disk_evict_req *req,
 			r.status = st;
 			return r;
 		}
-		if (one == NORMFS_DISK_STOP_GAP || one == NORMFS_DISK_STOP_BOUND) {
+		if (one == NORMFS_DISK_STOP_GAP || one == NORMFS_DISK_STOP_BOUND ||
+		    one == NORMFS_DISK_STOP_STALE) {
 			*stop = one;
 			return r;
 		}

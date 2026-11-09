@@ -18,17 +18,16 @@
 
 /* The model excludes external namespace changes between syscalls. Bytes count
  * regular-file lengths by directory entry, not allocated blocks or inodes.
- * With root > 0 a path is resolved below the data directory following no
- * link, so a file behind a link, or a data directory that does not resolve,
- * is not present in the model; each call chain in disk_monitor.c passes one
- * root through unchanged, so its predicates are read under that root. */
+ * The predicates take the root length: with root > 0 a path is resolved
+ * below the data directory following no link, so one path can be a regular
+ * file under root 0 and absent under its data directory. */
 /*@ ghost extern int normfs_disk_fs_world; */
 /*@ axiomatic NormfsDiskKernel {
-      predicate disk_fs_present{L}(char *path, integer len)
+      predicate disk_fs_present{L}(char *path, integer len, integer root)
         reads normfs_disk_fs_world, path[0 .. len];
-      predicate disk_fs_regular{L}(char *path, integer len)
+      predicate disk_fs_regular{L}(char *path, integer len, integer root)
         reads normfs_disk_fs_world, path[0 .. len];
-      logic integer disk_fs_size{L}(char *path, integer len)
+      logic integer disk_fs_size{L}(char *path, integer len, integer root)
         reads normfs_disk_fs_world, path[0 .. len];
       logic integer disk_fs_bytes{L} reads normfs_disk_fs_world;
 
@@ -105,10 +104,10 @@ void normfs_disk_sys_dir_close(void *handle);
     ensures \result == -1 || \result == 0 || \result == 1;
     ensures \result == -1 ==> *os_error > 0;
     ensures \result >= 0 ==> *os_error == 0;
-    ensures \result == 0 ==> !disk_fs_regular(path, path_len);
-    ensures \result == 1 ==> disk_fs_present(path, path_len) &&
-              disk_fs_regular(path, path_len) &&
-              *size == disk_fs_size(path, path_len) &&
+    ensures \result == 0 ==> !disk_fs_regular(path, path_len, root);
+    ensures \result == 1 ==> disk_fs_present(path, path_len, root) &&
+              disk_fs_regular(path, path_len, root) &&
+              *size == disk_fs_size(path, path_len, root) &&
               *size <= disk_fs_bytes;
 */
 int normfs_disk_sys_file_size(const char *path, size_t path_len, size_t root,
@@ -124,12 +123,12 @@ int normfs_disk_sys_file_size(const char *path, size_t path_len, size_t root,
     ensures \result == -1 ==> *os_error > 0;
     ensures \result == 0 ==> *os_error == 0;
     ensures \result == -1 ==> disk_fs_bytes == \old(disk_fs_bytes);
-    ensures \result == 0 ==> disk_fs_present{Pre}(path, path_len);
-    ensures \result == 0 ==> !disk_fs_present(path, path_len) &&
-              !disk_fs_regular(path, path_len);
-    ensures \result == 0 && disk_fs_regular{Pre}(path, path_len) ==>
+    ensures \result == 0 ==> disk_fs_present{Pre}(path, path_len, root);
+    ensures \result == 0 ==> !disk_fs_present(path, path_len, root) &&
+              !disk_fs_regular(path, path_len, root);
+    ensures \result == 0 && disk_fs_regular{Pre}(path, path_len, root) ==>
               disk_fs_bytes == \old(disk_fs_bytes) -
-                disk_fs_size{Pre}(path, path_len);
+                disk_fs_size{Pre}(path, path_len, root);
 */
 int normfs_disk_sys_unlink(const char *path, size_t path_len, size_t root,
     int *os_error);

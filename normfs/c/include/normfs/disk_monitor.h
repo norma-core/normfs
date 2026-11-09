@@ -44,13 +44,16 @@ enum normfs_disk_status {
 
 /* MORE: the event buffer filled; call again, the request carries the
  * position. ERROR: the last event is a failed stat or unlink; `next` is
- * still its id. */
+ * still its id. STALE: `next` has a WAL file and no store file while
+ * `store_bytes` is not 0, so the caller's store count is wrong; nothing was
+ * deleted at it. */
 enum normfs_disk_stop {
 	NORMFS_DISK_STOP_MORE = 0,
 	NORMFS_DISK_STOP_FREED = 1,
 	NORMFS_DISK_STOP_GAP = 2,
 	NORMFS_DISK_STOP_BOUND = 3,
-	NORMFS_DISK_STOP_ERROR = 4
+	NORMFS_DISK_STOP_ERROR = 4,
+	NORMFS_DISK_STOP_STALE = 5
 };
 
 /* os_error is the errno of the failing syscall, 0 when none ran. Two 4 byte
@@ -78,7 +81,9 @@ struct normfs_disk_scan {
  * neither file, the id passes `bound`, or a file cannot be sized or removed.
  * `next` and `to_free` are updated in place. has_bound == 0 means every id
  * may go: the no-offloader case. `root` is the data directory's length in
- * both dirs, as in normfs/fs_sys.h; 0 resolves them as given.
+ * both dirs, as in normfs/fs_sys.h; 0 resolves them as given. `store_bytes`
+ * is what the caller counts in the store, less each store file deleted; a
+ * WAL file is not deleted while it is above 0.
  */
 struct normfs_disk_evict_req {
 	const char *store_dir;
@@ -90,6 +95,7 @@ struct normfs_disk_evict_req {
 	struct normfs_disk_id bound;
 	int has_bound;
 	uint64_t to_free;
+	uint64_t store_bytes;
 };
 
 /* deleted == 0 carries the errno of the failed stat or unlink and is only
