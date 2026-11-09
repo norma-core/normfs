@@ -719,6 +719,8 @@ test_walk_follows_no_link_below_the_root(void)
 	struct normfs_disk_event ev[8];
 	struct normfs_disk_scan s;
 	size_t count = 99u;
+	uint64_t size = 1u;
+	int error = -1;
 	int stop = -1;
 
 	(void)snprintf(data, sizeof(data), "%s/linked", root);
@@ -727,6 +729,15 @@ test_walk_follows_no_link_below_the_root(void)
 	CHECK(mkdir_p(store) == 0 && mkdir_p(wal) == 0);
 	CHECK(put_file(store, "1", NORMFS_DISK_STORE, 5u) == 0);
 	CHECK(put_file(store, "1000", NORMFS_DISK_STORE, 10u) == 0);
+
+	/* A link in the place of a file is not sized as its target. */
+	(void)snprintf(moved, sizeof(moved), "%s/001.store", store);
+	(void)snprintf(parent, sizeof(parent), "%s/file-link", data);
+	CHECK(symlink(moved, parent) == 0);
+	CHECK(normfs_disk_sys_file_size(parent, strlen(parent), strlen(data),
+	    &size, &error) == 0);
+	CHECK(size == 0u && error == 0);
+	CHECK(unlink(parent) == 0);
 
 	/* A chunk directory moved out and linked back. */
 	CHECK(leaf_parent(store, "1000", parent, sizeof(parent)) == 0);

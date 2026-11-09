@@ -20,7 +20,8 @@
  * regular-file lengths by directory entry, not allocated blocks or inodes.
  * With root > 0 a path is resolved below the data directory following no
  * link, so a file behind a link, or a data directory that does not resolve,
- * is not present in the model. */
+ * is not present in the model; each call chain in disk_monitor.c passes one
+ * root through unchanged, so its predicates are read under that root. */
 /*@ ghost extern int normfs_disk_fs_world; */
 /*@ axiomatic NormfsDiskKernel {
       predicate disk_fs_present{L}(char *path, integer len)
