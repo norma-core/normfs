@@ -176,3 +176,36 @@ async fn only_files_with_the_extension_are_removed() {
         0
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_link_with_the_extension_is_removed_and_not_its_target() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("tmp");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(root.path().join("target"), b"kept").unwrap();
+    std::os::unix::fs::symlink(root.path().join("target"), dir.join("a.tmp")).unwrap();
+    std::os::unix::fs::symlink(root.path().join("gone"), dir.join("b.tmp")).unwrap();
+    let fs = Fs::new(crate::FsConfig {
+        root: Some(root.path().to_path_buf()),
+        ..crate::FsConfig::default()
+    })
+    .unwrap();
+
+    assert_eq!(fs.remove_files_with_ext(&dir, "tmp").await.unwrap(), 2);
+    assert!(fs::symlink_metadata(dir.join("a.tmp")).is_err());
+    assert_eq!(fs::read(root.path().join("target")).unwrap(), b"kept");
+}
+
+#[test]
+fn an_empty_data_directory_is_refused() {
+    let made = Fs::new(crate::FsConfig {
+        root: Some(std::path::PathBuf::new()),
+        ..crate::FsConfig::default()
+    });
+
+    assert_eq!(
+        made.err().map(|e| e.kind()),
+        Some(std::io::ErrorKind::InvalidInput)
+    );
+}
