@@ -89,6 +89,7 @@ async fn a_file_starts_on_open_on_a_full_page_and_after_a_flush() {
     write(&fs, &queue, RECORD_LEN).await;
     assert!(!fs.file_room(&queue).unwrap().starts_file(RECORD_LEN));
     fs.close().await.unwrap();
+    drop(fs);
 
     let fs = open(temp.path(), Persist::STORE).await;
     fs.ensure_queue_exists_for_write(&queue).await.unwrap();

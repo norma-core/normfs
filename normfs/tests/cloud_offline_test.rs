@@ -833,6 +833,7 @@ async fn queues_after_a_failed_check_start_without_waiting_again() {
     let fs = open(temp.path(), &cloud).await;
     let queues: Vec<_> = (0..5).map(|i| fs.resolve(&format!("cam{i}"))).collect();
     fs.close().await.unwrap();
+    drop(fs);
     let lines: String = queues
         .iter()
         .map(|q| format!("{}\t7\t2\n", q.as_str()))

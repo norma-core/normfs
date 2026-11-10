@@ -105,8 +105,14 @@ pub struct NormFS {
     events: EventSink,
     system_writer: system::Writer,
     writes: WriteGate,
-    /// The lock on `<path>/.lock`: a clean `close` releases it, a drop otherwise.
-    dir_lock: std::sync::Mutex<Option<std::fs::File>>,
+}
+
+impl Drop for NormFS {
+    // The pointer flusher loops forever and holds `fs`, which holds the data
+    // directory's lock; the other tasks end when their channels close.
+    fn drop(&mut self) {
+        self.memory_pointer_task.abort();
+    }
 }
 
 #[derive(Debug)]
@@ -286,7 +292,9 @@ async fn lock_data_dir(fs: &Fs, lock_path: &std::path::Path) -> Result<std::fs::
         .await
         .map_err(|e| match e {
             normfs_fs::FsError::Os(e) => lock_error(lock_path, e),
-            e => e.into(),
+            e @ (normfs_fs::FsError::ExecutorGone
+            | normfs_fs::FsError::JobPanicked
+            | normfs_fs::FsError::Plan(_)) => e.into(),
         })?;
     lock.ok_or(Error::DataDirInUse)
 }
@@ -610,7 +618,9 @@ impl NormFS {
         })
         .map_err(Error::Io)?;
         fs.mkdir_all(&path).await?;
-        let dir_lock = lock_data_dir(&fs, &path.join(".lock")).await?;
+        // Held by the pool: released only once nothing of this instance can
+        // touch the directory any more.
+        fs.hold(Box::new(lock_data_dir(&fs, &path.join(".lock")).await?));
 
         let crypto_path = path.clone();
         let (fresh_instance, crypto_ctx) = fs
@@ -883,7 +893,6 @@ impl NormFS {
             events,
             system_writer: system::Writer::idle(),
             writes: WriteGate::default(),
-            dir_lock: std::sync::Mutex::new(Some(dir_lock)),
         };
         if normfs.settings.system_queue {
             let queue = &normfs.system_queue;
@@ -2104,10 +2113,16 @@ impl NormFS {
         }
     }
 
-    /// Whether every record of the queue up to `id` is written and synced. A
-    /// memory-only queue never is: its mark moves when pages are evicted.
+    /// Whether every record of the queue up to `id`, which must exist, has
+    /// landed: written, and synced when the queue syncs. A memory-only queue
+    /// never has: its mark moves when pages are evicted.
     pub fn is_durable_through(&self, queue: &QueueId, id: u64) -> bool {
-        self.persist_for(queue).drainer() != Drainer::None
+        let exists = matches!(
+            self.mem.get_last_id(queue),
+            Some(Some(last)) if UintN::from(id) <= last
+        );
+        exists
+            && self.persist_for(queue).drainer() != Drainer::None
             && self.mem.is_durable_below(queue, id.saturating_add(1))
     }
 
@@ -2260,8 +2275,6 @@ impl NormFS {
         store_result?;
         wal_result?;
 
-        // Only after a clean close: otherwise the lock goes with the drop.
-        self.dir_lock.lock().unwrap().take();
         log::info!(target: "normfs", "NormFS closed successfully");
         Ok(())
     }

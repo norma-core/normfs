@@ -15,6 +15,7 @@ async fn test_instance_id_persists_across_restarts() {
     let instance_id_1 = normfs1.get_instance_id().to_string();
     println!("First instance ID: {}", instance_id_1);
     normfs1.close().await.unwrap();
+    drop(normfs1);
 
     // Create second NormFS instance with same path
     let normfs2 = NormFS::new(temp_path.clone(), NormFsSettings::all_active())

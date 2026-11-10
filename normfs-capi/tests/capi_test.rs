@@ -407,7 +407,7 @@ fn a_data_dir_takes_one_handle_at_a_time() {
     let mut second = ptr::null_mut();
     assert_eq!(
         unsafe { normfs_open(path.as_ptr(), &mut second) },
-        NORMFS_ERR_IO
+        NORMFS_ERR_BUSY
     );
     assert!(second.is_null());
     close(fs);

@@ -15,9 +15,11 @@ async fn a_data_dir_takes_one_instance_at_a_time() {
     }
 
     first.close().await.unwrap();
+    drop(first);
     let second = NormFS::new(dir.path().to_path_buf(), NormFsSettings::default())
         .await
         .unwrap();
+    // Dropped without a close: the lock goes once its tasks have ended.
     drop(second);
     let third = NormFS::new(dir.path().to_path_buf(), NormFsSettings::default())
         .await

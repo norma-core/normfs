@@ -75,6 +75,7 @@ async fn a_lone_record_on_a_silent_queue_reaches_disk() {
     // And it reads back, so what landed is the record rather than a header the
     // writer happened to widen.
     fs.close().await.unwrap();
+    drop(fs);
     let fs = NormFS::new(path.clone(), NormFsSettings::all_active())
         .await
         .unwrap();

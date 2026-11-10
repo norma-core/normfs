@@ -30,7 +30,8 @@ enum normfs_status {
 	NORMFS_ERR_CLOSED = 5,     /* the instance is closing */
 	NORMFS_ERR_ID_RANGE = 6,   /* id does not fit 64 bits */
 	NORMFS_ERR_IO = 7,         /* disk, cloud or any other failure */
-	NORMFS_ERR_PANIC = 8       /* a bug in NormFS; the handle may be unusable */
+	NORMFS_ERR_PANIC = 8,      /* a bug in NormFS; the handle may be unusable */
+	NORMFS_ERR_BUSY = 9        /* data_dir is open in another NormFS */
 };
 
 typedef struct normfs normfs_t;

@@ -22,6 +22,7 @@ pub const NORMFS_ERR_CLOSED: c_int = 5;
 pub const NORMFS_ERR_ID_RANGE: c_int = 6;
 pub const NORMFS_ERR_IO: c_int = 7;
 pub const NORMFS_ERR_PANIC: c_int = 8;
+pub const NORMFS_ERR_BUSY: c_int = 9;
 
 pub type RecordCb =
     Option<unsafe extern "C" fn(ctx: *mut c_void, id: u64, data: *const u8, len: usize) -> c_int>;
@@ -52,7 +53,18 @@ fn fail_with(e: Error) -> c_int {
         Error::RecordTooLarge(_) => NORMFS_ERR_TOO_LARGE,
         Error::QueueClosed | Error::Closing => NORMFS_ERR_CLOSED,
         Error::BadQueueName(_) | Error::ReservedQueue => NORMFS_ERR_INVALID,
-        _ => NORMFS_ERR_IO,
+        Error::DataDirInUse => NORMFS_ERR_BUSY,
+        Error::Wal(_)
+        | Error::Store(_)
+        | Error::Config(_)
+        | Error::Cloud(_)
+        | Error::Io(_)
+        | Error::ClientDisconnected
+        | Error::WouldBlock
+        | Error::NotInFile
+        | Error::MemoryBelowFloor { .. }
+        | Error::BucketUnreachable { .. }
+        | Error::PageBelowMinimum { .. } => NORMFS_ERR_IO,
     };
     fail(code, e)
 }
