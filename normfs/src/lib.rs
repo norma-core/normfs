@@ -105,7 +105,7 @@ pub struct NormFS {
     events: EventSink,
     system_writer: system::Writer,
     writes: WriteGate,
-    /// The lock on `<path>/.lock`, held until `close`.
+    /// The lock on `<path>/.lock`: a clean `close` releases it, a drop otherwise.
     dir_lock: std::sync::Mutex<Option<std::fs::File>>,
 }
 
@@ -156,11 +156,11 @@ pub enum Error {
         queue: String,
         cause: String,
     },
-    /// `mem_page_size` is below the smallest page the ring's contracts allow.
-    /// Refused at construction; past this check the arena panics instead.
     /// Another NormFS, in this process or another, has the data directory
     /// open: two would hand out the same ids.
     DataDirInUse,
+    /// `mem_page_size` is below the smallest page the ring's contracts allow.
+    /// Refused at construction; past this check the arena panics instead.
     PageBelowMinimum {
         page_size: usize,
         minimum: usize,
@@ -257,11 +257,15 @@ async fn lock_data_dir(fs: &Fs, lock_path: &std::path::Path) -> Result<std::fs::
                 .await
             {
                 Ok(file) => file,
-                // Another instance created it first.
-                Err(created) => fs.open(lock_path, true).await.map_err(|_| created)?,
+                // Another instance may have created it first; any other
+                // failure shows up again on this open.
+                Err(created) => fs
+                    .open(lock_path, true)
+                    .await
+                    .map_err(|_| Error::from(created))?,
             }
         }
-        Err(e) => return Err(e.into()),
+        Err(e) => return Err(lock_error(lock_path, e)),
     };
     let lock = fs
         .run_blocking(move || {
@@ -279,8 +283,19 @@ async fn lock_data_dir(fs: &Fs, lock_path: &std::path::Path) -> Result<std::fs::
                 }
             }
         })
-        .await?;
+        .await
+        .map_err(|e| match e {
+            normfs_fs::FsError::Os(e) => lock_error(lock_path, e),
+            e => e.into(),
+        })?;
     lock.ok_or(Error::DataDirInUse)
+}
+
+fn lock_error(lock_path: &std::path::Path, e: std::io::Error) -> Error {
+    Error::Io(std::io::Error::new(
+        e.kind(),
+        format!("{}: {e}", lock_path.display()),
+    ))
 }
 
 fn refuse_bad_name(queue: &QueueId) -> Result<(), Error> {
@@ -2226,6 +2241,9 @@ impl NormFS {
 
         // Before the store closes, so what it holds lands with the rest.
         self.system_writer.stop().await;
+        if let Some(monitor) = &self.disk_monitor {
+            monitor.stop();
+        }
         // The store closes the queues it has now; a write after this point
         // could start one it never flushes.
         self.writes.close().await;

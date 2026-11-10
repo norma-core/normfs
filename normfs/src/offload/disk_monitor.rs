@@ -863,13 +863,27 @@ pub struct DiskMonitor {
     fs: Fs,
     monitors: Arc<RwLock<std::collections::HashMap<QueueId, QueueMonitor>>>,
     root_path: PathBuf,
-    _handle: Option<tokio::task::JoinHandle<()>>,
+    handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     forget_range: Option<ForgetRange>,
     disk_usage: Arc<DiskUsage>,
     events: EventSink,
 }
 
+impl Drop for DiskMonitor {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 impl DiskMonitor {
+    /// Ends the check loop: a closed instance must not delete files under a
+    /// directory another one has opened since.
+    pub fn stop(&self) {
+        if let Some(handle) = self.handle.lock().unwrap().take() {
+            handle.abort();
+        }
+    }
+
     pub async fn new(
         fs: Fs,
         root_path: impl AsRef<Path>,
@@ -912,7 +926,7 @@ impl DiskMonitor {
             fs,
             monitors,
             root_path: root_path.as_ref().to_path_buf(),
-            _handle: Some(handle),
+            handle: std::sync::Mutex::new(Some(handle)),
             forget_range,
             disk_usage,
             events,
