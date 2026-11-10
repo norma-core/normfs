@@ -754,7 +754,9 @@ impl PagePool {
         first_entry_id: u64,
         floor: usize,
     ) -> Self {
-        let ring = WalRing::in_arena(arena, range, ring_id, first_entry_id);
+        // As in `new`: a recovered idle queue is durable, not busy.
+        let mut ring = WalRing::in_arena(arena, range, ring_id, first_entry_id);
+        ring.set_essential(first_entry_id);
         let page_count = ring.page_count();
         let page_size = ring.page_size();
         PagePool {

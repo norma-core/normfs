@@ -260,6 +260,30 @@ fn a_flushed_record_is_already_in_a_file() {
 }
 
 #[test]
+fn a_flush_after_a_reopen_returns_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let fs = open(dir.path());
+    append(&fs, "inbox", b"old");
+    assert_eq!(unsafe { normfs_close(fs.0) }, NORMFS_OK);
+    let fs = open(dir.path());
+    let queue = CString::new("inbox").unwrap();
+    let mut last = 0;
+    assert_eq!(
+        unsafe { normfs_last_id(fs.0, queue.as_ptr(), &mut last) },
+        NORMFS_OK
+    );
+    let started = std::time::Instant::now();
+    let rc = unsafe { normfs_flush(fs.0, queue.as_ptr()) };
+    assert_eq!(rc, NORMFS_OK, "{}", last_error());
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(unsafe { normfs_close(fs.0) }, NORMFS_OK);
+}
+
+#[test]
 fn a_record_of_200_kib_is_stored() {
     let dir = tempfile::tempdir().unwrap();
     let fs = open(dir.path());
@@ -366,7 +390,7 @@ fn errors_come_back_as_codes_with_a_message() {
         unsafe { normfs_flush(fs.0, bad.as_ptr()) },
         NORMFS_ERR_INVALID
     );
-    for name in ["", "/abs"] {
+    for name in ["", "/abs", "a\\b"] {
         let name = CString::new(name).unwrap();
         let rc = unsafe { normfs_append(fs.0, name.as_ptr(), b"x".as_ptr(), 1, &mut id) };
         assert_eq!(rc, NORMFS_ERR_INVALID);

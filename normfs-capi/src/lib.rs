@@ -85,7 +85,8 @@ unsafe fn handle<'a>(fs: *mut Handle) -> Result<&'a Handle, c_int> {
 
 fn queue_id(h: &Handle, name: &str) -> Result<QueueId, c_int> {
     // "" is the instance root and a leading '/' leaves the instance.
-    if name.is_empty() || name.starts_with('/') {
+    // A '\\' would split the name into directories on Windows only.
+    if name.is_empty() || name.starts_with('/') || name.contains('\\') {
         return Err(fail(NORMFS_ERR_INVALID, format!("bad queue name {name:?}")));
     }
     Ok(h.fs.resolve(name))
