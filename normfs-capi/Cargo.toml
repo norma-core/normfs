@@ -14,7 +14,7 @@ name = "normfs_capi"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-normfs = { version = "0.4.7", path = "../normfs" }
+normfs = { workspace = true }
 tokio = { workspace = true }
 bytes = { workspace = true }
 
