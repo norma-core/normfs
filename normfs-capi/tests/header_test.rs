@@ -19,7 +19,7 @@ fn the_header_compiles_as_c_and_as_cpp() {
             .arg(&header)
             .output()
         else {
-            eprintln!("no {compiler}; skipped");
+            assert!(cfg!(windows), "no {compiler} to check the header with");
             continue;
         };
         assert!(
