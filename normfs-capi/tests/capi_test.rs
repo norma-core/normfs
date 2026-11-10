@@ -259,6 +259,100 @@ fn a_flushed_record_is_already_in_a_file() {
 }
 
 #[test]
+fn a_record_of_200_kib_is_stored() {
+    let dir = tempfile::tempdir().unwrap();
+    let fs = open(dir.path());
+    let big = vec![7u8; 200 * 1024];
+    assert_eq!(append(&fs, "mail/big", &big), 0);
+    assert_eq!(read(&fs, "mail/big", 0, 1), [(0, big)]);
+    assert_eq!(unsafe { normfs_close(fs.0) }, NORMFS_OK);
+}
+
+unsafe extern "C" fn block_until_released(
+    ctx: *mut c_void,
+    _id: u64,
+    _data: *const u8,
+    _len: usize,
+) -> c_int {
+    let release = unsafe { &*(ctx as *const mpsc::Receiver<()>) };
+    let _ = release.recv_timeout(Duration::from_secs(30));
+    1
+}
+
+#[test]
+fn a_flush_does_not_wait_for_a_reader_that_is_behind() {
+    let dir = tempfile::tempdir().unwrap();
+    let fs = open(dir.path());
+    let record = [1u8; 1024];
+    for _ in 0..500 {
+        append(&fs, "inbox", &record);
+    }
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    std::thread::scope(|s| {
+        let fs = &fs;
+        s.spawn(move || {
+            let queue = CString::new("inbox").unwrap();
+            let rx = release_rx;
+            unsafe {
+                normfs_follow(
+                    fs.0,
+                    queue.as_ptr(),
+                    0,
+                    Some(block_until_released),
+                    &rx as *const _ as *mut c_void,
+                )
+            };
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        append(fs, "inbox", &record);
+        let queue = CString::new("inbox").unwrap();
+        let started = std::time::Instant::now();
+        assert_eq!(
+            unsafe { normfs_flush(fs.0, queue.as_ptr()) },
+            NORMFS_OK,
+            "{}",
+            last_error()
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        release_tx.send(()).unwrap();
+    });
+    assert_eq!(unsafe { normfs_close(fs.0) }, NORMFS_OK);
+}
+
+#[test]
+fn a_follow_started_after_stop_follows_returns_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let fs = open(dir.path());
+    append(&fs, "inbox", b"0");
+    assert_eq!(unsafe { normfs_stop_follows(fs.0) }, NORMFS_OK);
+    let done = follow_in_thread(&fs, "inbox", 1, usize::MAX, Some(collect));
+    let (rc, got) = done.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(rc, NORMFS_OK);
+    assert!(got.is_empty());
+    assert_eq!(unsafe { normfs_close(fs.0) }, NORMFS_OK);
+}
+
+#[test]
+fn a_data_dir_takes_one_handle_at_a_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let fs = open(dir.path());
+    let path = CString::new(dir.path().to_str().unwrap()).unwrap();
+    let mut second = ptr::null_mut();
+    assert_eq!(
+        unsafe { normfs_open(path.as_ptr(), &mut second) },
+        NORMFS_ERR_IO
+    );
+    assert!(second.is_null());
+    assert_eq!(unsafe { normfs_close(fs.0) }, NORMFS_OK);
+    let fs = open(dir.path());
+    assert_eq!(unsafe { normfs_close(fs.0) }, NORMFS_OK);
+}
+
+#[test]
 fn errors_come_back_as_codes_with_a_message() {
     let dir = tempfile::tempdir().unwrap();
     let fs = open(dir.path());
@@ -271,6 +365,11 @@ fn errors_come_back_as_codes_with_a_message() {
         unsafe { normfs_flush(fs.0, bad.as_ptr()) },
         NORMFS_ERR_INVALID
     );
+    for name in ["", "/abs"] {
+        let name = CString::new(name).unwrap();
+        let rc = unsafe { normfs_append(fs.0, name.as_ptr(), b"x".as_ptr(), 1, &mut id) };
+        assert_eq!(rc, NORMFS_ERR_INVALID);
+    }
 
     assert_eq!(
         unsafe { normfs_append(fs.0, ptr::null(), b"x".as_ptr(), 1, &mut id) },

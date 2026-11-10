@@ -2040,9 +2040,9 @@ impl NormFS {
         }
     }
 
-    /// Whether everything the queue has accepted is written and synced.
-    pub fn is_durable(&self, queue: &QueueId) -> bool {
-        self.mem.is_fully_durable(queue)
+    /// Whether every record of the queue up to `id` is written and synced.
+    pub fn is_durable_through(&self, queue: &QueueId, id: u64) -> bool {
+        self.mem.is_durable_below(queue, id.saturating_add(1))
     }
 
     /// Where the queue's next record would land. Only its writer can act on

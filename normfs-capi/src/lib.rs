@@ -3,6 +3,7 @@
 
 use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::fs::{File, TryLockError};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -30,7 +31,8 @@ pub type RecordCb =
 pub struct Handle {
     fs: Arc<NormFS>,
     rt: Runtime,
-    stop_follows: watch::Sender<u64>,
+    stop_follows: watch::Sender<bool>,
+    _lock: File,
 }
 
 const FLUSH_TIMEOUT: Duration = Duration::from_secs(10);
@@ -81,6 +83,14 @@ unsafe fn handle<'a>(fs: *mut Handle) -> Result<&'a Handle, c_int> {
     unsafe { fs.as_ref() }.ok_or_else(|| fail(NORMFS_ERR_INVALID, "the handle is NULL"))
 }
 
+fn queue_id(h: &Handle, name: &str) -> Result<QueueId, c_int> {
+    // "" is the instance root and a leading '/' leaves the instance.
+    if name.is_empty() || name.starts_with('/') {
+        return Err(fail(NORMFS_ERR_INVALID, format!("bad queue name {name:?}")));
+    }
+    Ok(h.fs.resolve(name))
+}
+
 fn id64(id: &UintN) -> Result<u64, c_int> {
     id.to_u64()
         .map_err(|_| fail(NORMFS_ERR_ID_RANGE, format!("id {id} does not fit 64 bits")))
@@ -101,6 +111,24 @@ pub unsafe extern "C" fn normfs_open(data_dir: *const c_char, out: *mut *mut Han
             Ok(dir) => PathBuf::from(dir),
             Err(code) => return code,
         };
+        // A second handle on one directory would hand out the same ids twice.
+        let lock = std::fs::create_dir_all(&dir).and_then(|()| {
+            File::options()
+                .create(true)
+                .append(true)
+                .open(dir.join(".lock"))
+        });
+        let lock = match lock {
+            Ok(lock) => lock,
+            Err(e) => return fail(NORMFS_ERR_IO, e),
+        };
+        match lock.try_lock() {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => {
+                return fail(NORMFS_ERR_IO, "data_dir is already open");
+            }
+            Err(TryLockError::Error(e)) => return fail(NORMFS_ERR_IO, e),
+        }
         let rt = match tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -108,14 +136,15 @@ pub unsafe extern "C" fn normfs_open(data_dir: *const c_char, out: *mut *mut Han
             Ok(rt) => rt,
             Err(e) => return fail(NORMFS_ERR_IO, e),
         };
-        match rt.block_on(NormFS::new(dir, NormFsSettings::default())) {
+        match rt.block_on(NormFS::new(dir, NormFsSettings::all_active())) {
             Ok(fs) => {
                 let fs = Arc::new(fs);
                 // SAFETY: checked non-NULL above.
                 let handle = Handle {
                     fs,
                     rt,
-                    stop_follows: watch::Sender::new(0),
+                    stop_follows: watch::Sender::new(false),
+                    _lock: lock,
                 };
                 unsafe { *out = Box::into_raw(Box::new(handle)) };
                 NORMFS_OK
@@ -134,12 +163,19 @@ pub unsafe extern "C" fn normfs_close(fs: *mut Handle) -> c_int {
             return NORMFS_OK;
         }
         // SAFETY: a live handle from normfs_open, taken back exactly once.
-        let Handle { fs, rt, .. } = *unsafe { Box::from_raw(fs) };
+        let Handle {
+            fs,
+            rt,
+            _lock: lock,
+            ..
+        } = *unsafe { Box::from_raw(fs) };
         let closed = rt.block_on(fs.close());
         // Dropped inside the runtime, before it, so its tasks can still see it.
         let entered = rt.enter();
         drop(fs);
         drop(entered);
+        drop(rt);
+        drop(lock);
         match closed {
             Ok(()) => NORMFS_OK,
             Err(e) => fail_with(e),
@@ -161,7 +197,10 @@ pub unsafe extern "C" fn normfs_append(
     guard(|| {
         // SAFETY: forwarded from this function's contract.
         let (h, queue) = match unsafe { (handle(fs), text(queue)) } {
-            (Ok(h), Ok(q)) => (h, h.fs.resolve(q)),
+            (Ok(h), Ok(q)) => match queue_id(h, q) {
+                Ok(q) => (h, q),
+                Err(code) => return code,
+            },
             (Err(code), _) | (_, Err(code)) => return code,
         };
         if data.is_null() && len > 0 {
@@ -199,7 +238,10 @@ pub unsafe extern "C" fn normfs_flush(fs: *mut Handle, queue: *const c_char) -> 
     guard(|| {
         // SAFETY: forwarded from this function's contract.
         let (h, queue) = match unsafe { (handle(fs), text(queue)) } {
-            (Ok(h), Ok(q)) => (h, h.fs.resolve(q)),
+            (Ok(h), Ok(q)) => match queue_id(h, q) {
+                Ok(q) => (h, q),
+                Err(code) => return code,
+            },
             (Err(code), _) | (_, Err(code)) => return code,
         };
         let flushed = h.rt.block_on(async {
@@ -209,9 +251,17 @@ pub unsafe extern "C" fn normfs_flush(fs: *mut Handle, queue: *const c_char) -> 
         if let Err(e) = flushed {
             return fail_with(e);
         }
+        let last = match h.fs.get_last_id(&queue) {
+            Ok(last) => match id64(&last) {
+                Ok(last) => last,
+                Err(code) => return code,
+            },
+            Err(Error::QueueEmpty) => return NORMFS_OK,
+            Err(e) => return fail_with(e),
+        };
         // A WAL queue has nothing to seal: its writer syncs within a few ms.
         let deadline = Instant::now() + FLUSH_TIMEOUT;
-        while !h.fs.is_durable(&queue) {
+        while !h.fs.is_durable_through(&queue, last) {
             if Instant::now() >= deadline {
                 return fail(NORMFS_ERR_IO, "records did not reach the disk in 10 s");
             }
@@ -232,7 +282,10 @@ pub unsafe extern "C" fn normfs_last_id(
     guard(|| {
         // SAFETY: forwarded from this function's contract.
         let (h, queue) = match unsafe { (handle(fs), text(queue)) } {
-            (Ok(h), Ok(q)) => (h, h.fs.resolve(q)),
+            (Ok(h), Ok(q)) => match queue_id(h, q) {
+                Ok(q) => (h, q),
+                Err(code) => return code,
+            },
             (Err(code), _) | (_, Err(code)) => return code,
         };
         if id.is_null() {
@@ -275,6 +328,9 @@ fn read_records(
         return fail_with(e);
     }
     let follow = limit == 0;
+    if follow && *stop.borrow() {
+        return NORMFS_OK;
+    }
     let mut next = from;
     loop {
         // Keeps `next + limit - 1` inside 64 bits.
@@ -297,7 +353,7 @@ fn read_records(
             let entry = h.rt.block_on(async {
                 tokio::select! {
                     entry = rx.recv() => Some(entry),
-                    _ = stop.changed(), if follow => None,
+                    _ = stop.wait_for(|stopped| *stopped), if follow => None,
                 }
             });
             let entry = match entry {
@@ -363,7 +419,10 @@ pub unsafe extern "C" fn normfs_read(
     guard(|| {
         // SAFETY: forwarded from this function's contract.
         let (h, queue) = match unsafe { (handle(fs), text(queue)) } {
-            (Ok(h), Ok(q)) => (h, h.fs.resolve(q)),
+            (Ok(h), Ok(q)) => match queue_id(h, q) {
+                Ok(q) => (h, q),
+                Err(code) => return code,
+            },
             (Err(code), _) | (_, Err(code)) => return code,
         };
         if limit == 0 {
@@ -386,7 +445,10 @@ pub unsafe extern "C" fn normfs_follow(
     guard(|| {
         // SAFETY: forwarded from this function's contract.
         let (h, queue) = match unsafe { (handle(fs), text(queue)) } {
-            (Ok(h), Ok(q)) => (h, h.fs.resolve(q)),
+            (Ok(h), Ok(q)) => match queue_id(h, q) {
+                Ok(q) => (h, q),
+                Err(code) => return code,
+            },
             (Err(code), _) | (_, Err(code)) => return code,
         };
         read_records(h, queue, from, 0, cb, ctx)
@@ -401,7 +463,7 @@ pub unsafe extern "C" fn normfs_stop_follows(fs: *mut Handle) -> c_int {
         // SAFETY: forwarded from this function's contract.
         match unsafe { handle(fs) } {
             Ok(h) => {
-                h.stop_follows.send_modify(|n| *n += 1);
+                h.stop_follows.send_replace(true);
                 NORMFS_OK
             }
             Err(code) => code,

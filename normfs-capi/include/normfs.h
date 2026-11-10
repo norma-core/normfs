@@ -7,9 +7,10 @@
 /*
  * NormFS as a library: link libnormfs_capi.a (normfs_capi.lib on MSVC) and
  * call these from C or C++. Every call blocks until done. A handle may be used
- * from several threads at once; one data_dir takes one open handle at a time.
- * Queues only grow: a record is appended and read back by its id, and old
- * records go only by the disk limit.
+ * from several threads at once; a data_dir open elsewhere, in this process or
+ * another, is refused. Queues only grow: a record is appended and read back by
+ * its id, and old records go only by the disk limit. Records not yet flushed
+ * may be lost in a crash, and their ids handed out again.
  *
  * Calls return NORMFS_OK or an error code; normfs_last_error() has the text
  * for the last failed call on the calling thread.
@@ -21,7 +22,7 @@ extern "C" {
 
 enum normfs_status {
 	NORMFS_OK = 0,
-	NORMFS_ERR_INVALID = 1,    /* NULL argument, bad UTF-8 or queue name */
+	NORMFS_ERR_INVALID = 1,    /* NULL, bad UTF-8, bad or reserved queue name */
 	NORMFS_ERR_NOT_FOUND = 2,  /* record does not exist */
 	NORMFS_ERR_EMPTY = 3,      /* queue has no record yet */
 	NORMFS_ERR_TOO_LARGE = 4,  /* record and its framing exceed a 256 KiB page */
@@ -39,7 +40,8 @@ typedef struct normfs normfs_t;
 typedef int (*normfs_record_cb)(void *ctx, uint64_t id, const uint8_t *data,
     size_t len);
 
-/* Opens (or creates) the instance in `data_dir`. */
+/* Opens (or creates) the instance in `data_dir` and locks it. Queue names are
+ * paths: "a/b/" and "a//b" are the queue "a/b". */
 int normfs_open(const char *data_dir, normfs_t **out);
 
 /* Flushes every queue to disk and frees the handle, even on error. No other
@@ -50,8 +52,8 @@ int normfs_close(normfs_t *fs);
 int normfs_append(normfs_t *fs, const char *queue, const uint8_t *data,
     size_t len, uint64_t *id);
 
-/* Returns once every record appended to `queue` is written and synced, or
- * NORMFS_ERR_IO if that takes more than 10 s. */
+/* Returns once every record appended to `queue` before the call is written
+ * and synced, or NORMFS_ERR_IO if that takes more than 10 s. */
 int normfs_flush(normfs_t *fs, const char *queue);
 
 /* The id of the newest record in `queue`. */
@@ -67,8 +69,8 @@ int normfs_read(normfs_t *fs, const char *queue, uint64_t from,
 int normfs_follow(normfs_t *fs, const char *queue, uint64_t from,
     normfs_record_cb cb, void *ctx);
 
-/* Makes every normfs_follow running on `fs` return NORMFS_OK, so they can be
- * joined before normfs_close. */
+/* Makes every normfs_follow on `fs` return NORMFS_OK, running or started
+ * later, so they can be joined before normfs_close. */
 int normfs_stop_follows(normfs_t *fs);
 
 /* Text of the last error on this thread; valid until the next call on it. */
