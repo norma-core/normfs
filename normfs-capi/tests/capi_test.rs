@@ -312,6 +312,17 @@ fn a_flush_after_a_reopen_returns_at_once() {
 }
 
 #[test]
+fn a_queue_never_written_reads_as_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let fs = open(dir.path());
+    assert!(read(&fs, "never-written", 0, 10).is_empty());
+    assert_eq!(unsafe { normfs_close(fs.0) }, NORMFS_OK);
+    let fs = open(dir.path());
+    assert!(read(&fs, "never-written", 0, 10).is_empty());
+    assert_eq!(unsafe { normfs_close(fs.0) }, NORMFS_OK);
+}
+
+#[test]
 fn a_record_of_200_kib_is_stored() {
     let dir = tempfile::tempdir().unwrap();
     let fs = open(dir.path());
