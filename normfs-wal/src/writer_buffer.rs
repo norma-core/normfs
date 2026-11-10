@@ -40,6 +40,24 @@ impl OrderedBuffer {
         }
     }
 
+    /// Takes the parked entries that now follow the last written id, after
+    /// `can_write` let the one they were waiting for through.
+    pub fn release_in_order(&mut self) -> Vec<(UintN, Bytes, Placement)> {
+        let mut run = 0;
+        let mut last = self.last_written_id.clone();
+        for (id, _, _) in &self.pending {
+            if !last.as_ref().map_or(id.is_zero(), |l| *id == l.increment()) {
+                break;
+            }
+            last = Some(id.clone());
+            run += 1;
+        }
+        if run > 0 {
+            self.last_written_id = last;
+        }
+        self.pending.drain(..run).collect()
+    }
+
     pub fn wait_for_order(
         &mut self,
         (id, data, placement): (UintN, Bytes, Placement),
@@ -75,30 +93,7 @@ impl OrderedBuffer {
         self.pending
             .sort_unstable_by(|el1, el2| -> std::cmp::Ordering { el1.0.cmp(&el2.0) });
 
-        let mut ready: Vec<(UintN, Bytes, Placement)> = Vec::new();
-        let mut cropped = 0;
-        let mut last_id = self.last_written_id.clone();
-
-        for (idx, (id, data, placement)) in self.pending.iter().enumerate() {
-            match last_id {
-                Some(value) if *id == value.increment() => {
-                    ready.push((id.clone(), data.clone(), *placement));
-                    last_id = Some(id.clone());
-                    cropped = idx + 1;
-                }
-                None if id.is_zero() => {
-                    ready.push((id.clone(), data.clone(), *placement));
-                    last_id = Some(id.clone());
-                    cropped = idx + 1;
-                }
-                _ => break,
-            }
-        }
-
-        if cropped > 0 {
-            self.pending.drain(0..cropped);
-            self.last_written_id = last_id;
-        }
+        let ready = self.release_in_order();
 
         if !ready.is_empty() {
             if buffer_size > 10 {
