@@ -42,7 +42,8 @@ typedef struct normfs normfs_t;
 typedef int (*normfs_record_cb)(void *ctx, uint64_t id, const uint8_t *data,
     size_t len);
 
-/* Opens (or creates) the instance in `data_dir`, a UTF-8 path, and locks it.
+/* Opens (or creates) the instance in `data_dir`, a UTF-8 path, and locks it. A
+ * child forked without exec keeps the lock until it exits.
  * Queue names are UTF-8 paths: "a/b/" and "a//b" are the queue "a/b"; a
  * component "wal", "store" or "closed" is reserved. Each queue used keeps
  * memory (two 256 KiB pages at least) until normfs_close. */

@@ -107,6 +107,24 @@ pub struct NormFS {
     writes: WriteGate,
 }
 
+/// The pointer flusher of an instance `new` has not finished building: a
+/// failed `new` must not leave it holding the directory's lock.
+struct AbortOnDrop(Option<JoinHandle<()>>);
+
+impl AbortOnDrop {
+    fn take(mut self) -> JoinHandle<()> {
+        self.0.take().expect("taken once")
+    }
+}
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
+        }
+    }
+}
+
 impl Drop for NormFS {
     // The pointer flusher loops forever and holds `fs`, which holds the data
     // directory's lock; the other tasks end when their channels close.
@@ -163,7 +181,8 @@ pub enum Error {
         cause: String,
     },
     /// Another NormFS, in this process or another, has the data directory
-    /// open: two would hand out the same ids.
+    /// open: two would hand out the same ids. A dropped instance keeps it until
+    /// its tasks end; for a cloud queue, that is when its records have landed.
     DataDirInUse,
     /// `mem_page_size` is below the smallest page the ring's contracts allow.
     /// Refused at construction; past this check the arena panics instead.
@@ -618,8 +637,6 @@ impl NormFS {
         })
         .map_err(Error::Io)?;
         fs.mkdir_all(&path).await?;
-        // Held by the pool: released only once nothing of this instance can
-        // touch the directory any more.
         fs.hold(Box::new(lock_data_dir(&fs, &path.join(".lock")).await?));
 
         let crypto_path = path.clone();
@@ -679,8 +696,9 @@ impl NormFS {
                 .await
                 .map_err(Error::Io)?,
         );
-        let memory_pointer_task =
-            memory_pointers.spawn_flusher(settings.memory_pointers_flush_interval);
+        let memory_pointer_task = AbortOnDrop(Some(
+            memory_pointers.spawn_flusher(settings.memory_pointers_flush_interval),
+        ));
 
         let (wal_entry_send, mut wal_entry_recv) = tokio::sync::mpsc::unbounded_channel();
         let (wal_complete_send, wal_complete_recv): (
@@ -880,7 +898,7 @@ impl NormFS {
             cloud,
             cloud_sink,
             memory_pointers,
-            memory_pointer_task,
+            memory_pointer_task: memory_pointer_task.take(),
             crypto_ctx,
             settings: settings.clone(),
             reader_fsm,
