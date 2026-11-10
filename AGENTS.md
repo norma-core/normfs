@@ -61,7 +61,8 @@ own `go.work` (explicitly excluded from the Cargo workspace), a shared wire
 schema in `proto/normfs.proto`, and a verified C layer.
 
 Crates: `normfs` (server/binary), `normfs-types`, `normfs-time`, `normfs-fs`, `normfs-wal`,
-`normfs-store`, `normfs-cloud`, `normfs-crypto`, `uintn-rs`.
+`normfs-store`, `normfs-cloud`, `normfs-crypto`, `uintn-rs`, and `normfs-capi` (a static
+library and `include/normfs.h` for C and C++; no proved C, so no `c/` directory).
 
 Seven of them carry C — `uintn-rs`, `normfs-types` (queue names),
 `normfs-fs`, `normfs-wal`, `normfs-store`, `normfs-crypto`, and `normfs`

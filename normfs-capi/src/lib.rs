@@ -126,12 +126,20 @@ pub unsafe extern "C" fn normfs_open(data_dir: *const c_char, out: *mut *mut Han
             Ok(lock) => lock,
             Err(e) => return fail(NORMFS_ERR_IO, e),
         };
-        match lock.try_lock() {
-            Ok(()) => {}
-            Err(TryLockError::WouldBlock) => {
-                return fail(NORMFS_ERR_IO, "data_dir is already open");
+        // A child process spawned during a close can hold the lock until its
+        // exec, so a reopen right after waits that out before refusing.
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            match lock.try_lock() {
+                Ok(()) => break,
+                Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(TryLockError::WouldBlock) => {
+                    return fail(NORMFS_ERR_IO, "data_dir is already open");
+                }
+                Err(TryLockError::Error(e)) => return fail(NORMFS_ERR_IO, e),
             }
-            Err(TryLockError::Error(e)) => return fail(NORMFS_ERR_IO, e),
         }
         let rt = match tokio::runtime::Builder::new_multi_thread()
             .enable_all()

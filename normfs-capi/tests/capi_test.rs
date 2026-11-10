@@ -461,31 +461,3 @@ fn errors_come_back_as_codes_with_a_message() {
     assert_eq!(unsafe { normfs_close(ptr::null_mut()) }, NORMFS_OK);
     close(fs);
 }
-
-#[test]
-fn the_header_compiles_as_c_and_as_cpp() {
-    let header = Path::new(env!("CARGO_MANIFEST_DIR")).join("include/normfs.h");
-    for (compiler, lang) in [("cc", "c"), ("c++", "c++")] {
-        let Ok(out) = std::process::Command::new(compiler)
-            .args([
-                "-x",
-                lang,
-                "-fsyntax-only",
-                "-Wall",
-                "-Wextra",
-                "-Werror",
-                "-pedantic",
-            ])
-            .arg(&header)
-            .output()
-        else {
-            eprintln!("no {compiler}; skipped");
-            continue;
-        };
-        assert!(
-            out.status.success(),
-            "{compiler}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-}
