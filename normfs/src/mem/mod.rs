@@ -1292,7 +1292,7 @@ impl MemStore {
                 .get(queue)
                 .and_then(|q| q.inner.read().unwrap().pool.clone())
         };
-        pool.is_none_or(|p| p.is_durable_below(id))
+        pool.is_some_and(|p| p.is_durable_below(id))
     }
 
     /// Ends a closed queue's life in memory: subscriber streams end and the
