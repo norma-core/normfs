@@ -384,9 +384,8 @@ fn read_records(
             Ok(Err(e)) => return fail_with(e),
             Err(e) => return fail(NORMFS_ERR_PANIC, e),
         }
-        // A follower that falls 64 records behind is dropped by NormFS, so
-        // the follow picks up again from the next id; a pass that received
-        // nothing, skipped ids included, is a close.
+        // NormFS drops a follower 64 records behind, so resume from `next`;
+        // a pass that received nothing, skipped ids included, is a close.
         if stopped || !follow || received == 0 {
             return NORMFS_OK;
         }

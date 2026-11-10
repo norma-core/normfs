@@ -44,10 +44,10 @@ typedef int (*normfs_record_cb)(void *ctx, uint64_t id, const uint8_t *data,
 
 /* Opens (or creates) the instance in `data_dir`, a UTF-8 path, and locks it. A
  * child forked without exec keeps the lock until it exits. Right after a
- * handle on the same directory closed, it can wait up to a minute for that
- * instance to finish writing.
+ * handle on the same directory closed, it waits (a minute at most) for that
+ * handle's queued disk jobs to finish.
  * Queue names are UTF-8 paths: "a/b/" and "a//b" are the queue "a/b"; a name
- * starting with '/' or holding '\\' is refused on every platform; a
+ * starting with '/' or holding a backslash is refused on every platform; a
  * component "wal", "store" or "closed" is reserved, and "normfs/system" is
  * NormFS's own event queue, readable but not writable. Each queue used keeps
  * memory (two 256 KiB pages at least) until normfs_close. */

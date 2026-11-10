@@ -209,14 +209,23 @@ async fn a_memory_life_after_a_durable_one_goes_on_past_its_ids() {
 }
 
 #[tokio::test]
-async fn a_memory_only_record_is_never_durable() {
+async fn an_evicted_memory_only_record_is_not_durable() {
     let temp_dir = TempDir::new().unwrap();
-    let fs = NormFS::new(temp_dir.path().to_path_buf(), memory_only_settings())
+    let settings = NormFsSettings {
+        max_memory_usage: 64 * 1024,
+        mem_page_size: 4096,
+        ..memory_only_settings()
+    };
+    let fs = NormFS::new(temp_dir.path().to_path_buf(), settings)
         .await
         .unwrap();
     let queue = fs.resolve("rover/events");
     fs.ensure_queue_exists_for_write(&queue).await.unwrap();
-    fs.enqueue(&queue, Bytes::from_static(b"x")).await.unwrap();
+    for _ in 0..1000 {
+        fs.enqueue(&queue, Bytes::from(vec![1u8; 512]))
+            .await
+            .unwrap();
+    }
 
     assert!(!fs.is_durable_through(&queue, 0));
     fs.close().await.unwrap();

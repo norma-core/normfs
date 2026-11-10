@@ -246,9 +246,8 @@ impl Fs {
         })
     }
 
-    /// Keeps `guard` until every clone of this `Fs` is dropped and the jobs
-    /// already handed to its pool have run: a directory lock released then
-    /// has nothing of this `Fs` left touching the directory.
+    /// Keeps `guard` until every clone of this `Fs` is dropped and the pool has
+    /// run its queued jobs, so a lock it holds outlives every touch of the directory.
     pub fn hold(&self, guard: Box<dyn std::any::Any + Send>) {
         self.exec.hold(guard);
     }

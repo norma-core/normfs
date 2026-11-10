@@ -391,11 +391,8 @@ struct Inner {
     /// The highest id the file writer has taken responsibility for, in order.
     /// `None` until it has taken any. Nothing above it may be written.
     handed_through: Option<u64>,
-    /// Per file whose closing flush did not land, keyed by the arming's
-    /// generation and the file's epoch (epochs restart at 0 on every arming):
-    /// the first id a retry still owes it. The bytes are the retry's; this is
-    /// only the debt, and it is what stops a close certifying that everything
-    /// accepted is on disk.
+    /// First id a retry still owes, per stranded file; keyed by generation too,
+    /// since epochs restart at 0 on every arming.
     stranded: BTreeMap<(u64, u64), u64>,
 }
 
@@ -918,8 +915,7 @@ impl PagePool {
     }
 
     /// Whether every record with an id below `id` is written, and synced when
-    /// the writer syncs. Only a stranded run that starts below `id` counts
-    /// against it.
+    /// the writer syncs.
     pub fn is_durable_below(&self, id: u64) -> bool {
         let inner = self.inner.lock().unwrap();
         inner.stranded.values().all(|&first| first >= id) && inner.ring.min_essential_id() >= id

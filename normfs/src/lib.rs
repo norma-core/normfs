@@ -206,9 +206,7 @@ pub enum Error {
         queue: String,
         cause: String,
     },
-    /// Another NormFS, in this process or another, has the data directory
-    /// open: two would hand out the same ids. A dropped instance keeps it until
-    /// its tasks end; for a cloud queue, that is when its records have landed.
+    /// Another NormFS has the data directory open; two would hand out the same ids.
     DataDirInUse,
     /// `mem_page_size` is below the smallest page the ring's contracts allow.
     /// Refused at construction; past this check the arena panics instead.
@@ -294,11 +292,8 @@ impl std::error::Error for Error {
     }
 }
 
-/// Takes an exclusive lock on `.lock` in the data directory, opened through
-/// `fs` so a link there is refused like any other below the root. A child
-/// spawned while another instance closed keeps the lock until its exec, so a
-/// busy lock is retried for a second before it counts as in use, and for up
-/// to a minute while a dropped instance of this process still writes.
+/// Retries a busy lock for a second (a child spawned during a close holds it
+/// until exec), and up to a minute while a dropped instance here still writes.
 async fn lock_data_dir(
     fs: &Fs,
     lock_path: &std::path::Path,
@@ -2184,11 +2179,8 @@ impl NormFS {
         }
     }
 
-    /// Whether every record of the queue up to `id` has landed: written, and
-    /// synced when the queue syncs. False unless the queue is started and has
-    /// `id`, and always for a memory-only queue, whose mark moves when pages
-    /// are evicted. Ids an earlier life gave out but lost before landing
-    /// count as landed: there is nothing left to write for them.
+    /// Whether records up to `id` are written and synced; always false for memory-only.
+    /// Ids an earlier life lost before landing count as landed.
     pub fn is_durable_through(&self, queue: &QueueId, id: u64) -> bool {
         let exists = matches!(
             self.mem.get_last_id(queue),
