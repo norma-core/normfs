@@ -207,6 +207,7 @@ pub enum Error {
         cause: String,
     },
     /// Another NormFS has the data directory open; two would hand out the same ids.
+    /// A dropped instance keeps it until its tasks end (a cloud queue's records land).
     DataDirInUse,
     /// `mem_page_size` is below the smallest page the ring's contracts allow.
     /// Refused at construction; past this check the arena panics instead.
@@ -292,8 +293,8 @@ impl std::error::Error for Error {
     }
 }
 
-/// Retries a busy lock for a second (a child spawned during a close holds it
-/// until exec), and up to a minute while a dropped instance here still writes.
+/// Opened through `fs`, so a `.lock` link is refused. Busy is retried for a second (a child
+/// spawned during a close holds it until exec), and up to a minute while a dropped one writes.
 async fn lock_data_dir(
     fs: &Fs,
     lock_path: &std::path::Path,
@@ -2179,8 +2180,8 @@ impl NormFS {
         }
     }
 
-    /// Whether records up to `id` are written and synced; always false for memory-only.
-    /// Ids an earlier life lost before landing count as landed.
+    /// Whether records up to an existing `id` are written, and synced when the queue syncs;
+    /// never for memory-only, whose mark moves on eviction. Ids lost before a restart count.
     pub fn is_durable_through(&self, queue: &QueueId, id: u64) -> bool {
         let exists = matches!(
             self.mem.get_last_id(queue),

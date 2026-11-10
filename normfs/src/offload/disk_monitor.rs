@@ -876,8 +876,7 @@ impl Drop for DiskMonitor {
 }
 
 impl DiskMonitor {
-    /// Ends the check loop: a closed instance must not delete files under a
-    /// directory another one has opened since.
+    /// Ends the check loop; called on drop, so a closed instance kept alive still evicts.
     pub fn stop(&self) {
         if let Some(handle) = self.handle.lock().unwrap().take() {
             handle.abort();
