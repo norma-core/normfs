@@ -16,7 +16,8 @@ unsafe impl Sync for Fs {}
 fn open(dir: &Path) -> Fs {
     let dir = CString::new(dir.to_str().unwrap()).unwrap();
     let mut fs = ptr::null_mut();
-    assert_eq!(unsafe { normfs_open(dir.as_ptr(), &mut fs) }, NORMFS_OK);
+    let rc = unsafe { normfs_open(dir.as_ptr(), &mut fs) };
+    assert_eq!(rc, NORMFS_OK, "{}", last_error());
     assert!(!fs.is_null());
     Fs(fs)
 }

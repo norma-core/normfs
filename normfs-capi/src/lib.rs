@@ -112,10 +112,13 @@ pub unsafe extern "C" fn normfs_open(data_dir: *const c_char, out: *mut *mut Han
             Err(code) => return code,
         };
         // A second handle on one directory would hand out the same ids twice.
+        // Windows locks only a handle opened for reading or writing.
         let lock = std::fs::create_dir_all(&dir).and_then(|()| {
             File::options()
+                .read(true)
+                .write(true)
                 .create(true)
-                .append(true)
+                .truncate(false)
                 .open(dir.join(".lock"))
         });
         let lock = match lock {
