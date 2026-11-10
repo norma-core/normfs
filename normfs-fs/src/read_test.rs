@@ -81,6 +81,9 @@ fn counting(fs: &mut Fs) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
         fn name(&self) -> &'static str {
             self.inner.name()
         }
+        fn hold(&self, guard: Box<dyn std::any::Any + Send>) {
+            self.inner.hold(guard)
+        }
     }
     let submissions = Arc::new(AtomicUsize::new(0));
     fs.exec = Arc::new(Counting {

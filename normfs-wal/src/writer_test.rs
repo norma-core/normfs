@@ -1100,6 +1100,150 @@ async fn a_close_that_cannot_flush_hands_its_tail_to_a_retrier() {
     assert_eq!(seen, COUNT, "{seen} of {COUNT} records reached a file");
 }
 
+// Two armings each strand a file at epoch 0; the second one's retry landing
+// must clear only its own debt.
+#[tokio::test]
+async fn one_retried_file_does_not_clear_another_writers_debt() {
+    let dir = tempdir().unwrap();
+    let (written_tx, mut written_rx) = mpsc::unbounded_channel();
+    let (complete_tx, _complete_rx) = mpsc::unbounded_channel();
+    let store = WalStore::new(dir.path(), written_tx, complete_tx);
+    let queue = QueueIdResolver::new("review").resolve("epoch");
+    let wal_dir = queue.to_wal_dir(dir.path());
+    std::fs::create_dir_all(&wal_dir).unwrap();
+    let pool = std::sync::Arc::new(crate::PagePool::new(8, 1024, 0));
+    let settings = WalSettings {
+        max_file_size: 4096,
+        write_buffer_size: 128,
+        write_interval: Duration::from_millis(5),
+        enable_fsync: true,
+        encryption_type: normfs_types::EncryptionType::None,
+        compression_type: normfs_types::CompressionType::None,
+        flush_max_retries: 2,
+        flush_retry_delay: Duration::from_millis(1),
+    };
+    let files: Vec<_> = (1..=2u64)
+        .map(|n| UintN::from(n).to_file_path(wal_dir.to_str().unwrap(), "wal"))
+        .collect();
+    for (i, path) in files.iter().enumerate() {
+        crate::fail_flushes(path, u32::MAX);
+        let id = i as u64;
+        store
+            .start_writer_with_pool(
+                &queue,
+                &UintN::from(id + 1),
+                WalHeader {
+                    num_entries_before: UintN::from(id),
+                    ..WalHeader::default()
+                },
+                settings.clone(),
+                id.checked_sub(1).map(UintN::from),
+                Some(pool.clone()),
+            )
+            .await
+            .unwrap();
+        let placement = pool.place(id, &[42; 200]).await.unwrap();
+        store
+            .enqueue_pooled(&queue, UintN::from(id), Bytes::new(), placement)
+            .unwrap();
+        assert!(store.close_writer(&queue).await.is_err());
+        assert_eq!(pool.stranded_from(), Some(0));
+    }
+    store
+        .start_writer_with_pool(
+            &queue,
+            &UintN::from(3u64),
+            WalHeader {
+                num_entries_before: UintN::from(2u64),
+                ..WalHeader::default()
+            },
+            settings,
+            Some(UintN::from(1u64)),
+            Some(pool.clone()),
+        )
+        .await
+        .unwrap();
+    let placement = pool.place(2, &[43; 200]).await.unwrap();
+    store
+        .enqueue_pooled(&queue, UintN::from(2u64), Bytes::new(), placement)
+        .unwrap();
+    store.close_writer(&queue).await.unwrap();
+    assert_eq!(pool.durable_before(), 3);
+    assert!(!pool.is_durable_below(1));
+
+    crate::fail_flushes(&files[1], 0);
+    let (_, landed) = timeout(Duration::from_secs(5), written_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(landed, UintN::from(1u64));
+    assert_eq!(pool.stranded_from(), Some(0), "file 1 has not landed");
+    assert!(!pool.is_durable_below(1));
+    assert!(!pool.is_fully_durable());
+
+    crate::fail_flushes(&files[0], 0);
+    timeout(Duration::from_secs(5), written_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(pool.is_fully_durable());
+}
+
+// Nothing flushes after the last file, so its landed tail must move the mark.
+#[tokio::test]
+async fn the_landed_tail_of_the_last_file_is_durable() {
+    let dir = tempdir().unwrap();
+    let (written_tx, mut written_rx) = mpsc::unbounded_channel();
+    let (complete_tx, _complete_rx) = mpsc::unbounded_channel();
+    let store = WalStore::new(dir.path(), written_tx, complete_tx);
+    let queue = QueueIdResolver::new("review").resolve("last");
+    let wal_dir = queue.to_wal_dir(dir.path());
+    std::fs::create_dir_all(&wal_dir).unwrap();
+    let pool = std::sync::Arc::new(crate::PagePool::new(4, 1024, 0));
+    let settings = WalSettings {
+        max_file_size: 1 << 20,
+        write_buffer_size: 128,
+        write_interval: Duration::from_millis(5),
+        enable_fsync: true,
+        encryption_type: normfs_types::EncryptionType::None,
+        compression_type: normfs_types::CompressionType::None,
+        flush_max_retries: 2,
+        flush_retry_delay: Duration::from_millis(1),
+    };
+    let file = UintN::from(1u64).to_file_path(wal_dir.to_str().unwrap(), "wal");
+    crate::fail_flushes(&file, u32::MAX);
+    store
+        .start_writer_with_pool(
+            &queue,
+            &UintN::from(1u64),
+            WalHeader::default(),
+            settings,
+            None,
+            Some(pool.clone()),
+        )
+        .await
+        .unwrap();
+    for id in 0..3u64 {
+        let placement = pool.place(id, &[7; 200]).await.unwrap();
+        store
+            .enqueue_pooled(&queue, UintN::from(id), Bytes::new(), placement)
+            .unwrap();
+    }
+    assert!(store.close_writer(&queue).await.is_err());
+    assert_eq!(pool.stranded_from(), Some(0));
+
+    crate::fail_flushes(&file, 0);
+    let (_, landed) = timeout(Duration::from_secs(5), written_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(landed, UintN::from(2u64));
+    assert!(!pool.has_stranded());
+    assert_eq!(pool.durable_before(), 3, "ids 0..=2 are on disk");
+    assert!(pool.is_durable_below(3));
+    assert!(pool.is_fully_durable());
+}
+
 #[tokio::test]
 async fn entries_parked_behind_the_last_one_to_arrive_reach_the_file() {
     let tmp_dir = tempdir().unwrap();

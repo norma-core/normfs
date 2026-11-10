@@ -1,0 +1,22 @@
+[package]
+name = "normfs-capi"
+version.workspace = true
+rust-version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "C ABI for NormFS: a static library and normfs.h for C and C++ programs"
+
+[lib]
+name = "normfs_capi"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+normfs = { version = "0.4.7", path = "../normfs" }
+tokio = { workspace = true }
+bytes = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

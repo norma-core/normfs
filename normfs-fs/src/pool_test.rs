@@ -460,6 +460,9 @@ async fn cached_inode_append_submits_exactly_one_job() {
         fn name(&self) -> &'static str {
             self.inner.name()
         }
+        fn hold(&self, guard: Box<dyn std::any::Any + Send>) {
+            self.inner.hold(guard)
+        }
     }
     let mut fs = fs();
     let submissions = Arc::new(AtomicUsize::new(0));

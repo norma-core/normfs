@@ -53,4 +53,6 @@ pub(crate) trait Executor: Send + Sync {
     /// Submitted jobs finish even if the caller drops the reply future.
     fn submit(&self, job: Job) -> Result<(), FsError>;
     fn name(&self) -> &'static str;
+    /// Keeps `guard` until the executor is gone and has run every job it took.
+    fn hold(&self, guard: Box<dyn std::any::Any + Send>);
 }

@@ -102,6 +102,10 @@ Native Go client for connecting to NormFS servers.
 
 📖 **[Go Documentation →](normfs_go/README.md)**
 
+### C · C++ (Embedded Library)
+
+`normfs-capi` builds a static library, `libnormfs_capi.a` (`normfs_capi.lib` on MSVC), with [`normfs.h`](normfs-capi/include/normfs.h): open a data directory, append, read, follow and flush queues from C or C++, in-process.
+
 ### 🐍 Python · 🟨 TypeScript
 
 Coming soon. Protocol specification available for implementing additional clients.
@@ -196,6 +200,7 @@ without it is not supported and faults rather than falling back.
 - **normfs-store**: Compressed/encrypted persistent storage
 - **normfs-cloud**: S3-compatible cloud integration
 - **normfs-crypto**: Encryption and signing
+- **normfs-capi**: Static library and C header for embedding NormFS in C and C++
 - **normfs_go**: Go client library
 - **uintn**: Variable-width integers with infinite scaling
 

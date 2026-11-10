@@ -1502,6 +1502,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "normfs-capi"
+version = "0.4.7"
+dependencies = [
+ "bytes",
+ "normfs",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "normfs-cloud"
 version = "0.4.7"
 dependencies = [

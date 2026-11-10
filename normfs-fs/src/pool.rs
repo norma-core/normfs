@@ -69,22 +69,28 @@ unsafe extern "C" {
 // Must match the shim's fixed-size iovec array.
 const IOV_MAX: usize = 1024;
 
+type Held = Arc<Mutex<Vec<Box<dyn std::any::Any + Send>>>>;
+
 pub(crate) struct Pool {
     tx: Mutex<Option<Sender<Job>>>,
+    held: Held,
 }
 
 impl Pool {
     pub(crate) fn start(threads: usize) -> std::io::Result<Arc<Pool>> {
         let (tx, rx) = std::sync::mpsc::channel::<Job>();
         let rx = Arc::new(Mutex::new(rx));
+        let held = Held::default();
         for i in 0..threads.max(1) {
             let rx = rx.clone();
+            let held = held.clone();
             std::thread::Builder::new()
                 .name(format!("normfs-fs-{i}"))
-                .spawn(move || worker(rx))?;
+                .spawn(move || worker(rx, held))?;
         }
         Ok(Arc::new(Pool {
             tx: Mutex::new(Some(tx)),
+            held,
         }))
     }
 }
@@ -101,9 +107,14 @@ impl Executor for Pool {
     fn name(&self) -> &'static str {
         "pool"
     }
+
+    fn hold(&self, guard: Box<dyn std::any::Any + Send>) {
+        self.held.lock().unwrap().push(guard);
+    }
 }
 
-fn worker(rx: Arc<Mutex<Receiver<Job>>>) {
+// `_held` goes with the last worker, which exits only once the queue is empty.
+fn worker(rx: Arc<Mutex<Receiver<Job>>>, _held: Held) {
     loop {
         let job = rx.lock().unwrap().recv();
         match job {

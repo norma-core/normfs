@@ -1284,6 +1284,17 @@ impl MemStore {
         pool.is_none_or(|p| p.is_fully_durable())
     }
 
+    /// Whether every record of the queue below `id` is on disk.
+    pub fn is_durable_below(&self, queue: &QueueId, id: u64) -> bool {
+        let pool = {
+            let queues = self.queues.read().unwrap();
+            queues
+                .get(queue)
+                .and_then(|q| q.inner.read().unwrap().pool.clone())
+        };
+        pool.is_some_and(|p| p.is_durable_below(id))
+    }
+
     /// Ends a closed queue's life in memory: subscriber streams end and the
     /// pages go back to their arena.
     pub fn close_queue(&self, queue: &QueueId) {

@@ -307,6 +307,9 @@ pub struct Stranded {
     pub runs: Vec<(PendingWrite, Bytes)>,
     pub first_entry_id: u64,
     pub last_entry_id: u64,
+    /// The arming the file belonged to; with its epoch, what
+    /// [`PagePool::clear_stranded`] needs to clear this debt and no other.
+    pub generation: u64,
 }
 
 /// Every unwritten byte a file has, taken in one go.
@@ -388,10 +391,9 @@ struct Inner {
     /// The highest id the file writer has taken responsibility for, in order.
     /// `None` until it has taken any. Nothing above it may be written.
     handed_through: Option<u64>,
-    /// Per file whose closing flush did not land: the first id a retry still
-    /// owes it. The bytes are the retry's; this is only the debt, and it is
-    /// what stops a close certifying that everything accepted is on disk.
-    stranded: BTreeMap<u64, u64>,
+    /// First id a retry still owes, per stranded file; keyed by generation too,
+    /// since epochs restart at 0 on every arming.
+    stranded: BTreeMap<(u64, u64), u64>,
 }
 
 fn first_id_at(inner: &Inner, k: usize, from: usize) -> Option<u64> {
@@ -754,7 +756,9 @@ impl PagePool {
         first_entry_id: u64,
         floor: usize,
     ) -> Self {
-        let ring = WalRing::in_arena(arena, range, ring_id, first_entry_id);
+        // As in `new`: a recovered idle queue is durable, not busy.
+        let mut ring = WalRing::in_arena(arena, range, ring_id, first_entry_id);
+        ring.set_essential(first_entry_id);
         let page_count = ring.page_count();
         let page_size = ring.page_size();
         PagePool {
@@ -908,6 +912,13 @@ impl PagePool {
         }
         let essential = inner.ring.min_essential_id();
         (0..inner.ring.page_count()).all(|k| inner.ring.page_is_reusable(k, essential))
+    }
+
+    /// Whether every record with an id below `id` is written, and synced when
+    /// the writer syncs.
+    pub fn is_durable_below(&self, id: u64) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner.stranded.values().all(|&first| first >= id) && inner.ring.min_essential_id() >= id
     }
 
     /// Whether a file writer is taking pages from this pool, and therefore
@@ -1589,17 +1600,23 @@ impl PagePool {
 
         let first_entry_id = runs[0].0.first_entry_id;
         let last_entry_id = runs[runs.len() - 1].0.last_entry_id;
-        inner.stranded.insert(epoch, first_entry_id);
+        let generation = inner.generation;
+        inner.stranded.insert((generation, epoch), first_entry_id);
 
         Some(Stranded {
             runs,
             first_entry_id,
             last_entry_id,
+            generation,
         })
     }
 
-    pub fn clear_stranded(&self, epoch: u64) {
-        self.inner.lock().unwrap().stranded.remove(&epoch);
+    pub fn clear_stranded(&self, generation: u64, epoch: u64) {
+        self.inner
+            .lock()
+            .unwrap()
+            .stranded
+            .remove(&(generation, epoch));
     }
 
     pub fn has_stranded(&self) -> bool {

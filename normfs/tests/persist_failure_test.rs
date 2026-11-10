@@ -39,6 +39,7 @@ async fn cloud_recovery_failure(list_succeeds: bool, object_status: u16) {
         .unwrap();
     let queue = fs.resolve("review");
     fs.close().await.unwrap();
+    drop(fs);
     std::fs::write(
         temp.path().join(".memory_pointers"),
         format!("{}\t3\t1\n", queue.as_str()),
@@ -117,6 +118,7 @@ async fn batch_larger_than_pool_completes() {
         .unwrap();
     assert_eq!(ids, (0..20u64).map(uintn::UintN::from).collect::<Vec<_>>());
     fs.close().await.unwrap();
+    drop(fs);
     let reopened = NormFS::new(temp.path().to_path_buf(), NormFsSettings::all_active())
         .await
         .unwrap();
@@ -155,6 +157,7 @@ async fn close_reports_store_failure() {
     })
     .await
     .unwrap();
+    drop(fs);
     let reopened = NormFS::new(temp.path().to_path_buf(), NormFsSettings::all_active())
         .await
         .unwrap();
@@ -200,6 +203,7 @@ async fn close_budget_covers_sealed_pages() {
     .await
     .unwrap();
     fs.close().await.unwrap();
+    drop(fs);
     let reopened = NormFS::new(temp.path().to_path_buf(), NormFsSettings::all_active())
         .await
         .unwrap();

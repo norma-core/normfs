@@ -246,6 +246,12 @@ impl Fs {
         })
     }
 
+    /// Keeps `guard` until every clone of this `Fs` is dropped and the pool has
+    /// run its queued jobs, so a lock it holds outlives every touch of the directory.
+    pub fn hold(&self, guard: Box<dyn std::any::Any + Send>) {
+        self.exec.hold(guard);
+    }
+
     pub fn backend(&self) -> &'static str {
         self.exec.name()
     }

@@ -79,6 +79,7 @@ impl FileRoom {
 
 pub struct NormFS {
     path: std::path::PathBuf,
+    lock_key: std::path::PathBuf,
     fs: Fs,
     wal: Arc<WalStore>,
     store: Arc<PersistStore>,
@@ -105,6 +106,57 @@ pub struct NormFS {
     events: EventSink,
     system_writer: system::Writer,
     writes: WriteGate,
+}
+
+/// The pointer flusher of an instance `new` has not finished building: a
+/// failed `new` must not leave it holding the directory's lock.
+struct AbortOnDrop(Option<JoinHandle<()>>);
+
+impl AbortOnDrop {
+    fn take(mut self) -> JoinHandle<()> {
+        self.0.take().expect("taken once")
+    }
+}
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
+        }
+    }
+}
+
+impl Drop for NormFS {
+    // The pointer flusher loops forever and holds `fs`, which holds the data
+    // directory's lock; the other tasks end when their channels close.
+    fn drop(&mut self) {
+        self.memory_pointer_task.abort();
+        RELEASING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(self.lock_key.clone());
+    }
+}
+
+/// Data directories of dropped instances whose tasks still hold the lock
+/// while they write what was accepted; a new instance waits for those.
+static RELEASING: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+struct DirLock {
+    file: Option<std::fs::File>,
+    key: std::path::PathBuf,
+}
+
+impl Drop for DirLock {
+    fn drop(&mut self) {
+        drop(self.file.take());
+        let mut releasing = RELEASING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(i) = releasing.iter().position(|k| *k == self.key) {
+            releasing.swap_remove(i);
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -154,6 +206,8 @@ pub enum Error {
         queue: String,
         cause: String,
     },
+    /// Another NormFS has the data directory open; two would hand out the same ids.
+    DataDirInUse,
     /// `mem_page_size` is below the smallest page the ring's contracts allow.
     /// Refused at construction; past this check the arena panics instead.
     PageBelowMinimum {
@@ -188,6 +242,7 @@ impl std::fmt::Display for Error {
                 write!(f, "Queue name is not allowed: {name:?}")
             }
             Error::Closing => write!(f, "NormFS is closing and accepts no more writes"),
+            Error::DataDirInUse => write!(f, "The data directory is open in another NormFS"),
             Error::MemoryBelowFloor {
                 max_memory_usage,
                 page_size,
@@ -229,11 +284,86 @@ impl std::error::Error for Error {
             Error::ReservedQueue => None,
             Error::BadQueueName(_) => None,
             Error::Closing => None,
+            Error::DataDirInUse => None,
             Error::MemoryBelowFloor { .. } => None,
             Error::BucketUnreachable { .. } => None,
             Error::PageBelowMinimum { .. } => None,
         }
     }
+}
+
+/// Retries a busy lock for a second (a child spawned during a close holds it
+/// until exec), and up to a minute while a dropped instance here still writes.
+async fn lock_data_dir(
+    fs: &Fs,
+    lock_path: &std::path::Path,
+    key: std::path::PathBuf,
+) -> Result<DirLock, Error> {
+    // Write access: Windows locks only a handle opened for reading or writing.
+    let file = match fs.open(lock_path, true).await {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            match fs
+                .create_durable(lock_path, Runs::default(), TmpMode::Excl, true)
+                .await
+            {
+                Ok(file) => file,
+                // Another instance may have created it first; any other
+                // failure shows up again on this open.
+                Err(created) => fs
+                    .open(lock_path, true)
+                    .await
+                    .map_err(|_| Error::from(created))?,
+            }
+        }
+        Err(e) => return Err(lock_error(lock_path, e)),
+    };
+    let wait_key = key.clone();
+    let lock = fs
+        .run_blocking(move || {
+            let start = std::time::Instant::now();
+            let mut deadline = start + std::time::Duration::from_secs(1);
+            loop {
+                match file.try_lock() {
+                    Ok(()) => return Ok(Some(file)),
+                    Err(std::fs::TryLockError::WouldBlock)
+                        if std::time::Instant::now() < deadline =>
+                    {
+                        if start.elapsed() < std::time::Duration::from_secs(60)
+                            && RELEASING
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .contains(&wait_key)
+                        {
+                            deadline =
+                                std::time::Instant::now() + std::time::Duration::from_secs(1);
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+                    Err(std::fs::TryLockError::Error(e)) => return Err(e),
+                }
+            }
+        })
+        .await
+        .map_err(|e| match e {
+            normfs_fs::FsError::Os(e) => lock_error(lock_path, e),
+            e @ (normfs_fs::FsError::ExecutorGone
+            | normfs_fs::FsError::JobPanicked
+            | normfs_fs::FsError::Plan(_)) => e.into(),
+        })?;
+    let file = lock.ok_or(Error::DataDirInUse)?;
+    Ok(DirLock {
+        file: Some(file),
+        key,
+    })
+}
+
+fn lock_error(lock_path: &std::path::Path, e: std::io::Error) -> Error {
+    Error::Io(std::io::Error::new(
+        e.kind(),
+        format!("{}: {e}", lock_path.display()),
+    ))
 }
 
 fn refuse_bad_name(queue: &QueueId) -> Result<(), Error> {
@@ -548,6 +678,13 @@ impl NormFS {
         })
         .map_err(Error::Io)?;
         fs.mkdir_all(&path).await?;
+        let canon = path.clone();
+        let lock_key = fs
+            .run_blocking(move || Ok(std::fs::canonicalize(&canon).unwrap_or(canon)))
+            .await?;
+        fs.hold(Box::new(
+            lock_data_dir(&fs, &path.join(".lock"), lock_key.clone()).await?,
+        ));
 
         let crypto_path = path.clone();
         let (fresh_instance, crypto_ctx) = fs
@@ -606,8 +743,9 @@ impl NormFS {
                 .await
                 .map_err(Error::Io)?,
         );
-        let memory_pointer_task =
-            memory_pointers.spawn_flusher(settings.memory_pointers_flush_interval);
+        let memory_pointer_task = AbortOnDrop(Some(
+            memory_pointers.spawn_flusher(settings.memory_pointers_flush_interval),
+        ));
 
         let (wal_entry_send, mut wal_entry_recv) = tokio::sync::mpsc::unbounded_channel();
         let (wal_complete_send, wal_complete_recv): (
@@ -807,7 +945,8 @@ impl NormFS {
             cloud,
             cloud_sink,
             memory_pointers,
-            memory_pointer_task,
+            memory_pointer_task: memory_pointer_task.take(),
+            lock_key,
             crypto_ctx,
             settings: settings.clone(),
             reader_fsm,
@@ -2040,6 +2179,18 @@ impl NormFS {
         }
     }
 
+    /// Whether records up to `id` are written and synced; always false for memory-only.
+    /// Ids an earlier life lost before landing count as landed.
+    pub fn is_durable_through(&self, queue: &QueueId, id: u64) -> bool {
+        let exists = matches!(
+            self.mem.get_last_id(queue),
+            Some(Some(last)) if UintN::from(id) <= last
+        );
+        exists
+            && self.persist_for(queue).drainer() != Drainer::None
+            && self.mem.is_durable_below(queue, id.saturating_add(1))
+    }
+
     /// Where the queue's next record would land. Only its writer can act on
     /// the answer: any append, a flush or a close moves it.
     pub fn file_room(&self, queue: &QueueId) -> Result<FileRoom, Error> {
@@ -2165,6 +2316,8 @@ impl NormFS {
         Ok(())
     }
 
+    /// Lands every queue. The data directory stays locked until the instance
+    /// is dropped.
     pub async fn close(&self) -> Result<(), Error> {
         log::info!(target: "normfs", "Closing NormFS");
 
