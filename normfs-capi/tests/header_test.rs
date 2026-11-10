@@ -19,8 +19,10 @@ fn the_header_compiles_as_c_and_as_cpp() {
             .arg(&header)
             .output()
         else {
-            assert!(cfg!(windows), "no {compiler} to check the header with");
-            continue;
+            if cfg!(windows) {
+                continue;
+            }
+            panic!("no {compiler} to check the header with");
         };
         assert!(
             out.status.success(),

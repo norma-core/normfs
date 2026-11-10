@@ -79,6 +79,7 @@ impl FileRoom {
 
 pub struct NormFS {
     path: std::path::PathBuf,
+    lock_key: std::path::PathBuf,
     fs: Fs,
     wal: Arc<WalStore>,
     store: Arc<PersistStore>,
@@ -130,6 +131,26 @@ impl Drop for NormFS {
     // directory's lock; the other tasks end when their channels close.
     fn drop(&mut self) {
         self.memory_pointer_task.abort();
+        RELEASING.lock().unwrap().push(self.lock_key.clone());
+    }
+}
+
+/// Data directories of dropped instances whose tasks still hold the lock
+/// while they write what was accepted; a new instance waits for those.
+static RELEASING: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+struct DirLock {
+    file: Option<std::fs::File>,
+    key: std::path::PathBuf,
+}
+
+impl Drop for DirLock {
+    fn drop(&mut self) {
+        drop(self.file.take());
+        let mut releasing = RELEASING.lock().unwrap();
+        if let Some(i) = releasing.iter().position(|k| *k == self.key) {
+            releasing.swap_remove(i);
+        }
     }
 }
 
@@ -271,8 +292,13 @@ impl std::error::Error for Error {
 /// Takes an exclusive lock on `.lock` in the data directory, opened through
 /// `fs` so a link there is refused like any other below the root. A child
 /// spawned while another instance closed keeps the lock until its exec, so a
-/// busy lock is retried for a second before it counts as in use.
-async fn lock_data_dir(fs: &Fs, lock_path: &std::path::Path) -> Result<std::fs::File, Error> {
+/// busy lock is retried for a second before it counts as in use, and for up
+/// to a minute while a dropped instance of this process still writes.
+async fn lock_data_dir(
+    fs: &Fs,
+    lock_path: &std::path::Path,
+    key: std::path::PathBuf,
+) -> Result<DirLock, Error> {
     // Write access: Windows locks only a handle opened for reading or writing.
     let file = match fs.open(lock_path, true).await {
         Ok(file) => file,
@@ -292,15 +318,23 @@ async fn lock_data_dir(fs: &Fs, lock_path: &std::path::Path) -> Result<std::fs::
         }
         Err(e) => return Err(lock_error(lock_path, e)),
     };
+    let wait_key = key.clone();
     let lock = fs
         .run_blocking(move || {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+            let start = std::time::Instant::now();
+            let mut deadline = start + std::time::Duration::from_secs(1);
             loop {
                 match file.try_lock() {
                     Ok(()) => return Ok(Some(file)),
                     Err(std::fs::TryLockError::WouldBlock)
                         if std::time::Instant::now() < deadline =>
                     {
+                        if start.elapsed() < std::time::Duration::from_secs(60)
+                            && RELEASING.lock().unwrap().contains(&wait_key)
+                        {
+                            deadline =
+                                std::time::Instant::now() + std::time::Duration::from_secs(1);
+                        }
                         std::thread::sleep(std::time::Duration::from_millis(10));
                     }
                     Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
@@ -315,7 +349,11 @@ async fn lock_data_dir(fs: &Fs, lock_path: &std::path::Path) -> Result<std::fs::
             | normfs_fs::FsError::JobPanicked
             | normfs_fs::FsError::Plan(_)) => e.into(),
         })?;
-    lock.ok_or(Error::DataDirInUse)
+    let file = lock.ok_or(Error::DataDirInUse)?;
+    Ok(DirLock {
+        file: Some(file),
+        key,
+    })
 }
 
 fn lock_error(lock_path: &std::path::Path, e: std::io::Error) -> Error {
@@ -637,7 +675,10 @@ impl NormFS {
         })
         .map_err(Error::Io)?;
         fs.mkdir_all(&path).await?;
-        fs.hold(Box::new(lock_data_dir(&fs, &path.join(".lock")).await?));
+        let lock_key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        fs.hold(Box::new(
+            lock_data_dir(&fs, &path.join(".lock"), lock_key.clone()).await?,
+        ));
 
         let crypto_path = path.clone();
         let (fresh_instance, crypto_ctx) = fs
@@ -899,6 +940,7 @@ impl NormFS {
             cloud_sink,
             memory_pointers,
             memory_pointer_task: memory_pointer_task.take(),
+            lock_key,
             crypto_ctx,
             settings: settings.clone(),
             reader_fsm,

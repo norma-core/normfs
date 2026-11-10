@@ -42,7 +42,8 @@ thread_local! {
 
 fn fail(code: c_int, message: impl std::fmt::Display) -> c_int {
     let text = CString::new(message.to_string().replace('\0', " ")).unwrap_or_default();
-    LAST_ERROR.with(|e| *e.borrow_mut() = text);
+    // An exiting thread's destructors can still call in; panicking here would abort.
+    let _ = LAST_ERROR.try_with(|e| *e.borrow_mut() = text);
     code
 }
 
@@ -119,6 +120,7 @@ pub unsafe extern "C" fn normfs_open(data_dir: *const c_char, out: *mut *mut Han
         unsafe { *out = std::ptr::null_mut() };
         // SAFETY: forwarded from this function's contract.
         let dir = match unsafe { text(data_dir) } {
+            Ok("") => return fail(NORMFS_ERR_INVALID, "data_dir is empty"),
             Ok(dir) => PathBuf::from(dir),
             Err(code) => return code,
         };
@@ -323,7 +325,7 @@ fn read_records(
         let limit = if follow {
             0
         } else {
-            limit.min(u64::MAX - next).max(1)
+            limit.min((u64::MAX - next).saturating_add(1)).max(1)
         };
         let (tx, mut rx) = mpsc::channel(64);
         let fs = h.fs.clone();

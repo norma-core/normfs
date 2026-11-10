@@ -458,6 +458,12 @@ fn errors_come_back_as_codes_with_a_message() {
         NORMFS_ERR_INVALID
     );
     assert!(out.is_null());
+    let cwd = CString::new("").unwrap();
+    assert_eq!(
+        unsafe { normfs_open(cwd.as_ptr(), &mut out) },
+        NORMFS_ERR_INVALID
+    );
+    assert!(out.is_null());
     assert_eq!(unsafe { normfs_close(ptr::null_mut()) }, NORMFS_OK);
     close(fs);
 }
