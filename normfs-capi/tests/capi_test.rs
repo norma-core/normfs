@@ -440,7 +440,7 @@ fn errors_come_back_as_codes_with_a_message() {
     let mut last = 0;
     let empty = CString::new("never-written").unwrap();
     let rc = unsafe { normfs_last_id(fs.0, empty.as_ptr(), &mut last) };
-    assert!(rc == NORMFS_ERR_EMPTY || rc == NORMFS_ERR_NOT_FOUND, "{rc}");
+    assert_eq!(rc, NORMFS_ERR_EMPTY);
 
     let mut out = ptr::null_mut();
     assert_eq!(

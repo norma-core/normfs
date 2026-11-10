@@ -58,7 +58,7 @@ int normfs_append(normfs_t *fs, const char *queue, const uint8_t *data,
  * and synced, or NORMFS_ERR_IO if that takes more than 10 s. */
 int normfs_flush(normfs_t *fs, const char *queue);
 
-/* The id of the newest record in `queue`. */
+/* The id of the newest record in `queue`; NORMFS_ERR_EMPTY if it has none. */
 int normfs_last_id(normfs_t *fs, const char *queue, uint64_t *id);
 
 /* Calls `cb` for up to `limit` records from id `from` on, then returns; a

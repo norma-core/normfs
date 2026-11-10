@@ -143,13 +143,13 @@ pub unsafe extern "C" fn normfs_open(data_dir: *const c_char, out: *mut *mut Han
         match rt.block_on(NormFS::new(dir, NormFsSettings::all_active())) {
             Ok(fs) => {
                 let fs = Arc::new(fs);
-                // SAFETY: checked non-NULL above.
                 let handle = Handle {
                     fs,
                     rt,
                     stop_follows: watch::Sender::new(false),
                     _lock: lock,
                 };
+                // SAFETY: checked non-NULL above.
                 unsafe { *out = Box::into_raw(Box::new(handle)) };
                 NORMFS_OK
             }
