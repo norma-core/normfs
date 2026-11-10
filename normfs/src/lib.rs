@@ -2181,7 +2181,7 @@ impl NormFS {
     }
 
     /// Whether records up to an existing `id` are written, and synced when the queue syncs;
-    /// never for memory-only, whose mark moves on eviction. Ids lost before a restart count.
+    /// never for memory-only, whose mark moves on eviction. Ids a restart lost count as landed.
     pub fn is_durable_through(&self, queue: &QueueId, id: u64) -> bool {
         let exists = matches!(
             self.mem.get_last_id(queue),
