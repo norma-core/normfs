@@ -832,6 +832,7 @@ impl CommandProcessor {
                     | Error::ReservedQueue
                     | Error::BadQueueName(_)
                     | Error::Closing
+                    | Error::DataDirInUse
                     | Error::WouldBlock
                     | Error::NotInFile
                     | Error::MemoryBelowFloor { .. }

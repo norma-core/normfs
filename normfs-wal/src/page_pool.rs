@@ -912,10 +912,11 @@ impl PagePool {
         (0..inner.ring.page_count()).all(|k| inner.ring.page_is_reusable(k, essential))
     }
 
-    /// Whether every record with an id below `id` is written and synced.
+    /// Whether every record with an id below `id` is written and synced. Only
+    /// a stranded run that starts below `id` counts against it.
     pub fn is_durable_below(&self, id: u64) -> bool {
         let inner = self.inner.lock().unwrap();
-        inner.stranded.is_empty() && inner.ring.min_essential_id() >= id
+        inner.stranded.values().all(|&first| first >= id) && inner.ring.min_essential_id() >= id
     }
 
     /// Whether a file writer is taking pages from this pool, and therefore

@@ -105,6 +105,8 @@ pub struct NormFS {
     events: EventSink,
     system_writer: system::Writer,
     writes: WriteGate,
+    /// The lock on `<path>/.lock`, held until `close`.
+    dir_lock: std::sync::Mutex<Option<std::fs::File>>,
 }
 
 #[derive(Debug)]
@@ -156,6 +158,9 @@ pub enum Error {
     },
     /// `mem_page_size` is below the smallest page the ring's contracts allow.
     /// Refused at construction; past this check the arena panics instead.
+    /// Another NormFS, in this process or another, has the data directory
+    /// open: two would hand out the same ids.
+    DataDirInUse,
     PageBelowMinimum {
         page_size: usize,
         minimum: usize,
@@ -188,6 +193,7 @@ impl std::fmt::Display for Error {
                 write!(f, "Queue name is not allowed: {name:?}")
             }
             Error::Closing => write!(f, "NormFS is closing and accepts no more writes"),
+            Error::DataDirInUse => write!(f, "The data directory is open in another NormFS"),
             Error::MemoryBelowFloor {
                 max_memory_usage,
                 page_size,
@@ -229,9 +235,34 @@ impl std::error::Error for Error {
             Error::ReservedQueue => None,
             Error::BadQueueName(_) => None,
             Error::Closing => None,
+            Error::DataDirInUse => None,
             Error::MemoryBelowFloor { .. } => None,
             Error::BucketUnreachable { .. } => None,
             Error::PageBelowMinimum { .. } => None,
+        }
+    }
+}
+
+/// Takes an exclusive lock on `.lock` in the data directory. A child spawned
+/// while another handle closed keeps that lock until its exec, so a busy lock
+/// is retried for a second before it counts as in use.
+fn lock_data_dir(lock_path: &std::path::Path) -> Result<std::fs::File, Error> {
+    // Windows locks only a handle opened for reading or writing.
+    let file = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(std::fs::TryLockError::WouldBlock) => return Err(Error::DataDirInUse),
+            Err(std::fs::TryLockError::Error(e)) => return Err(Error::Io(e)),
         }
     }
 }
@@ -548,6 +579,10 @@ impl NormFS {
         })
         .map_err(Error::Io)?;
         fs.mkdir_all(&path).await?;
+        let lock_path = path.join(".lock");
+        let dir_lock = fs
+            .run_blocking(move || Ok(lock_data_dir(&lock_path)))
+            .await??;
 
         let crypto_path = path.clone();
         let (fresh_instance, crypto_ctx) = fs
@@ -820,6 +855,7 @@ impl NormFS {
             events,
             system_writer: system::Writer::idle(),
             writes: WriteGate::default(),
+            dir_lock: std::sync::Mutex::new(Some(dir_lock)),
         };
         if normfs.settings.system_queue {
             let queue = &normfs.system_queue;
@@ -2040,9 +2076,11 @@ impl NormFS {
         }
     }
 
-    /// Whether every record of the queue up to `id` is written and synced.
+    /// Whether every record of the queue up to `id` is written and synced. A
+    /// memory-only queue never is: its mark moves when pages are evicted.
     pub fn is_durable_through(&self, queue: &QueueId, id: u64) -> bool {
-        self.mem.is_durable_below(queue, id.saturating_add(1))
+        self.persist_for(queue).drainer() != Drainer::None
+            && self.mem.is_durable_below(queue, id.saturating_add(1))
     }
 
     /// Where the queue's next record would land. Only its writer can act on
@@ -2191,6 +2229,8 @@ impl NormFS {
         store_result?;
         wal_result?;
 
+        // Only after a clean close: otherwise the lock goes with the drop.
+        self.dir_lock.lock().unwrap().take();
         log::info!(target: "normfs", "NormFS closed successfully");
         Ok(())
     }

@@ -3,7 +3,6 @@
 
 use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
-use std::fs::{File, TryLockError};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -32,7 +31,6 @@ pub struct Handle {
     fs: Arc<NormFS>,
     rt: Runtime,
     stop_follows: watch::Sender<bool>,
-    _lock: File,
 }
 
 const FLUSH_TIMEOUT: Duration = Duration::from_secs(10);
@@ -112,35 +110,6 @@ pub unsafe extern "C" fn normfs_open(data_dir: *const c_char, out: *mut *mut Han
             Ok(dir) => PathBuf::from(dir),
             Err(code) => return code,
         };
-        // A second handle on one directory would hand out the same ids twice.
-        // Windows locks only a handle opened for reading or writing.
-        let lock = std::fs::create_dir_all(&dir).and_then(|()| {
-            File::options()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(dir.join(".lock"))
-        });
-        let lock = match lock {
-            Ok(lock) => lock,
-            Err(e) => return fail(NORMFS_ERR_IO, e),
-        };
-        // A child process spawned during a close can hold the lock until its
-        // exec, so a reopen right after waits that out before refusing.
-        let deadline = Instant::now() + Duration::from_secs(1);
-        loop {
-            match lock.try_lock() {
-                Ok(()) => break,
-                Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                Err(TryLockError::WouldBlock) => {
-                    return fail(NORMFS_ERR_IO, "data_dir is already open");
-                }
-                Err(TryLockError::Error(e)) => return fail(NORMFS_ERR_IO, e),
-            }
-        }
         let rt = match tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -155,7 +124,6 @@ pub unsafe extern "C" fn normfs_open(data_dir: *const c_char, out: *mut *mut Han
                     fs,
                     rt,
                     stop_follows: watch::Sender::new(false),
-                    _lock: lock,
                 };
                 // SAFETY: checked non-NULL above.
                 unsafe { *out = Box::into_raw(Box::new(handle)) };
@@ -175,19 +143,13 @@ pub unsafe extern "C" fn normfs_close(fs: *mut Handle) -> c_int {
             return NORMFS_OK;
         }
         // SAFETY: a live handle from normfs_open, taken back exactly once.
-        let Handle {
-            fs,
-            rt,
-            _lock: lock,
-            ..
-        } = *unsafe { Box::from_raw(fs) };
+        let Handle { fs, rt, .. } = *unsafe { Box::from_raw(fs) };
         let closed = rt.block_on(fs.close());
         // Dropped inside the runtime, before it, so its tasks can still see it.
         let entered = rt.enter();
         drop(fs);
         drop(entered);
         drop(rt);
-        drop(lock);
         match closed {
             Ok(()) => NORMFS_OK,
             Err(e) => fail_with(e),

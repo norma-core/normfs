@@ -1196,6 +1196,29 @@ async fn a_stranded_tail_outlives_the_pages_it_came_from() {
     assert!(pool.is_fully_durable());
 }
 
+/// A failed write behind a durable prefix leaves the prefix durable.
+#[tokio::test]
+async fn a_stranded_run_counts_only_against_ids_above_its_start() {
+    let pool = armed_pool();
+
+    let id0 = pool.next_entry_id();
+    pool.place(id0, &RECORD).await.unwrap();
+    pool.note_handed_over(id0);
+    for (write, _) in pool.take_pending(0) {
+        pool.commit_written(&write);
+    }
+    pool.mark_durable(id0 + 1);
+    assert!(pool.is_durable_below(id0 + 1));
+
+    let id1 = pool.next_entry_id();
+    pool.place(id1, &RECORD).await.unwrap();
+    pool.note_handed_over(id1);
+    assert!(pool.take_stranded(0).is_some());
+
+    assert!(pool.is_durable_below(id0 + 1));
+    assert!(!pool.is_durable_below(id1 + 1));
+}
+
 /// Nothing is stranded when the closing flush landed everything.
 #[tokio::test]
 async fn a_file_that_wrote_everything_strands_nothing() {
