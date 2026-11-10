@@ -131,7 +131,10 @@ impl Drop for NormFS {
     // directory's lock; the other tasks end when their channels close.
     fn drop(&mut self) {
         self.memory_pointer_task.abort();
-        RELEASING.lock().unwrap().push(self.lock_key.clone());
+        RELEASING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(self.lock_key.clone());
     }
 }
 
@@ -147,7 +150,9 @@ struct DirLock {
 impl Drop for DirLock {
     fn drop(&mut self) {
         drop(self.file.take());
-        let mut releasing = RELEASING.lock().unwrap();
+        let mut releasing = RELEASING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(i) = releasing.iter().position(|k| *k == self.key) {
             releasing.swap_remove(i);
         }
@@ -330,7 +335,10 @@ async fn lock_data_dir(
                         if std::time::Instant::now() < deadline =>
                     {
                         if start.elapsed() < std::time::Duration::from_secs(60)
-                            && RELEASING.lock().unwrap().contains(&wait_key)
+                            && RELEASING
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .contains(&wait_key)
                         {
                             deadline =
                                 std::time::Instant::now() + std::time::Duration::from_secs(1);
@@ -675,7 +683,10 @@ impl NormFS {
         })
         .map_err(Error::Io)?;
         fs.mkdir_all(&path).await?;
-        let lock_key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        let canon = path.clone();
+        let lock_key = fs
+            .run_blocking(move || Ok(std::fs::canonicalize(&canon).unwrap_or(canon)))
+            .await?;
         fs.hold(Box::new(
             lock_data_dir(&fs, &path.join(".lock"), lock_key.clone()).await?,
         ));

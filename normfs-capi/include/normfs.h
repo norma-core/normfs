@@ -23,7 +23,7 @@ extern "C" {
 
 enum normfs_status {
 	NORMFS_OK = 0,
-	NORMFS_ERR_INVALID = 1,    /* NULL, bad UTF-8, bad or reserved queue name */
+	NORMFS_ERR_INVALID = 1,    /* NULL, empty or bad UTF-8 path, bad queue name */
 	NORMFS_ERR_NOT_FOUND = 2,  /* record does not exist */
 	NORMFS_ERR_EMPTY = 3,      /* queue has no record yet */
 	NORMFS_ERR_TOO_LARGE = 4,  /* record and its framing exceed a 256 KiB page */
@@ -43,7 +43,9 @@ typedef int (*normfs_record_cb)(void *ctx, uint64_t id, const uint8_t *data,
     size_t len);
 
 /* Opens (or creates) the instance in `data_dir`, a UTF-8 path, and locks it. A
- * child forked without exec keeps the lock until it exits.
+ * child forked without exec keeps the lock until it exits. Right after a
+ * handle on the same directory closed with an error, it can wait up to a
+ * minute for that instance to finish writing.
  * Queue names are UTF-8 paths: "a/b/" and "a//b" are the queue "a/b"; a
  * component "wal", "store" or "closed" is reserved, and "normfs/system" is
  * NormFS's own event queue, readable but not writable. Each queue used keeps
