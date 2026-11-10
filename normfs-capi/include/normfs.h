@@ -50,8 +50,9 @@ typedef int (*normfs_record_cb)(void *ctx, uint64_t id, const uint8_t *data,
  * memory (two 256 KiB pages at least) until normfs_close. */
 int normfs_open(const char *data_dir, normfs_t **out);
 
-/* Flushes every queue to disk and frees the handle, even on error. No other
- * call may be running on the handle. */
+/* Flushes every queue to disk and frees the handle, even on error. An error
+ * means some appended records may not have reached the disk and are lost with
+ * the handle. No other call may be running on the handle. */
 int normfs_close(normfs_t *fs);
 
 /* Appends one record, creating the queue on first use; `id` gets its id. */
@@ -79,7 +80,8 @@ int normfs_follow(normfs_t *fs, const char *queue, uint64_t from,
  * later, so they can be joined before normfs_close. */
 int normfs_stop_follows(normfs_t *fs);
 
-/* Text of the last error on this thread; valid until the next call on it. */
+/* Text of the last error on this thread; valid until the next call on it or
+ * until the thread exits. */
 const char *normfs_last_error(void);
 
 #ifdef __cplusplus
