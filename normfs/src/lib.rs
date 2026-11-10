@@ -2131,9 +2131,10 @@ impl NormFS {
         }
     }
 
-    /// Whether every record of the queue up to `id`, which must exist, has
-    /// landed: written, and synced when the queue syncs. A memory-only queue
-    /// never has: its mark moves when pages are evicted.
+    /// Whether every record of the queue up to `id` has landed: written, and
+    /// synced when the queue syncs. False unless the queue is started and has
+    /// `id`, and always for a memory-only queue, whose mark moves when pages
+    /// are evicted.
     pub fn is_durable_through(&self, queue: &QueueId, id: u64) -> bool {
         let exists = matches!(
             self.mem.get_last_id(queue),
