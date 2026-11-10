@@ -24,3 +24,19 @@ async fn a_data_dir_takes_one_instance_at_a_time() {
         .unwrap();
     third.close().await.unwrap();
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_lock_file_that_is_a_link_is_refused() {
+    let dir = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    let target = outside.path().join("elsewhere");
+    std::os::unix::fs::symlink(&target, dir.path().join(".lock")).unwrap();
+
+    assert!(
+        NormFS::new(dir.path().to_path_buf(), NormFsSettings::default())
+            .await
+            .is_err()
+    );
+    assert!(!target.exists());
+}

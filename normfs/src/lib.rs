@@ -243,28 +243,44 @@ impl std::error::Error for Error {
     }
 }
 
-/// Takes an exclusive lock on `.lock` in the data directory. A child spawned
-/// while another handle closed keeps that lock until its exec, so a busy lock
-/// is retried for a second before it counts as in use.
-fn lock_data_dir(lock_path: &std::path::Path) -> Result<std::fs::File, Error> {
-    // Windows locks only a handle opened for reading or writing.
-    let file = std::fs::File::options()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(lock_path)?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-    loop {
-        match file.try_lock() {
-            Ok(()) => return Ok(file),
-            Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(10));
+/// Takes an exclusive lock on `.lock` in the data directory, opened through
+/// `fs` so a link there is refused like any other below the root. A child
+/// spawned while another instance closed keeps the lock until its exec, so a
+/// busy lock is retried for a second before it counts as in use.
+async fn lock_data_dir(fs: &Fs, lock_path: &std::path::Path) -> Result<std::fs::File, Error> {
+    // Write access: Windows locks only a handle opened for reading or writing.
+    let file = match fs.open(lock_path, true).await {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            match fs
+                .create_durable(lock_path, Runs::default(), TmpMode::Excl, true)
+                .await
+            {
+                Ok(file) => file,
+                // Another instance created it first.
+                Err(created) => fs.open(lock_path, true).await.map_err(|_| created)?,
             }
-            Err(std::fs::TryLockError::WouldBlock) => return Err(Error::DataDirInUse),
-            Err(std::fs::TryLockError::Error(e)) => return Err(Error::Io(e)),
         }
-    }
+        Err(e) => return Err(e.into()),
+    };
+    let lock = fs
+        .run_blocking(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+            loop {
+                match file.try_lock() {
+                    Ok(()) => return Ok(Some(file)),
+                    Err(std::fs::TryLockError::WouldBlock)
+                        if std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+                    Err(std::fs::TryLockError::Error(e)) => return Err(e),
+                }
+            }
+        })
+        .await?;
+    lock.ok_or(Error::DataDirInUse)
 }
 
 fn refuse_bad_name(queue: &QueueId) -> Result<(), Error> {
@@ -579,10 +595,7 @@ impl NormFS {
         })
         .map_err(Error::Io)?;
         fs.mkdir_all(&path).await?;
-        let lock_path = path.join(".lock");
-        let dir_lock = fs
-            .run_blocking(move || Ok(lock_data_dir(&lock_path)))
-            .await??;
+        let dir_lock = lock_data_dir(&fs, &path.join(".lock")).await?;
 
         let crypto_path = path.clone();
         let (fresh_instance, crypto_ctx) = fs
