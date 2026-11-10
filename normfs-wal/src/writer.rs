@@ -330,7 +330,11 @@ impl WriterState {
                 entry_id,
                 self.queue_id.short()
             );
-            vec![(entry_id.clone(), data, placement)]
+            // Entries that raced ahead of this one were parked; nothing else
+            // releases them if this is the last entry to arrive.
+            let mut ready = vec![(entry_id.clone(), data, placement)];
+            ready.extend(self.buffer.release_in_order());
+            ready
         } else {
             // buffer and get ready entries
             log::debug!(

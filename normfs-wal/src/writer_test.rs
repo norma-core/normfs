@@ -1243,3 +1243,53 @@ async fn the_landed_tail_of_the_last_file_is_durable() {
     assert!(pool.is_durable_below(3));
     assert!(pool.is_fully_durable());
 }
+
+#[tokio::test]
+async fn entries_parked_behind_the_last_one_to_arrive_reach_the_file() {
+    let tmp_dir = tempdir().unwrap();
+    let (written_sender, _) = mpsc::unbounded_channel();
+    let (wal_complete_sender, _) = mpsc::unbounded_channel();
+    let store = WalStore::new(tmp_dir.path(), written_sender, wal_complete_sender);
+    let queue_id = QueueIdResolver::new("test_instance").resolve("test_queue");
+    let file_id = UintN::from(1u64);
+    store
+        .start_writer(
+            &queue_id,
+            &file_id,
+            WalHeader::default(),
+            WalSettings::default(),
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Writers raced twice: 2 and 3 arrived before 1, then 5 before 4, which
+    // comes last.
+    for id in [0u64, 2, 3, 1, 5, 4] {
+        let data = Bytes::from(format!("entry {id}"));
+        store.enqueue(&queue_id, UintN::from(id), data).unwrap();
+    }
+    store.close().await.unwrap();
+
+    let (tx, mut rx) = mpsc::channel(10);
+    let result = read_wal_file_range(
+        &test_fs(),
+        &queue_id.to_wal_dir(tmp_dir.path()),
+        &file_id,
+        &UintN::from(0u64),
+        &Some(UintN::from(5u64)),
+        1,
+        &tx,
+        DataSource::DiskWal,
+    )
+    .await
+    .unwrap();
+    drop(tx);
+    assert!(matches!(result, ReadRangeResult::Complete));
+    let mut ids = Vec::new();
+    while let Some(entry) = rx.recv().await {
+        assert_eq!(entry.data, Bytes::from(format!("entry {}", entry.id)));
+        ids.push(entry.id);
+    }
+    assert_eq!(ids, (0u64..6).map(UintN::from).collect::<Vec<_>>());
+}
