@@ -2324,14 +2324,13 @@ impl NormFS {
         Ok(())
     }
 
+    /// Lands every queue. The data directory stays locked until the instance
+    /// is dropped.
     pub async fn close(&self) -> Result<(), Error> {
         log::info!(target: "normfs", "Closing NormFS");
 
         // Before the store closes, so what it holds lands with the rest.
         self.system_writer.stop().await;
-        if let Some(monitor) = &self.disk_monitor {
-            monitor.stop();
-        }
         // The store closes the queues it has now; a write after this point
         // could start one it never flushes.
         self.writes.close().await;

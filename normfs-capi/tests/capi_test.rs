@@ -328,6 +328,12 @@ fn a_record_of_200_kib_is_stored() {
     let big = vec![7u8; 200 * 1024];
     assert_eq!(append(&fs, "mail/big", &big), 0);
     assert_eq!(read(&fs, "mail/big", 0, 1), [(0, big)]);
+    assert!(read(&fs, "mail/big", 0, 0).is_empty());
+    let page = vec![7u8; 256 * 1024];
+    let queue = CString::new("mail/big").unwrap();
+    let mut id = 0;
+    let rc = unsafe { normfs_append(fs.0, queue.as_ptr(), page.as_ptr(), page.len(), &mut id) };
+    assert_eq!(rc, NORMFS_ERR_TOO_LARGE);
     close(fs);
 }
 
@@ -428,7 +434,7 @@ fn errors_come_back_as_codes_with_a_message() {
         unsafe { normfs_flush(fs.0, bad.as_ptr()) },
         NORMFS_ERR_INVALID
     );
-    for name in ["", "/abs", "a\\b"] {
+    for name in ["", "/abs", "a\\b", "normfs/system"] {
         let name = CString::new(name).unwrap();
         let rc = unsafe { normfs_append(fs.0, name.as_ptr(), b"x".as_ptr(), 1, &mut id) };
         assert_eq!(rc, NORMFS_ERR_INVALID);
