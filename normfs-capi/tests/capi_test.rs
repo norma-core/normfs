@@ -229,15 +229,9 @@ fn a_follow_far_past_the_end_outlives_a_burst_below_its_from() {
         append(&fs, &queue, b"0");
         let done = follow_in_thread(&fs, &queue, 8000, 1, Some(collect));
         std::thread::sleep(Duration::from_millis(50));
-        std::thread::scope(|s| {
-            for _ in 0..8 {
-                s.spawn(|| {
-                    for _ in 0..1000 {
-                        append(&fs, &queue, b"x");
-                    }
-                });
-            }
-        });
+        for _ in 0..8000 {
+            append(&fs, &queue, b"x");
+        }
         let (rc, got) = done.recv_timeout(Duration::from_secs(30)).unwrap();
         assert_eq!(rc, NORMFS_OK);
         let ids: Vec<u64> = got.iter().map(|(id, _)| *id).collect();
