@@ -1119,8 +1119,9 @@ async fn entries_parked_behind_the_last_one_to_arrive_reach_the_file() {
         .await
         .unwrap();
 
-    // Two writers raced: 2 and 3 arrived before 1, which comes last.
-    for id in [0u64, 2, 3, 1] {
+    // Writers raced twice: 2 and 3 arrived before 1, then 5 before 4, which
+    // comes last.
+    for id in [0u64, 2, 3, 1, 5, 4] {
         let data = Bytes::from(format!("entry {id}"));
         store.enqueue(&queue_id, UintN::from(id), data).unwrap();
     }
@@ -1132,7 +1133,7 @@ async fn entries_parked_behind_the_last_one_to_arrive_reach_the_file() {
         &queue_id.to_wal_dir(tmp_dir.path()),
         &file_id,
         &UintN::from(0u64),
-        &Some(UintN::from(3u64)),
+        &Some(UintN::from(5u64)),
         1,
         &tx,
         DataSource::DiskWal,
@@ -1146,5 +1147,5 @@ async fn entries_parked_behind_the_last_one_to_arrive_reach_the_file() {
         assert_eq!(entry.data, Bytes::from(format!("entry {}", entry.id)));
         ids.push(entry.id);
     }
-    assert_eq!(ids, (0u64..4).map(UintN::from).collect::<Vec<_>>());
+    assert_eq!(ids, (0u64..6).map(UintN::from).collect::<Vec<_>>());
 }
