@@ -350,7 +350,7 @@ fn read_records(
             fs.read(&q, ReadPosition::Absolute(UintN::from(next)), limit, 1, tx)
                 .await
         });
-        let mut delivered = 0u64;
+        let mut received = 0u64;
         let mut stopped = false;
         let mut code = NORMFS_OK;
         loop {
@@ -368,6 +368,7 @@ fn read_records(
                     break;
                 }
             };
+            received += 1;
             let id = match id64(&entry.id) {
                 Ok(id) => id,
                 Err(e) => {
@@ -381,7 +382,6 @@ fn read_records(
                 continue;
             }
             next = id.saturating_add(1);
-            delivered += 1;
             // SAFETY: the caller's callback; `entry.data` lives across the call.
             if unsafe { cb(ctx, id, entry.data.as_ptr(), entry.data.len()) } != 0 {
                 stopped = true;
@@ -401,8 +401,9 @@ fn read_records(
             Err(e) => return fail(NORMFS_ERR_PANIC, e),
         }
         // A follower that falls 64 records behind is dropped by NormFS, so
-        // the follow picks up again from the next id; an empty pass is a close.
-        if stopped || !follow || delivered == 0 {
+        // the follow picks up again from the next id; a pass that received
+        // nothing, skipped ids included, is a close.
+        if stopped || !follow || received == 0 {
             return NORMFS_OK;
         }
     }

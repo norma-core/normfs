@@ -213,6 +213,34 @@ fn a_follow_past_the_end_starts_at_its_from_id() {
     assert_eq!(unsafe { normfs_close(fs.0) }, NORMFS_OK);
 }
 
+// The drop needs the follower to fall 64 behind, which a busy machine
+// decides; ten rounds make missing it on every one unlikely.
+#[test]
+fn a_follow_far_past_the_end_outlives_a_burst_below_its_from() {
+    let dir = tempfile::tempdir().unwrap();
+    let fs = open(dir.path());
+    for round in 0..10 {
+        let queue = format!("inbox{round}");
+        append(&fs, &queue, b"0");
+        let done = follow_in_thread(&fs, &queue, 8000, 1, Some(collect));
+        std::thread::sleep(Duration::from_millis(50));
+        std::thread::scope(|s| {
+            for _ in 0..8 {
+                s.spawn(|| {
+                    for _ in 0..1000 {
+                        append(&fs, &queue, b"x");
+                    }
+                });
+            }
+        });
+        let (rc, got) = done.recv_timeout(Duration::from_secs(30)).unwrap();
+        assert_eq!(rc, NORMFS_OK);
+        let ids: Vec<u64> = got.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, [8000], "round {round}");
+    }
+    assert_eq!(unsafe { normfs_close(fs.0) }, NORMFS_OK);
+}
+
 #[test]
 fn stop_follows_ends_an_idle_follow() {
     let dir = tempfile::tempdir().unwrap();
