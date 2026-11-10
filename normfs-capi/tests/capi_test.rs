@@ -30,6 +30,11 @@ fn append(fs: &Fs, queue: &str, data: &[u8]) -> u64 {
     id
 }
 
+fn close(fs: Fs) {
+    let rc = unsafe { normfs_close(fs.0) };
+    assert_eq!(rc, NORMFS_OK, "{}", last_error());
+}
+
 fn last_error() -> String {
     unsafe { CStr::from_ptr(normfs_last_error()) }
         .to_string_lossy()
@@ -91,7 +96,7 @@ fn records_are_read_back_by_id_and_survive_a_restart() {
         read(&fs, "mail/alice", 1, 10),
         [(1, b"two".to_vec()), (2, Vec::new())]
     );
-    assert_eq!(unsafe { normfs_close(fs.0) }, NORMFS_OK);
+    close(fs);
 
     let fs = open(dir.path());
     assert_eq!(
@@ -99,7 +104,7 @@ fn records_are_read_back_by_id_and_survive_a_restart() {
         [(0, b"one".to_vec()), (1, b"two".to_vec())]
     );
     assert_eq!(append(&fs, "mail/alice", b"four"), 3);
-    assert_eq!(unsafe { normfs_close(fs.0) }, NORMFS_OK);
+    close(fs);
 }
 
 #[test]
@@ -137,7 +142,7 @@ fn a_follow_waits_for_new_records_until_the_callback_stops_it() {
         assert_eq!(ids, [0, 1, 2]);
         assert_eq!(got[2].1, b"new 2");
     });
-    assert_eq!(unsafe { normfs_close(fs.0) }, NORMFS_OK);
+    close(fs);
 }
 
 unsafe extern "C" fn collect_slowly(
@@ -194,7 +199,7 @@ fn a_follow_slower_than_the_writer_still_gets_every_record() {
     assert_eq!(rc, NORMFS_OK, "{}", last_error());
     let ids: Vec<u64> = got.iter().map(|(id, _)| *id).collect();
     assert_eq!(ids, (0..300).collect::<Vec<_>>());
-    assert_eq!(unsafe { normfs_close(fs.0) }, NORMFS_OK);
+    close(fs);
 }
 
 #[test]
@@ -210,7 +215,7 @@ fn a_follow_past_the_end_starts_at_its_from_id() {
     let (rc, got) = done.recv_timeout(Duration::from_secs(10)).unwrap();
     assert_eq!(rc, NORMFS_OK);
     assert_eq!(got, [(5, b"5".to_vec())]);
-    assert_eq!(unsafe { normfs_close(fs.0) }, NORMFS_OK);
+    close(fs);
 }
 
 // The drop needs the follower to fall 64 behind, which a busy machine
@@ -238,7 +243,7 @@ fn a_follow_far_past_the_end_outlives_a_burst_below_its_from() {
         let ids: Vec<u64> = got.iter().map(|(id, _)| *id).collect();
         assert_eq!(ids, [8000], "round {round}");
     }
-    assert_eq!(unsafe { normfs_close(fs.0) }, NORMFS_OK);
+    close(fs);
 }
 
 #[test]
@@ -252,7 +257,7 @@ fn stop_follows_ends_an_idle_follow() {
     let (rc, got) = done.recv_timeout(Duration::from_secs(10)).unwrap();
     assert_eq!(rc, NORMFS_OK);
     assert_eq!(got, [(0, b"0".to_vec())]);
-    assert_eq!(unsafe { normfs_close(fs.0) }, NORMFS_OK);
+    close(fs);
 }
 
 #[test]
@@ -263,7 +268,7 @@ fn a_read_with_the_largest_limit_reads_to_the_end() {
         append(&fs, "q", r);
     }
     assert_eq!(read(&fs, "q", 2, u64::MAX), [(2, b"c".to_vec())]);
-    assert_eq!(unsafe { normfs_close(fs.0) }, NORMFS_OK);
+    close(fs);
 }
 
 fn file_holding(dir: &Path, needle: &[u8]) -> bool {
@@ -284,7 +289,7 @@ fn a_flushed_record_is_already_in_a_file() {
     let queue = CString::new("q").unwrap();
     assert_eq!(unsafe { normfs_flush(fs.0, queue.as_ptr()) }, NORMFS_OK);
     assert!(file_holding(dir.path(), b"flushed-record-7f3a"));
-    assert_eq!(unsafe { normfs_close(fs.0) }, NORMFS_OK);
+    close(fs);
 }
 
 #[test]
@@ -292,7 +297,7 @@ fn a_flush_after_a_reopen_returns_at_once() {
     let dir = tempfile::tempdir().unwrap();
     let fs = open(dir.path());
     append(&fs, "inbox", b"old");
-    assert_eq!(unsafe { normfs_close(fs.0) }, NORMFS_OK);
+    close(fs);
     let fs = open(dir.path());
     let queue = CString::new("inbox").unwrap();
     let mut last = 0;
@@ -308,7 +313,7 @@ fn a_flush_after_a_reopen_returns_at_once() {
         "{:?}",
         started.elapsed()
     );
-    assert_eq!(unsafe { normfs_close(fs.0) }, NORMFS_OK);
+    close(fs);
 }
 
 #[test]
@@ -316,10 +321,10 @@ fn a_queue_never_written_reads_as_empty() {
     let dir = tempfile::tempdir().unwrap();
     let fs = open(dir.path());
     assert!(read(&fs, "never-written", 0, 10).is_empty());
-    assert_eq!(unsafe { normfs_close(fs.0) }, NORMFS_OK);
+    close(fs);
     let fs = open(dir.path());
     assert!(read(&fs, "never-written", 0, 10).is_empty());
-    assert_eq!(unsafe { normfs_close(fs.0) }, NORMFS_OK);
+    close(fs);
 }
 
 #[test]
@@ -329,7 +334,7 @@ fn a_record_of_200_kib_is_stored() {
     let big = vec![7u8; 200 * 1024];
     assert_eq!(append(&fs, "mail/big", &big), 0);
     assert_eq!(read(&fs, "mail/big", 0, 1), [(0, big)]);
-    assert_eq!(unsafe { normfs_close(fs.0) }, NORMFS_OK);
+    close(fs);
 }
 
 unsafe extern "C" fn block_until_released(
@@ -384,7 +389,7 @@ fn a_flush_does_not_wait_for_a_reader_that_is_behind() {
         );
         release_tx.send(()).unwrap();
     });
-    assert_eq!(unsafe { normfs_close(fs.0) }, NORMFS_OK);
+    close(fs);
 }
 
 #[test]
@@ -397,7 +402,7 @@ fn a_follow_started_after_stop_follows_returns_at_once() {
     let (rc, got) = done.recv_timeout(Duration::from_secs(10)).unwrap();
     assert_eq!(rc, NORMFS_OK);
     assert!(got.is_empty());
-    assert_eq!(unsafe { normfs_close(fs.0) }, NORMFS_OK);
+    close(fs);
 }
 
 #[test]
@@ -411,9 +416,9 @@ fn a_data_dir_takes_one_handle_at_a_time() {
         NORMFS_ERR_IO
     );
     assert!(second.is_null());
-    assert_eq!(unsafe { normfs_close(fs.0) }, NORMFS_OK);
+    close(fs);
     let fs = open(dir.path());
-    assert_eq!(unsafe { normfs_close(fs.0) }, NORMFS_OK);
+    close(fs);
 }
 
 #[test]
@@ -460,7 +465,7 @@ fn errors_come_back_as_codes_with_a_message() {
     );
     assert!(out.is_null());
     assert_eq!(unsafe { normfs_close(ptr::null_mut()) }, NORMFS_OK);
-    assert_eq!(unsafe { normfs_close(fs.0) }, NORMFS_OK);
+    close(fs);
 }
 
 #[test]
