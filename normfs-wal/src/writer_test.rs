@@ -1188,3 +1188,58 @@ async fn one_retried_file_does_not_clear_another_writers_debt() {
         .unwrap();
     assert!(pool.is_fully_durable());
 }
+
+// Nothing flushes after the last file, so its landed tail must move the mark.
+#[tokio::test]
+async fn the_landed_tail_of_the_last_file_is_durable() {
+    let dir = tempdir().unwrap();
+    let (written_tx, mut written_rx) = mpsc::unbounded_channel();
+    let (complete_tx, _complete_rx) = mpsc::unbounded_channel();
+    let store = WalStore::new(dir.path(), written_tx, complete_tx);
+    let queue = QueueIdResolver::new("review").resolve("last");
+    let wal_dir = queue.to_wal_dir(dir.path());
+    std::fs::create_dir_all(&wal_dir).unwrap();
+    let pool = std::sync::Arc::new(crate::PagePool::new(4, 1024, 0));
+    let settings = WalSettings {
+        max_file_size: 1 << 20,
+        write_buffer_size: 128,
+        write_interval: Duration::from_millis(5),
+        enable_fsync: true,
+        encryption_type: normfs_types::EncryptionType::None,
+        compression_type: normfs_types::CompressionType::None,
+        flush_max_retries: 2,
+        flush_retry_delay: Duration::from_millis(1),
+    };
+    let file = UintN::from(1u64).to_file_path(wal_dir.to_str().unwrap(), "wal");
+    crate::fail_flushes(&file, u32::MAX);
+    store
+        .start_writer_with_pool(
+            &queue,
+            &UintN::from(1u64),
+            WalHeader::default(),
+            settings,
+            None,
+            Some(pool.clone()),
+        )
+        .await
+        .unwrap();
+    for id in 0..3u64 {
+        let placement = pool.place(id, &[7; 200]).await.unwrap();
+        store
+            .enqueue_pooled(&queue, UintN::from(id), Bytes::new(), placement)
+            .unwrap();
+    }
+    assert!(store.close_writer(&queue).await.is_err());
+    assert_eq!(pool.stranded_from(), Some(0));
+
+    crate::fail_flushes(&file, 0);
+    let (_, landed) = timeout(Duration::from_secs(5), written_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(landed, UintN::from(2u64));
+    assert!(!pool.has_stranded());
+    assert_eq!(pool.durable_before(), 3, "ids 0..=2 are on disk");
+    assert!(pool.is_durable_below(3));
+    assert!(pool.is_fully_durable());
+}
