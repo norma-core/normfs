@@ -57,7 +57,7 @@ pub(crate) fn spawn(
                 // certifying the loss. A restart clears it.
                 continue;
             }
-            pool.clear_stranded(file.epoch);
+            pool.clear_stranded(file.stranded.generation, file.epoch);
             log::info!(
                 target: "normfs-wal",
                 "WAL drainer: queue '{}': file {} landed its tail, entries {}..={}",

@@ -307,6 +307,9 @@ pub struct Stranded {
     pub runs: Vec<(PendingWrite, Bytes)>,
     pub first_entry_id: u64,
     pub last_entry_id: u64,
+    /// The arming the file belonged to; with its epoch, what
+    /// [`PagePool::clear_stranded`] needs to clear this debt and no other.
+    pub generation: u64,
 }
 
 /// Every unwritten byte a file has, taken in one go.
@@ -388,10 +391,12 @@ struct Inner {
     /// The highest id the file writer has taken responsibility for, in order.
     /// `None` until it has taken any. Nothing above it may be written.
     handed_through: Option<u64>,
-    /// Per file whose closing flush did not land: the first id a retry still
-    /// owes it. The bytes are the retry's; this is only the debt, and it is
-    /// what stops a close certifying that everything accepted is on disk.
-    stranded: BTreeMap<u64, u64>,
+    /// Per file whose closing flush did not land, keyed by the arming's
+    /// generation and the file's epoch (epochs restart at 0 on every arming):
+    /// the first id a retry still owes it. The bytes are the retry's; this is
+    /// only the debt, and it is what stops a close certifying that everything
+    /// accepted is on disk.
+    stranded: BTreeMap<(u64, u64), u64>,
 }
 
 fn first_id_at(inner: &Inner, k: usize, from: usize) -> Option<u64> {
@@ -1599,23 +1604,23 @@ impl PagePool {
 
         let first_entry_id = runs[0].0.first_entry_id;
         let last_entry_id = runs[runs.len() - 1].0.last_entry_id;
-        // Epochs restart at 0 when the writer is armed again, so an older debt
-        // can share this key; keep the lower first id rather than lose it.
-        inner
-            .stranded
-            .entry(epoch)
-            .and_modify(|first| *first = (*first).min(first_entry_id))
-            .or_insert(first_entry_id);
+        let generation = inner.generation;
+        inner.stranded.insert((generation, epoch), first_entry_id);
 
         Some(Stranded {
             runs,
             first_entry_id,
             last_entry_id,
+            generation,
         })
     }
 
-    pub fn clear_stranded(&self, epoch: u64) {
-        self.inner.lock().unwrap().stranded.remove(&epoch);
+    pub fn clear_stranded(&self, generation: u64, epoch: u64) {
+        self.inner
+            .lock()
+            .unwrap()
+            .stranded
+            .remove(&(generation, epoch));
     }
 
     pub fn has_stranded(&self) -> bool {

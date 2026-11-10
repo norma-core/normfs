@@ -1191,7 +1191,7 @@ async fn a_stranded_tail_outlives_the_pages_it_came_from() {
     assert_eq!(pool.stranded_from(), Some(id0));
     assert!(!pool.is_fully_durable());
 
-    pool.clear_stranded(0);
+    pool.clear_stranded(stranded.generation, 0);
     assert!(!pool.has_stranded());
     assert!(pool.is_fully_durable());
 }
