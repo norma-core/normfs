@@ -39,6 +39,7 @@ normfs-store = { version = "0.4.8", path = "normfs-store" }
 normfs-cloud = { version = "0.4.8", path = "normfs-cloud" }
 normfs-crypto = { version = "0.4.8", path = "normfs-crypto" }
 normfs-fs = { version = "0.4.8", path = "normfs-fs" }
+normfs = { version = "0.4.8", path = "normfs" }
 
 # Dev dependencies
 tempfile = "3.25"
