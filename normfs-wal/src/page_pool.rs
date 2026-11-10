@@ -1599,7 +1599,13 @@ impl PagePool {
 
         let first_entry_id = runs[0].0.first_entry_id;
         let last_entry_id = runs[runs.len() - 1].0.last_entry_id;
-        inner.stranded.insert(epoch, first_entry_id);
+        // Epochs restart at 0 when the writer is armed again, so an older debt
+        // can share this key; keep the lower first id rather than lose it.
+        inner
+            .stranded
+            .entry(epoch)
+            .and_modify(|first| *first = (*first).min(first_entry_id))
+            .or_insert(first_entry_id);
 
         Some(Stranded {
             runs,
