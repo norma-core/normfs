@@ -8,9 +8,10 @@
  * NormFS as a library: link libnormfs_capi.a (normfs_capi.lib on MSVC) and
  * call these from C or C++. Every call blocks until done. A handle may be used
  * from several threads at once; a data_dir open in another NormFS (a handle,
- * the Rust API or a server, in this process or another) is refused. Queues only grow: a record is appended and read back by
- * its id, and old records go only by the disk limit. Records not yet flushed
- * may be lost in a crash, and their ids handed out again.
+ * the Rust API or a server, in this process or another) is refused. Queues
+ * only grow: a record is appended and read back by its id, and old records go
+ * only by the disk limit. Records not yet flushed may be lost in a crash, and
+ * their ids handed out again.
  *
  * Calls return NORMFS_OK or an error code; normfs_last_error() has the text
  * for the last failed call on the calling thread.
