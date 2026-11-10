@@ -43,17 +43,19 @@ impl OrderedBuffer {
     /// Takes the parked entries that now follow the last written id, after
     /// `can_write` let the one they were waiting for through.
     pub fn release_in_order(&mut self) -> Vec<(UintN, Bytes, Placement)> {
-        let mut ready = Vec::new();
-        while self
-            .pending
-            .first()
-            .is_some_and(|(id, _, _)| self.check_can_write(id))
-        {
-            let entry = self.pending.remove(0);
-            self.last_written_id = Some(entry.0.clone());
-            ready.push(entry);
+        let mut run = 0;
+        let mut last = self.last_written_id.clone();
+        for (id, _, _) in &self.pending {
+            if !last.as_ref().map_or(id.is_zero(), |l| *id == l.increment()) {
+                break;
+            }
+            last = Some(id.clone());
+            run += 1;
         }
-        ready
+        if run > 0 {
+            self.last_written_id = last;
+        }
+        self.pending.drain(..run).collect()
     }
 
     pub fn wait_for_order(
