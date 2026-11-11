@@ -1071,6 +1071,8 @@ impl NormFS {
         };
 
         if queue_exists && has_writer {
+            // A start cancelled after its writer registered never opened appends.
+            self.mem.accept_appends(queue).await;
             return Ok(());
         }
 

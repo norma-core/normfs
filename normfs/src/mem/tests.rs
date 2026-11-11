@@ -1401,3 +1401,24 @@ async fn a_held_start_waits_for_the_append_in_flight() {
     assert!(parked.await.unwrap().is_some());
     held.await.unwrap();
 }
+
+#[tokio::test]
+async fn a_start_cancelled_after_its_writer_registered_is_repaired_on_retry() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let fs = crate::NormFS::new(
+        temp.path().to_path_buf(),
+        crate::NormFsSettings::all_active(),
+    )
+    .await
+    .unwrap();
+    let queue = fs.resolve("cancelled");
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    // Where a start cancelled while waiting to open appends leaves the queue.
+    let q = fs.mem.queues.read().unwrap().get(&queue).cloned().unwrap();
+    q.set_accepting(false).await;
+
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    fs.enqueue(&queue, Bytes::from_static(b"after retry"))
+        .await
+        .unwrap();
+}

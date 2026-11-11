@@ -1266,7 +1266,8 @@ impl MemStore {
 
     pub async fn accept_appends(&self, queue: &QueueId) {
         let q = self.queues.read().unwrap().get(queue).cloned();
-        if let Some(q) = q {
+        // Checked first, so a writer's every call does not queue behind a parked append.
+        if let Some(q) = q.filter(|q| !q.accepting.load(Ordering::Acquire)) {
             q.set_accepting(true).await;
         }
     }
