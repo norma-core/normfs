@@ -1196,6 +1196,31 @@ async fn a_stranded_tail_outlives_the_pages_it_came_from() {
     assert!(pool.is_fully_durable());
 }
 
+#[tokio::test]
+async fn a_renumbered_pool_owes_nothing_below_its_first_id() {
+    let pool = armed_pool();
+    let id = pool.next_entry_id() + 1_000_000;
+    pool.place(id, &RECORD).await.unwrap();
+    assert_eq!(pool.durable_before(), id);
+}
+
+#[tokio::test]
+async fn a_pool_owing_a_stranded_tail_is_not_renumbered() {
+    let pool = armed_pool();
+    let id0 = pool.next_entry_id();
+    pool.place(id0, &RECORD).await.unwrap();
+    pool.note_handed_over(id0);
+    assert!(pool.take_stranded(0).is_some());
+    pool.mark_durable(id0 + 1);
+
+    assert!(
+        pool.try_place_now(id0 + 1_000_000, &RECORD)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(pool.stranded_from(), Some(id0));
+}
+
 /// A failed write behind a durable prefix leaves the prefix durable.
 #[tokio::test]
 async fn a_stranded_run_counts_only_against_ids_above_its_start() {

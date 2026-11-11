@@ -179,8 +179,9 @@ struct normfs_wal_ring_seek_result {
  * is told the page's records are safe, and the telling is `min_essential_id`.
  * The caller's obligation, and the other half of the theorem, is that
  * `normfs_wal_ring_set_essential(r, m)` is called only once every entry with id
- * `< m` has been written and synced. In this tree that call has exactly one
- * source: the WAL file writer, after `fsync` returns.
+ * `< m` has been written and synced, or no entry below `m` is held or owed:
+ * a pool's first id when it is created or renumbered with nothing to lose,
+ * or, for a pool nothing drains to disk, past the records an eviction discards.
  *
  * Given that obligation, the C side of the theorem is already discharged, and
  * `normfs_wal_ring_reuse_is_safe` below is its statement. Reuse happens in one

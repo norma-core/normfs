@@ -623,38 +623,39 @@ impl Placer {
         data: Bytes,
         placement: normfs_wal::Placement,
     ) -> Result<(), Error> {
-        match self
+        let handed = match self
             .queue_settings
             .get_config(queue.as_str())
             .persist
             .drainer()
         {
-            Drainer::None => {
-                self.memory_pointers
-                    .mark(queue, entry_id)
-                    .map_err(Error::Io)?;
-                self.mem.ack(queue, entry_id);
-            }
-            Drainer::Wal => {
-                self.wal
-                    .enqueue_pooled(queue, entry_id.clone(), data, placement)?;
-            }
-            Drainer::Page => {}
+            Drainer::None => self
+                .memory_pointers
+                .mark(queue, entry_id)
+                .map_err(Error::Io)
+                .map(|()| self.mem.ack(queue, entry_id)),
+            Drainer::Wal => self
+                .wal
+                .enqueue_pooled(queue, entry_id.clone(), data, placement)
+                .map_err(Error::from),
+            Drainer::Page => Ok(()),
+        };
+        if let Err(e) = &handed {
+            log::warn!(target: "normfs", "queue '{}': record {entry_id} placed but not handed on: {e}", queue.short());
         }
-        Ok(())
+        handed
     }
 
     /// Waits for a page. `None` when the queue is closed or not started, or
     /// its drainer refused the record.
     pub(crate) async fn append(&self, queue: &QueueId, data: Bytes) -> Option<UintN> {
-        let (id, placement) = self.mem.enqueue_awaiting(queue, data.clone()).await?;
-        match self.after_place(queue, &id, data, placement) {
-            Ok(()) => Some(id),
-            Err(e) => {
-                log::warn!(target: "normfs", "queue '{}': record {id} placed but not handed on: {e}", queue.short());
-                None
-            }
-        }
+        self.mem
+            .enqueue_handed(queue, data, |id, data, placement| {
+                self.after_place(queue, id, data, placement)
+            })
+            .await
+            .ok()
+            .flatten()
     }
 }
 
@@ -1850,12 +1851,14 @@ impl NormFS {
 
         // Started first: the writer is handed this queue's page pool, so the
         // pool has to exist before it.
-        self.mem.start_queue(
-            queue,
-            last_entry_id.clone(),
-            mode.readonly,
-            queue_config.pool,
-        );
+        self.mem
+            .start_queue_held(
+                queue,
+                last_entry_id.clone(),
+                mode.readonly,
+                queue_config.pool,
+            )
+            .await;
 
         if !mode.readonly {
             if let Some(pool) = self.mem.pool(queue) {
@@ -1941,6 +1944,7 @@ impl NormFS {
                     );
                 }
             }
+            self.mem.accept_appends(queue).await;
 
             // Files a previous life in WAL mode left behind are migrated
             // either way; a store-mode queue has none of its own.
@@ -2029,10 +2033,17 @@ impl NormFS {
             self.page_size_for(queue),
             self.settings.max_memory_usage,
         )?;
-        let Some((entry_id, placement)) = self.mem.enqueue_awaiting(queue, data.clone()).await
+        let len = data.len();
+        let Some(entry_id) = self
+            .mem
+            .enqueue_handed(queue, data, |id, data, placement| {
+                self.after_place(queue, id, data, placement)
+            })
+            .await?
         else {
-            // A close won the race after the check above. The record took
-            // no id, so refusing it costs the sequence nothing.
+            // A close won the race after the check above, or no writer is up
+            // yet. The record took no id, so refusing it costs the sequence
+            // nothing.
             return Err(if self.mem.is_closed(queue) {
                 Error::QueueClosed
             } else {
@@ -2041,9 +2052,7 @@ impl NormFS {
         };
 
         log::debug!(target: "normfs", "Enqueuing entry - Queue: '{}', Entry ID: {}, Data size: {} bytes",
-            queue.short(), entry_id, data.len());
-
-        self.after_place(queue, &entry_id, data, placement)?;
+            queue.short(), entry_id, len);
 
         log::trace!(target: "normfs", "Entry enqueued successfully - Queue: '{}', Entry ID: {}", queue.short(), entry_id);
 
@@ -2088,20 +2097,19 @@ impl NormFS {
             self.settings.max_memory_usage,
         )?;
 
-        let (entry_id, placement) = match self
+        match self
             .mem
-            .try_enqueue(queue, data.clone(), within)
+            .try_enqueue_handed(queue, data, within, |id, data, placement| {
+                self.after_place(queue, id, data, placement)
+            })?
             .ok_or(Error::QueueNotFound)?
         {
-            mem::TryEnqueue::Placed(id, placement) => (id, placement),
-            mem::TryEnqueue::Full => return Err(Error::WouldBlock),
-            mem::TryEnqueue::Closed => return Err(Error::QueueClosed),
-            mem::TryEnqueue::NotInFile => return Err(Error::NotInFile),
-        };
-
-        self.after_place(queue, &entry_id, data, placement)?;
-
-        Ok(entry_id)
+            mem::TryEnqueue::Placed(id, _) => Ok(id),
+            mem::TryEnqueue::Full => Err(Error::WouldBlock),
+            mem::TryEnqueue::Closed => Err(Error::QueueClosed),
+            mem::TryEnqueue::NotInFile => Err(Error::NotInFile),
+            mem::TryEnqueue::NoWriter => Err(Error::QueueNotFound),
+        }
     }
 
     /// [`NormFS::enqueue`] that gives up after `wait` with [`Error::WouldBlock`].

@@ -65,6 +65,8 @@ pub enum TryEnqueue {
     Closed,
     /// The record would not join the file the caller saw. It took no id.
     NotInFile,
+    /// Nothing would hand the record on yet. It took no id.
+    NoWriter,
 }
 
 /// Result of a memory read operation
@@ -133,6 +135,9 @@ struct MemQueue {
     /// Set under the append gate when the queue closes, so it cannot flip
     /// mid-batch: a close waits its turn before refusing what follows.
     closed: std::sync::atomic::AtomicBool,
+    /// False until something can hand a record on: an id taken before then
+    /// reaches no writer.
+    accepting: std::sync::atomic::AtomicBool,
     /// The pages this queue started with. It can hold more or fewer now --
     /// the pool's own `page_count` is the live figure.
     pages: usize,
@@ -257,6 +262,7 @@ impl MemQueue {
         pages: usize,
         label: &QueueId,
         evicts: bool,
+        accepting: bool,
     ) -> Self {
         let page_size = arena.page_size();
         let first_entry_id = last_id
@@ -300,6 +306,7 @@ impl MemQueue {
         MemQueue {
             pages: pool.page_count(),
             closed: std::sync::atomic::AtomicBool::new(false),
+            accepting: std::sync::atomic::AtomicBool::new(accepting),
             inner: RwLock::new(Inner {
                 pool: Some(pool),
                 last_id,
@@ -387,11 +394,33 @@ impl MemQueue {
     /// the time the writer sees the entry, the bytes are already placed, and a
     /// rotation decided then would flush them into the file they were meant to
     /// come after.
+    #[cfg(test)]
     pub async fn enqueue_awaiting(&self, data: Bytes) -> Option<(UintN, Placement)> {
         // Held across the append and the charge together, so the pool sees ids
         // in order: it follows the caller's sequence rather than owning it.
         let _gate = self.append_gate.lock().await;
         self.enqueue_gated(data).await
+    }
+
+    /// Under the gate, as `closed` is, so a batch never sees it flip midway.
+    async fn set_accepting(&self, accepting: bool) {
+        let _gate = self.append_gate.lock().await;
+        self.accepting.store(accepting, Ordering::Release);
+    }
+
+    /// [`MemQueue::enqueue_awaiting`] that hands the record on before the gate
+    /// opens, so a close cannot take the writer away in between.
+    pub async fn enqueue_handed<E>(
+        &self,
+        data: Bytes,
+        hand: impl FnOnce(&UintN, Bytes, Placement) -> Result<(), E>,
+    ) -> Result<Option<UintN>, E> {
+        let _gate = self.append_gate.lock().await;
+        let Some((id, placement)) = self.enqueue_gated(data.clone()).await else {
+            return Ok(None);
+        };
+        hand(&id, data, placement)?;
+        Ok(Some(id))
     }
 
     /// Enqueues a batch, each record placed exactly as a single
@@ -423,7 +452,7 @@ impl MemQueue {
     async fn enqueue_gated(&self, data: Bytes) -> Option<(UintN, Placement)> {
         // Under the gate, so a refusal is final: the close that set this
         // waited for every in-flight append.
-        if self.closed.load(Ordering::Relaxed) {
+        if self.closed.load(Ordering::Relaxed) || !self.accepting.load(Ordering::Acquire) {
             return None;
         }
         // The id is not committed until the record is placed. This future can
@@ -516,12 +545,38 @@ impl MemQueue {
     ///
     /// `within` is a file as [`MemQueue::file_room`] numbered it: the record is
     /// placed only if it joins that file.
+    #[cfg(test)]
     pub fn try_enqueue(&self, data: Bytes, within: Option<FileMark>) -> TryEnqueue {
         let Ok(_gate) = self.append_gate.try_lock() else {
             return TryEnqueue::Full;
         };
+        self.try_enqueue_gated(data, within)
+    }
+
+    /// [`MemQueue::try_enqueue`] that hands the record on before the gate
+    /// opens, so a close cannot take the writer away in between.
+    pub fn try_enqueue_handed<E>(
+        &self,
+        data: Bytes,
+        within: Option<FileMark>,
+        hand: impl FnOnce(&UintN, Bytes, Placement) -> Result<(), E>,
+    ) -> Result<TryEnqueue, E> {
+        let Ok(_gate) = self.append_gate.try_lock() else {
+            return Ok(TryEnqueue::Full);
+        };
+        let outcome = self.try_enqueue_gated(data.clone(), within);
+        if let TryEnqueue::Placed(id, placement) = &outcome {
+            hand(id, data, *placement)?;
+        }
+        Ok(outcome)
+    }
+
+    fn try_enqueue_gated(&self, data: Bytes, within: Option<FileMark>) -> TryEnqueue {
         if self.closed.load(Ordering::Relaxed) {
             return TryEnqueue::Closed;
+        }
+        if !self.accepting.load(Ordering::Acquire) {
+            return TryEnqueue::NoWriter;
         }
 
         // As on the awaiting path: no id is taken unless the record is placed.
@@ -1168,6 +1223,7 @@ impl MemStore {
     /// reserve 16 MiB. Being wrong about it is cheap now: the range takes more
     /// of the arena on demand, so a queue promoted to writing takes what it
     /// needs on its first busy moment instead of holding it in advance.
+    #[cfg(test)]
     pub fn start_queue(
         &self,
         queue: &QueueId,
@@ -1190,6 +1246,40 @@ impl MemStore {
         pool: PoolKind,
         evicts: bool,
     ) {
+        self.start(queue, last_id, readonly, pool, evicts, true);
+    }
+
+    /// [`MemStore::start_queue`] that takes no append until
+    /// [`MemStore::accept_appends`]: the writer that hands records on is not
+    /// up yet.
+    pub async fn start_queue_held(
+        &self,
+        queue: &QueueId,
+        last_id: Option<UintN>,
+        readonly: bool,
+        pool: PoolKind,
+    ) {
+        if let Some(running) = self.start(queue, last_id, readonly, pool, false, false) {
+            running.set_accepting(false).await;
+        }
+    }
+
+    pub async fn accept_appends(&self, queue: &QueueId) {
+        let q = self.queues.read().unwrap().get(queue).cloned();
+        if let Some(q) = q {
+            q.set_accepting(true).await;
+        }
+    }
+
+    fn start(
+        &self,
+        queue: &QueueId,
+        last_id: Option<UintN>,
+        readonly: bool,
+        pool: PoolKind,
+        evicts: bool,
+        accepting: bool,
+    ) -> Option<Arc<MemQueue>> {
         let mut queues = self.queues.write().unwrap();
         if !queues.contains_key(queue) {
             let arena = match pool {
@@ -1215,6 +1305,7 @@ impl MemStore {
                 want,
                 queue,
                 evicts,
+                accepting,
             ));
             log::debug!(target: "normfs-mem",
                 "Starting queue '{}' with last_id: {:?}, {} pages ({} KiB) from the {:?} arena \
@@ -1222,6 +1313,9 @@ impl MemStore {
                 queue.short(), last_id, new_queue.pages, new_queue.pages * arena.page_size() / 1024,
                 pool, arena.free_pages(), arena.page_count());
             queues.insert(queue.clone(), new_queue);
+            None
+        } else {
+            queues.get(queue).cloned()
         }
     }
 
@@ -1261,6 +1355,7 @@ impl MemStore {
             Some(q) => {
                 let _gate = q.append_gate.lock().await;
                 q.closed.store(true, Ordering::Relaxed);
+                q.accepting.store(false, Ordering::Release);
                 q.inner.read().unwrap().last_id.clone()
             }
             None => None,
@@ -1317,6 +1412,7 @@ impl MemStore {
 
     /// `None` when the queue is not in the map (never started, or closed):
     /// the record took no id, so it needs no place in the sequence.
+    #[cfg(test)]
     pub async fn enqueue_awaiting(
         &self,
         queue: &QueueId,
@@ -1329,6 +1425,40 @@ impl MemStore {
         mem_queue?.enqueue_awaiting(data).await
     }
 
+    pub async fn enqueue_handed<E>(
+        &self,
+        queue: &QueueId,
+        data: Bytes,
+        hand: impl FnOnce(&UintN, Bytes, Placement) -> Result<(), E>,
+    ) -> Result<Option<UintN>, E> {
+        let mem_queue = {
+            let queues = self.queues.read().unwrap();
+            queues.get(queue).cloned()
+        };
+        match mem_queue {
+            Some(q) => q.enqueue_handed(data, hand).await,
+            None => Ok(None),
+        }
+    }
+
+    pub fn try_enqueue_handed<E>(
+        &self,
+        queue: &QueueId,
+        data: Bytes,
+        within: Option<FileMark>,
+        hand: impl FnOnce(&UintN, Bytes, Placement) -> Result<(), E>,
+    ) -> Result<Option<TryEnqueue>, E> {
+        let mem_queue = {
+            let queues = self.queues.read().unwrap();
+            queues.get(queue).cloned()
+        };
+        match mem_queue {
+            Some(q) => q.try_enqueue_handed(data, within, hand).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    #[cfg(test)]
     pub fn try_enqueue(
         &self,
         queue: &QueueId,

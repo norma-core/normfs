@@ -1348,3 +1348,56 @@ fn reading_subscriber_does_not_deadlock_with_follow_and_ack() {
         );
     }
 }
+
+#[tokio::test]
+async fn a_held_start_of_a_queue_already_running_holds_its_appends() {
+    let mem = Arc::new(mem_store(1024 * 1024));
+    let queue = QueueIdResolver::new(TEST_INSTANCE_ID).resolve("held");
+    mem.start_queue(&queue, None, false, PoolKind::Active);
+    mem.start_queue_held(&queue, None, false, PoolKind::Active)
+        .await;
+    assert!(mem
+        .enqueue_awaiting(&queue, Bytes::from_static(b"early"))
+        .await
+        .is_none());
+}
+
+#[tokio::test]
+async fn a_held_start_waits_for_the_append_in_flight() {
+    let mem = Arc::new(mem_store(1024 * 1024));
+    let queue = QueueIdResolver::new(TEST_INSTANCE_ID).resolve("inflight");
+    mem.start_queue(&queue, None, false, PoolKind::Active);
+    let pool = mem.pool(&queue).unwrap();
+    pool.set_drainer();
+    pool.arm_file_fill(1 << 20, 16);
+    let wide = Bytes::from(vec![7u8; normfs_wal::max_record_len(TEST_PAGE_SIZE)]);
+    while tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        mem.enqueue_awaiting(&queue, wide.clone()),
+    )
+    .await
+    .is_ok()
+    {}
+
+    let parked = tokio::spawn({
+        let (mem, queue) = (mem.clone(), queue.clone());
+        async move { mem.enqueue_awaiting(&queue, wide).await }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let held = tokio::spawn({
+        let (mem, queue) = (mem.clone(), queue.clone());
+        async move {
+            mem.start_queue_held(&queue, None, false, PoolKind::Active)
+                .await
+        }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        !held.is_finished(),
+        "the hold must wait for the append gate"
+    );
+
+    pool.mark_durable(pool.next_entry_id());
+    assert!(parked.await.unwrap().is_some());
+    held.await.unwrap();
+}
