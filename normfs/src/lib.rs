@@ -2349,6 +2349,8 @@ impl NormFS {
         // Waits for the in-flight append: after this, everything accepted
         // is placed and nothing more can be.
         self.mem.begin_close(queue).await;
+        // A closing queue is not started further; a write finishes the close.
+        self.unfinished_starts.lock().unwrap().remove(queue);
 
         let drainer = self.persist_for(queue).drainer();
         match drainer {
@@ -2380,7 +2382,6 @@ impl NormFS {
         self.memory_pointers.settle_landed_queue(queue);
         let last_id = self.mem.closed_last_id(queue);
         self.mem.close_queue(queue);
-        self.unfinished_starts.lock().unwrap().remove(queue);
         self.events.emit(SystemEvent::QueueClosed {
             queue: queue.clone(),
             last_id,
