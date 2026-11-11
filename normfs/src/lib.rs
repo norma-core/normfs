@@ -113,7 +113,9 @@ pub struct NormFS {
 
 #[derive(Clone)]
 struct UnfinishedStart {
-    readonly: bool,
+    /// Set once the writer is up: a start stopped before that is finished as
+    /// a read, and a write starts it again.
+    writing: bool,
     file_id: UintN,
     last_id: Option<UintN>,
     migrating: bool,
@@ -1053,7 +1055,11 @@ impl NormFS {
         self.queue_closed_durably(queue).await;
 
         if self.mem.get_last_id(queue).is_some() {
-            return self.finish_start(queue).await;
+            // The queue is readable either way; the next ensure tries again.
+            if let Err(e) = self.finish_start(queue).await {
+                log::warn!(target: "normfs", "queue '{}': start not finished: {e}", queue.short());
+            }
+            return Ok(());
         }
 
         log::info!(target: "normfs", "Auto-starting queue '{}' in readonly mode for read request", queue.short());
@@ -1870,7 +1876,7 @@ impl NormFS {
         self.unfinished_starts.lock().unwrap().insert(
             queue.clone(),
             UnfinishedStart {
-                readonly: mode.readonly,
+                writing: false,
                 file_id: file_id.clone(),
                 last_id: last_entry_id.clone(),
                 migrating: false,
@@ -1972,6 +1978,7 @@ impl NormFS {
                     );
                 }
             }
+            self.unfinished(queue, |s| s.writing = true);
         }
 
         self.finish_start(queue).await
@@ -1986,11 +1993,11 @@ impl NormFS {
         let queue_config = self.get_config_for_queue(queue);
         let persist = queue_config.persist;
 
-        if !start.readonly {
+        if start.writing {
             self.mem.accept_appends(queue).await;
         }
 
-        if !start.readonly && !start.migrating {
+        if start.writing && !start.migrating {
             // Files a previous life in WAL mode left behind are migrated
             // either way; a store-mode queue has none of its own.
             let wal = self.wal.clone();
@@ -2061,7 +2068,7 @@ impl NormFS {
 
         log::info!(target: "normfs", "Queue '{}' started successfully, last_entry_id: {:?}", queue.short(), start.last_id);
         self.unfinished_starts.lock().unwrap().remove(queue);
-        self.report_started(queue, start.readonly, persist, start.last_id);
+        self.report_started(queue, !start.writing, persist, start.last_id);
 
         Ok(())
     }

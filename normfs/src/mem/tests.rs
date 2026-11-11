@@ -1440,6 +1440,39 @@ async fn a_start_cancelled_while_opening_appends_is_finished_on_retry() {
 }
 
 #[tokio::test]
+async fn a_read_does_not_open_appends_for_a_write_start_cancelled_before_its_writer() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let fs = Arc::new(
+        crate::NormFS::new(
+            temp.path().to_path_buf(),
+            crate::NormFsSettings::all_active(),
+        )
+        .await
+        .unwrap(),
+    );
+    let queue = fs.resolve("writerless");
+    let start = tokio::spawn({
+        let (fs, queue) = (fs.clone(), queue.clone());
+        async move { fs.ensure_queue_exists_for_write(&queue).await }
+    });
+    while fs.mem.get_last_id(&queue).is_none() {
+        tokio::task::yield_now().await;
+    }
+    start.abort();
+    assert!(start.await.unwrap_err().is_cancelled());
+    assert!(!fs.wal.has_writer(&queue).await);
+
+    fs.ensure_queue_exists_for_read(&queue).await.unwrap();
+    let refused = fs.enqueue(&queue, Bytes::from_static(b"no writer")).await;
+    assert!(matches!(refused, Err(crate::Error::QueueNotFound)));
+    assert_eq!(fs.mem.get_last_id(&queue), Some(None));
+
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    let id = fs.enqueue(&queue, Bytes::from_static(b"with writer")).await;
+    assert_eq!(id.unwrap(), UintN::from(0u64));
+}
+
+#[tokio::test]
 async fn a_start_that_failed_after_its_writer_registered_fails_again_on_retry() {
     let temp = tempfile::TempDir::new().unwrap();
     let settings = crate::NormFsSettings {
@@ -1457,6 +1490,7 @@ async fn a_start_that_failed_after_its_writer_registered_fails_again_on_retry() 
     assert!(fs.ensure_queue_exists_for_write(&queue).await.is_err());
     assert!(fs.store.has_page_writer(&queue));
     assert!(fs.ensure_queue_exists_for_write(&queue).await.is_err());
+    fs.ensure_queue_exists_for_read(&queue).await.unwrap();
 }
 
 #[tokio::test]
