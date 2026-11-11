@@ -391,8 +391,10 @@ struct Inner {
     /// The highest id the file writer has taken responsibility for, in order.
     /// `None` until it has taken any. Nothing above it may be written.
     handed_through: Option<u64>,
-    /// First id a retry still owes, per stranded file; keyed by generation too,
-    /// since epochs restart at 0 on every arming.
+    /// Per file whose closing flush did not land: the first id a retry still
+    /// owes it. The bytes are the retry's; this is only the debt, and it is
+    /// what stops a close certifying that everything accepted is on disk.
+    /// Keyed by generation too, since epochs restart at 0 on every arming.
     stranded: BTreeMap<(u64, u64), u64>,
 }
 
