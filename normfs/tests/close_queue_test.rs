@@ -677,3 +677,101 @@ async fn writes_after_close_has_begun_are_refused() {
     let refused = fs.try_enqueue(&queue, Bytes::from_static(b"late"));
     assert!(matches!(refused, Err(Error::Closing)), "got {refused:?}");
 }
+
+#[tokio::test]
+async fn an_append_no_writer_can_take_is_refused_without_an_id() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let fs = NormFS::new(temp.path().to_path_buf(), NormFsSettings::all_active())
+        .await
+        .unwrap();
+    let queue = fs.resolve("early");
+    fs.ensure_queue_exists_for_read(&queue).await.unwrap();
+    let refused = fs.enqueue(&queue, Bytes::from_static(b"early")).await;
+    assert!(
+        matches!(refused, Err(Error::QueueNotFound)),
+        "got {refused:?}"
+    );
+    let refused = fs.try_enqueue(&queue, Bytes::from_static(b"early"));
+    assert!(
+        matches!(refused, Err(Error::QueueNotFound)),
+        "got {refused:?}"
+    );
+    assert!(matches!(fs.get_last_id(&queue), Err(Error::QueueEmpty)));
+    fs.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_failed_reopen_does_not_leave_the_queue_closed_in_memory() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let fs = NormFS::new(temp.path().to_path_buf(), NormFsSettings::all_active())
+        .await
+        .unwrap();
+    let queue = fs.resolve("stuck");
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    fs.close_queue(&queue).await.unwrap();
+    let wal = queue.to_wal_dir(temp.path());
+    std::fs::remove_dir_all(&wal).unwrap();
+    std::fs::write(&wal, b"not a directory").unwrap();
+
+    assert!(fs.ensure_queue_exists_for_write(&queue).await.is_err());
+    assert!(!queue.to_fs_path(temp.path()).join("closed").exists());
+    let refused = fs.enqueue(&queue, Bytes::from_static(b"late")).await;
+    assert!(
+        matches!(refused, Err(Error::QueueNotFound)),
+        "got {refused:?}"
+    );
+    fs.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn appends_racing_a_reopen_are_refused_or_land() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let fs = std::sync::Arc::new(
+        NormFS::new(temp.path().to_path_buf(), NormFsSettings::all_active())
+            .await
+            .unwrap(),
+    );
+    let queue = fs.resolve("racing");
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    write_records(&fs, &queue, 2).await;
+    fs.close_queue(&queue).await.unwrap();
+
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let appender = {
+        let (fs, queue, stop) = (fs.clone(), queue.clone(), stop.clone());
+        std::thread::spawn(move || {
+            let mut accepted = Vec::new();
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                match fs.try_enqueue(&queue, Bytes::from_static(b"racer")) {
+                    Ok(id) => accepted.push(id),
+                    Err(Error::QueueClosed | Error::QueueNotFound | Error::WouldBlock) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok(accepted)
+        })
+    };
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let accepted = appender
+        .join()
+        .unwrap()
+        .expect("an append took an id and failed");
+
+    let last = fs
+        .enqueue(&queue, Bytes::from_static(b"last"))
+        .await
+        .unwrap();
+    assert_eq!(last, UintN::from(2 + accepted.len() as u64));
+    let last: u64 = last.to_string().parse().unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while !fs.is_durable_through(&queue, last) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "record {last} never landed"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    fs.close().await.unwrap();
+}

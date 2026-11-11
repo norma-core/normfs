@@ -1212,15 +1212,19 @@ impl PagePool {
                     }
                     None => {
                         // Renumbering discards everything held, so it is only
-                        // for a pool with nothing to lose: everything durable
-                        // and every held record written. Anything less waits
-                        // for the disk instead -- a record accepted and not yet
-                        // written must never be discarded to catch up.
-                        let nothing_to_lose = inner.ring.is_empty()
-                            || inner.ring.min_essential_id() >= inner.ring.next_entry_id();
+                        // for a pool with nothing to lose: everything durable,
+                        // every held record written, and no tail owed to a
+                        // retry. Anything less waits for the disk instead -- a
+                        // record accepted and not yet written must never be
+                        // discarded to catch up.
+                        let nothing_to_lose = inner.stranded.is_empty()
+                            && (inner.ring.is_empty()
+                                || inner.ring.min_essential_id() >= inner.ring.next_entry_id());
                         if !nothing_to_lose || !inner.ring.reinit(expected_id) {
                             return Ok(None);
                         }
+                        // Nothing below the new first id is held or owed.
+                        inner.ring.set_essential(expected_id);
                         inner.forget_pages();
                     }
                 }

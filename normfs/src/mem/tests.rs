@@ -1348,3 +1348,170 @@ fn reading_subscriber_does_not_deadlock_with_follow_and_ack() {
         );
     }
 }
+
+#[tokio::test]
+async fn a_held_start_of_a_queue_already_running_holds_its_appends() {
+    let mem = Arc::new(mem_store(1024 * 1024));
+    let queue = QueueIdResolver::new(TEST_INSTANCE_ID).resolve("held");
+    mem.start_queue(&queue, None, false, PoolKind::Active);
+    mem.start_queue_held(&queue, None, false, PoolKind::Active)
+        .await;
+    assert!(mem
+        .enqueue_awaiting(&queue, Bytes::from_static(b"early"))
+        .await
+        .is_none());
+}
+
+#[tokio::test]
+async fn a_held_start_waits_for_the_append_in_flight() {
+    let mem = Arc::new(mem_store(1024 * 1024));
+    let queue = QueueIdResolver::new(TEST_INSTANCE_ID).resolve("inflight");
+    mem.start_queue(&queue, None, false, PoolKind::Active);
+    let pool = mem.pool(&queue).unwrap();
+    pool.set_drainer();
+    pool.arm_file_fill(1 << 20, 16);
+    let wide = Bytes::from(vec![7u8; normfs_wal::max_record_len(TEST_PAGE_SIZE)]);
+    while tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        mem.enqueue_awaiting(&queue, wide.clone()),
+    )
+    .await
+    .is_ok()
+    {}
+
+    let parked = tokio::spawn({
+        let (mem, queue) = (mem.clone(), queue.clone());
+        async move { mem.enqueue_awaiting(&queue, wide).await }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let held = tokio::spawn({
+        let (mem, queue) = (mem.clone(), queue.clone());
+        async move {
+            mem.start_queue_held(&queue, None, false, PoolKind::Active)
+                .await
+        }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        !held.is_finished(),
+        "the hold must wait for the append gate"
+    );
+
+    pool.mark_durable(pool.next_entry_id());
+    assert!(parked.await.unwrap().is_some());
+    held.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_start_cancelled_while_opening_appends_is_finished_on_retry() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let fs = Arc::new(
+        crate::NormFS::new(
+            temp.path().to_path_buf(),
+            crate::NormFsSettings::all_active(),
+        )
+        .await
+        .unwrap(),
+    );
+    let queue = fs.resolve("cancelled");
+    let start = tokio::spawn({
+        let (fs, queue) = (fs.clone(), queue.clone());
+        async move { fs.ensure_queue_exists_for_write(&queue).await }
+    });
+    // Taken as soon as the queue is in memory, so the start parks opening appends.
+    let q = loop {
+        let q = fs.mem.queues.read().unwrap().get(&queue).cloned();
+        match q {
+            Some(q) => break q,
+            None => tokio::task::yield_now().await,
+        }
+    };
+    let gate = q.append_gate.lock().await;
+    while !fs.wal.has_writer(&queue).await {
+        tokio::task::yield_now().await;
+    }
+    start.abort();
+    assert!(start.await.unwrap_err().is_cancelled());
+    drop(gate);
+
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    let id = fs.enqueue(&queue, Bytes::from_static(b"after retry")).await;
+    assert_eq!(id.unwrap(), UintN::from(0u64));
+}
+
+#[tokio::test]
+async fn a_read_does_not_open_appends_for_a_write_start_cancelled_before_its_writer() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let fs = Arc::new(
+        crate::NormFS::new(
+            temp.path().to_path_buf(),
+            crate::NormFsSettings::all_active(),
+        )
+        .await
+        .unwrap(),
+    );
+    let queue = fs.resolve("writerless");
+    let start = tokio::spawn({
+        let (fs, queue) = (fs.clone(), queue.clone());
+        async move { fs.ensure_queue_exists_for_write(&queue).await }
+    });
+    while fs.mem.get_last_id(&queue).is_none() {
+        tokio::task::yield_now().await;
+    }
+    start.abort();
+    assert!(start.await.unwrap_err().is_cancelled());
+    assert!(!fs.wal.has_writer(&queue).await);
+
+    fs.ensure_queue_exists_for_read(&queue).await.unwrap();
+    let refused = fs.enqueue(&queue, Bytes::from_static(b"no writer")).await;
+    assert!(matches!(refused, Err(crate::Error::QueueNotFound)));
+    assert_eq!(fs.mem.get_last_id(&queue), Some(None));
+
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    let id = fs.enqueue(&queue, Bytes::from_static(b"with writer")).await;
+    assert_eq!(id.unwrap(), UintN::from(0u64));
+}
+
+#[tokio::test]
+async fn a_start_that_failed_after_its_writer_registered_fails_again_on_retry() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let settings = crate::NormFsSettings {
+        system_queue: false,
+        // Below the monitor's minimum: the start fails at its last step.
+        max_disk_usage_per_queue: Some(1),
+        queue_settings: crate::QueueSettings::all_active()
+            .with_default_persist(crate::Persist::STORE),
+        ..crate::NormFsSettings::all_active()
+    };
+    let fs = crate::NormFS::new(temp.path().to_path_buf(), settings)
+        .await
+        .unwrap();
+    let queue = fs.resolve("unmonitored");
+    assert!(fs.ensure_queue_exists_for_write(&queue).await.is_err());
+    assert!(fs.store.has_page_writer(&queue));
+    assert!(fs.ensure_queue_exists_for_write(&queue).await.is_err());
+    fs.ensure_queue_exists_for_read(&queue).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_write_after_a_close_stopped_partway_finishes_it_and_reopens() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let fs = crate::NormFS::new(
+        temp.path().to_path_buf(),
+        crate::NormFsSettings::all_active(),
+    )
+    .await
+    .unwrap();
+    let queue = fs.resolve("half-closed");
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    fs.enqueue(&queue, Bytes::from_static(b"before"))
+        .await
+        .unwrap();
+    // Where close_queue stops when cancelled while closing the writer.
+    fs.mem.begin_close(&queue).await;
+    fs.wal.close_writer(&queue).await.unwrap();
+
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    let id = fs.enqueue(&queue, Bytes::from_static(b"after")).await;
+    assert_eq!(id.unwrap(), UintN::from(1u64));
+}

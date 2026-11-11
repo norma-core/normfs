@@ -106,6 +106,19 @@ pub struct NormFS {
     events: EventSink,
     system_writer: system::Writer,
     writes: WriteGate,
+    /// Starts that stopped partway, by cancellation or error, with what a
+    /// retry needs to finish them.
+    unfinished_starts: std::sync::Mutex<HashMap<QueueId, UnfinishedStart>>,
+}
+
+#[derive(Clone)]
+struct UnfinishedStart {
+    /// Set once the writer is up: a start stopped before that is finished as
+    /// a read, and a write starts it again.
+    writing: bool,
+    file_id: UintN,
+    last_id: Option<UintN>,
+    migrating: bool,
 }
 
 /// The pointer flusher of an instance `new` has not finished building: a
@@ -624,38 +637,39 @@ impl Placer {
         data: Bytes,
         placement: normfs_wal::Placement,
     ) -> Result<(), Error> {
-        match self
+        let handed = match self
             .queue_settings
             .get_config(queue.as_str())
             .persist
             .drainer()
         {
-            Drainer::None => {
-                self.memory_pointers
-                    .mark(queue, entry_id)
-                    .map_err(Error::Io)?;
-                self.mem.ack(queue, entry_id);
-            }
-            Drainer::Wal => {
-                self.wal
-                    .enqueue_pooled(queue, entry_id.clone(), data, placement)?;
-            }
-            Drainer::Page => {}
+            Drainer::None => self
+                .memory_pointers
+                .mark(queue, entry_id)
+                .map_err(Error::Io)
+                .map(|()| self.mem.ack(queue, entry_id)),
+            Drainer::Wal => self
+                .wal
+                .enqueue_pooled(queue, entry_id.clone(), data, placement)
+                .map_err(Error::from),
+            Drainer::Page => Ok(()),
+        };
+        if let Err(e) = &handed {
+            log::warn!(target: "normfs", "queue '{}': record {entry_id} placed but not handed on: {e}", queue.short());
         }
-        Ok(())
+        handed
     }
 
     /// Waits for a page. `None` when the queue is closed or not started, or
     /// its drainer refused the record.
     pub(crate) async fn append(&self, queue: &QueueId, data: Bytes) -> Option<UintN> {
-        let (id, placement) = self.mem.enqueue_awaiting(queue, data.clone()).await?;
-        match self.after_place(queue, &id, data, placement) {
-            Ok(()) => Some(id),
-            Err(e) => {
-                log::warn!(target: "normfs", "queue '{}': record {id} placed but not handed on: {e}", queue.short());
-                None
-            }
-        }
+        self.mem
+            .enqueue_handed(queue, data, |id, data, placement| {
+                self.after_place(queue, id, data, placement)
+            })
+            .await
+            .ok()
+            .flatten()
     }
 }
 
@@ -960,6 +974,7 @@ impl NormFS {
             events,
             system_writer: system::Writer::idle(),
             writes: WriteGate::default(),
+            unfinished_starts: std::sync::Mutex::new(HashMap::new()),
         };
         if normfs.settings.system_queue {
             let queue = &normfs.system_queue;
@@ -1041,6 +1056,10 @@ impl NormFS {
         self.queue_closed_durably(queue).await;
 
         if self.mem.get_last_id(queue).is_some() {
+            // The queue is readable either way; the next ensure tries again.
+            if let Err(e) = self.finish_start(queue).await {
+                log::warn!(target: "normfs", "queue '{}': start not finished: {e}", queue.short());
+            }
             return Ok(());
         }
 
@@ -1060,6 +1079,10 @@ impl NormFS {
         }
 
         if self.queue_closed_durably(queue).await {
+            // Reopened as it is, the half-closed queue would refuse every write.
+            if self.mem.close_unfinished(queue) {
+                self.close_locked(queue).await?;
+            }
             self.reopen_queue(queue).await?;
         }
 
@@ -1071,7 +1094,7 @@ impl NormFS {
         };
 
         if queue_exists && has_writer {
-            return Ok(());
+            return self.finish_start(queue).await;
         }
 
         if queue_exists && !has_writer {
@@ -1849,14 +1872,28 @@ impl NormFS {
         log::info!(target: "normfs", "  - Next entry will have ID: {}", header.num_entries_before);
         log::info!(target: "normfs", "----------------------------------------");
 
+        // A start that stops past here leaves the queue in memory; a retry
+        // that finds it there finishes the start from this record.
+        self.unfinished_starts.lock().unwrap().insert(
+            queue.clone(),
+            UnfinishedStart {
+                writing: false,
+                file_id: file_id.clone(),
+                last_id: last_entry_id.clone(),
+                migrating: false,
+            },
+        );
+
         // Started first: the writer is handed this queue's page pool, so the
         // pool has to exist before it.
-        self.mem.start_queue(
-            queue,
-            last_entry_id.clone(),
-            mode.readonly,
-            queue_config.pool,
-        );
+        self.mem
+            .start_queue_held(
+                queue,
+                last_entry_id.clone(),
+                mode.readonly,
+                queue_config.pool,
+            )
+            .await;
 
         if !mode.readonly {
             if let Some(pool) = self.mem.pool(queue) {
@@ -1942,14 +1979,33 @@ impl NormFS {
                     );
                 }
             }
+            self.unfinished(queue, |s| s.writing = true);
+        }
 
+        self.finish_start(queue).await
+    }
+
+    /// The part of a start after the queue is in memory. Every step but the
+    /// migration spawn is safe to repeat; that one is marked once done.
+    async fn finish_start(&self, queue: &QueueId) -> Result<(), Error> {
+        let Some(start) = self.unfinished_starts.lock().unwrap().get(queue).cloned() else {
+            return Ok(());
+        };
+        let queue_config = self.get_config_for_queue(queue);
+        let persist = queue_config.persist;
+
+        if start.writing {
+            self.mem.accept_appends(queue).await;
+        }
+
+        if start.writing && !start.migrating {
             // Files a previous life in WAL mode left behind are migrated
             // either way; a store-mode queue has none of its own.
             let wal = self.wal.clone();
             let queue_clone = queue.clone();
-            let file_id_clone = file_id.clone();
-            let compression_type = wal_settings.compression_type;
-            let encryption_type = wal_settings.encryption_type;
+            let file_id_clone = start.file_id.clone();
+            let compression_type = queue_config.compression_type;
+            let encryption_type = queue_config.encryption_type;
 
             // Retried: an old file a failed listing misses is never migrated.
             // A queue's pool lives as long as that opening of the queue, so
@@ -1985,6 +2041,7 @@ impl NormFS {
                     }
                 }
             });
+            self.unfinished(queue, |s| s.migrating = true);
         }
 
         let offloader = match (&self.offloaders, persist.store && persist.cloud) {
@@ -2010,10 +2067,17 @@ impl NormFS {
             log::info!(target: "normfs", "Added queue '{}' to disk monitor with max_size: {}", queue.short(), max_size);
         }
 
-        log::info!(target: "normfs", "Queue '{}' started successfully, last_entry_id: {:?}", queue.short(), last_entry_id);
-        self.report_started(queue, mode.readonly, persist, last_entry_id);
+        log::info!(target: "normfs", "Queue '{}' started successfully, last_entry_id: {:?}", queue.short(), start.last_id);
+        self.unfinished_starts.lock().unwrap().remove(queue);
+        self.report_started(queue, !start.writing, persist, start.last_id);
 
         Ok(())
+    }
+
+    fn unfinished(&self, queue: &QueueId, f: impl FnOnce(&mut UnfinishedStart)) {
+        if let Some(s) = self.unfinished_starts.lock().unwrap().get_mut(queue) {
+            f(s);
+        }
     }
 
     /// Accepts a record, waiting if every page is occupied by records that are
@@ -2030,10 +2094,17 @@ impl NormFS {
             self.page_size_for(queue),
             self.settings.max_memory_usage,
         )?;
-        let Some((entry_id, placement)) = self.mem.enqueue_awaiting(queue, data.clone()).await
+        let len = data.len();
+        let Some(entry_id) = self
+            .mem
+            .enqueue_handed(queue, data, |id, data, placement| {
+                self.after_place(queue, id, data, placement)
+            })
+            .await?
         else {
-            // A close won the race after the check above. The record took
-            // no id, so refusing it costs the sequence nothing.
+            // A close won the race after the check above, or no writer is up
+            // yet. The record took no id, so refusing it costs the sequence
+            // nothing.
             return Err(if self.mem.is_closed(queue) {
                 Error::QueueClosed
             } else {
@@ -2042,9 +2113,7 @@ impl NormFS {
         };
 
         log::debug!(target: "normfs", "Enqueuing entry - Queue: '{}', Entry ID: {}, Data size: {} bytes",
-            queue.short(), entry_id, data.len());
-
-        self.after_place(queue, &entry_id, data, placement)?;
+            queue.short(), entry_id, len);
 
         log::trace!(target: "normfs", "Entry enqueued successfully - Queue: '{}', Entry ID: {}", queue.short(), entry_id);
 
@@ -2089,20 +2158,19 @@ impl NormFS {
             self.settings.max_memory_usage,
         )?;
 
-        let (entry_id, placement) = match self
+        match self
             .mem
-            .try_enqueue(queue, data.clone(), within)
+            .try_enqueue_handed(queue, data, within, |id, data, placement| {
+                self.after_place(queue, id, data, placement)
+            })?
             .ok_or(Error::QueueNotFound)?
         {
-            mem::TryEnqueue::Placed(id, placement) => (id, placement),
-            mem::TryEnqueue::Full => return Err(Error::WouldBlock),
-            mem::TryEnqueue::Closed => return Err(Error::QueueClosed),
-            mem::TryEnqueue::NotInFile => return Err(Error::NotInFile),
-        };
-
-        self.after_place(queue, &entry_id, data, placement)?;
-
-        Ok(entry_id)
+            mem::TryEnqueue::Placed(id, _) => Ok(id),
+            mem::TryEnqueue::Full => Err(Error::WouldBlock),
+            mem::TryEnqueue::Closed => Err(Error::QueueClosed),
+            mem::TryEnqueue::NotInFile => Err(Error::NotInFile),
+            mem::TryEnqueue::NoWriter => Err(Error::QueueNotFound),
+        }
     }
 
     /// [`NormFS::enqueue`] that gives up after `wait` with [`Error::WouldBlock`].
@@ -2253,7 +2321,10 @@ impl NormFS {
         let _write = self.writes.enter()?;
         let queue_lock = self.queue_init_lock(queue);
         let _guard = queue_lock.lock().await;
+        self.close_locked(queue).await
+    }
 
+    async fn close_locked(&self, queue: &QueueId) -> Result<(), Error> {
         log::info!(target: "normfs", "Closing queue '{}'", queue.short());
         let dir = queue.to_fs_path(&self.path);
 
@@ -2279,6 +2350,8 @@ impl NormFS {
         // Waits for the in-flight append: after this, everything accepted
         // is placed and nothing more can be.
         self.mem.begin_close(queue).await;
+        // A closing queue is not started further; a write finishes the close.
+        self.unfinished_starts.lock().unwrap().remove(queue);
 
         let drainer = self.persist_for(queue).drainer();
         match drainer {
