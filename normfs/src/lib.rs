@@ -106,6 +106,17 @@ pub struct NormFS {
     events: EventSink,
     system_writer: system::Writer,
     writes: WriteGate,
+    /// Starts that stopped partway, by cancellation or error, with what a
+    /// retry needs to finish them.
+    unfinished_starts: std::sync::Mutex<HashMap<QueueId, UnfinishedStart>>,
+}
+
+#[derive(Clone)]
+struct UnfinishedStart {
+    readonly: bool,
+    file_id: UintN,
+    last_id: Option<UintN>,
+    migrating: bool,
 }
 
 /// The pointer flusher of an instance `new` has not finished building: a
@@ -960,6 +971,7 @@ impl NormFS {
             events,
             system_writer: system::Writer::idle(),
             writes: WriteGate::default(),
+            unfinished_starts: std::sync::Mutex::new(HashMap::new()),
         };
         if normfs.settings.system_queue {
             let queue = &normfs.system_queue;
@@ -1041,7 +1053,7 @@ impl NormFS {
         self.queue_closed_durably(queue).await;
 
         if self.mem.get_last_id(queue).is_some() {
-            return Ok(());
+            return self.finish_start(queue).await;
         }
 
         log::info!(target: "normfs", "Auto-starting queue '{}' in readonly mode for read request", queue.short());
@@ -1060,6 +1072,10 @@ impl NormFS {
         }
 
         if self.queue_closed_durably(queue).await {
+            // Reopened as it is, the half-closed queue would refuse every write.
+            if self.mem.close_unfinished(queue) {
+                self.close_locked(queue).await?;
+            }
             self.reopen_queue(queue).await?;
         }
 
@@ -1071,9 +1087,7 @@ impl NormFS {
         };
 
         if queue_exists && has_writer {
-            // A start cancelled after its writer registered never opened appends.
-            self.mem.accept_appends(queue).await;
-            return Ok(());
+            return self.finish_start(queue).await;
         }
 
         if queue_exists && !has_writer {
@@ -1851,6 +1865,18 @@ impl NormFS {
         log::info!(target: "normfs", "  - Next entry will have ID: {}", header.num_entries_before);
         log::info!(target: "normfs", "----------------------------------------");
 
+        // A start that stops past here leaves the queue in memory; a retry
+        // that finds it there finishes the start from this record.
+        self.unfinished_starts.lock().unwrap().insert(
+            queue.clone(),
+            UnfinishedStart {
+                readonly: mode.readonly,
+                file_id: file_id.clone(),
+                last_id: last_entry_id.clone(),
+                migrating: false,
+            },
+        );
+
         // Started first: the writer is handed this queue's page pool, so the
         // pool has to exist before it.
         self.mem
@@ -1946,15 +1972,32 @@ impl NormFS {
                     );
                 }
             }
-            self.mem.accept_appends(queue).await;
+        }
 
+        self.finish_start(queue).await
+    }
+
+    /// The part of a start after the queue is in memory. Every step but the
+    /// migration spawn is safe to repeat; that one is marked once done.
+    async fn finish_start(&self, queue: &QueueId) -> Result<(), Error> {
+        let Some(start) = self.unfinished_starts.lock().unwrap().get(queue).cloned() else {
+            return Ok(());
+        };
+        let queue_config = self.get_config_for_queue(queue);
+        let persist = queue_config.persist;
+
+        if !start.readonly {
+            self.mem.accept_appends(queue).await;
+        }
+
+        if !start.readonly && !start.migrating {
             // Files a previous life in WAL mode left behind are migrated
             // either way; a store-mode queue has none of its own.
             let wal = self.wal.clone();
             let queue_clone = queue.clone();
-            let file_id_clone = file_id.clone();
-            let compression_type = wal_settings.compression_type;
-            let encryption_type = wal_settings.encryption_type;
+            let file_id_clone = start.file_id.clone();
+            let compression_type = queue_config.compression_type;
+            let encryption_type = queue_config.encryption_type;
 
             // Retried: an old file a failed listing misses is never migrated.
             // A queue's pool lives as long as that opening of the queue, so
@@ -1990,6 +2033,7 @@ impl NormFS {
                     }
                 }
             });
+            self.unfinished(queue, |s| s.migrating = true);
         }
 
         let offloader = match (&self.offloaders, persist.store && persist.cloud) {
@@ -2015,10 +2059,17 @@ impl NormFS {
             log::info!(target: "normfs", "Added queue '{}' to disk monitor with max_size: {}", queue.short(), max_size);
         }
 
-        log::info!(target: "normfs", "Queue '{}' started successfully, last_entry_id: {:?}", queue.short(), last_entry_id);
-        self.report_started(queue, mode.readonly, persist, last_entry_id);
+        log::info!(target: "normfs", "Queue '{}' started successfully, last_entry_id: {:?}", queue.short(), start.last_id);
+        self.unfinished_starts.lock().unwrap().remove(queue);
+        self.report_started(queue, start.readonly, persist, start.last_id);
 
         Ok(())
+    }
+
+    fn unfinished(&self, queue: &QueueId, f: impl FnOnce(&mut UnfinishedStart)) {
+        if let Some(s) = self.unfinished_starts.lock().unwrap().get_mut(queue) {
+            f(s);
+        }
     }
 
     /// Accepts a record, waiting if every page is occupied by records that are
@@ -2262,7 +2313,10 @@ impl NormFS {
         let _write = self.writes.enter()?;
         let queue_lock = self.queue_init_lock(queue);
         let _guard = queue_lock.lock().await;
+        self.close_locked(queue).await
+    }
 
+    async fn close_locked(&self, queue: &QueueId) -> Result<(), Error> {
         log::info!(target: "normfs", "Closing queue '{}'", queue.short());
         let dir = queue.to_fs_path(&self.path);
 
@@ -2319,6 +2373,7 @@ impl NormFS {
         self.memory_pointers.settle_landed_queue(queue);
         let last_id = self.mem.closed_last_id(queue);
         self.mem.close_queue(queue);
+        self.unfinished_starts.lock().unwrap().remove(queue);
         self.events.emit(SystemEvent::QueueClosed {
             queue: queue.clone(),
             last_id,

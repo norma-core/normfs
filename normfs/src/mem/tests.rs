@@ -1403,7 +1403,64 @@ async fn a_held_start_waits_for_the_append_in_flight() {
 }
 
 #[tokio::test]
-async fn a_start_cancelled_after_its_writer_registered_is_repaired_on_retry() {
+async fn a_start_cancelled_while_opening_appends_is_finished_on_retry() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let fs = Arc::new(
+        crate::NormFS::new(
+            temp.path().to_path_buf(),
+            crate::NormFsSettings::all_active(),
+        )
+        .await
+        .unwrap(),
+    );
+    let queue = fs.resolve("cancelled");
+    let start = tokio::spawn({
+        let (fs, queue) = (fs.clone(), queue.clone());
+        async move { fs.ensure_queue_exists_for_write(&queue).await }
+    });
+    // Taken as soon as the queue is in memory, so the start parks opening appends.
+    let q = loop {
+        let q = fs.mem.queues.read().unwrap().get(&queue).cloned();
+        match q {
+            Some(q) => break q,
+            None => tokio::task::yield_now().await,
+        }
+    };
+    let gate = q.append_gate.lock().await;
+    while !fs.wal.has_writer(&queue).await {
+        tokio::task::yield_now().await;
+    }
+    start.abort();
+    assert!(start.await.unwrap_err().is_cancelled());
+    drop(gate);
+
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    let id = fs.enqueue(&queue, Bytes::from_static(b"after retry")).await;
+    assert_eq!(id.unwrap(), UintN::from(0u64));
+}
+
+#[tokio::test]
+async fn a_start_that_failed_after_its_writer_registered_fails_again_on_retry() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let settings = crate::NormFsSettings {
+        system_queue: false,
+        // Below the monitor's minimum: the start fails at its last step.
+        max_disk_usage_per_queue: Some(1),
+        queue_settings: crate::QueueSettings::all_active()
+            .with_default_persist(crate::Persist::STORE),
+        ..crate::NormFsSettings::all_active()
+    };
+    let fs = crate::NormFS::new(temp.path().to_path_buf(), settings)
+        .await
+        .unwrap();
+    let queue = fs.resolve("unmonitored");
+    assert!(fs.ensure_queue_exists_for_write(&queue).await.is_err());
+    assert!(fs.store.has_page_writer(&queue));
+    assert!(fs.ensure_queue_exists_for_write(&queue).await.is_err());
+}
+
+#[tokio::test]
+async fn a_write_after_a_close_stopped_partway_finishes_it_and_reopens() {
     let temp = tempfile::TempDir::new().unwrap();
     let fs = crate::NormFS::new(
         temp.path().to_path_buf(),
@@ -1411,14 +1468,16 @@ async fn a_start_cancelled_after_its_writer_registered_is_repaired_on_retry() {
     )
     .await
     .unwrap();
-    let queue = fs.resolve("cancelled");
+    let queue = fs.resolve("half-closed");
     fs.ensure_queue_exists_for_write(&queue).await.unwrap();
-    // Where a start cancelled while waiting to open appends leaves the queue.
-    let q = fs.mem.queues.read().unwrap().get(&queue).cloned().unwrap();
-    q.set_accepting(false).await;
-
-    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
-    fs.enqueue(&queue, Bytes::from_static(b"after retry"))
+    fs.enqueue(&queue, Bytes::from_static(b"before"))
         .await
         .unwrap();
+    // Where close_queue stops when cancelled while closing the writer.
+    fs.mem.begin_close(&queue).await;
+    fs.wal.close_writer(&queue).await.unwrap();
+
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    let id = fs.enqueue(&queue, Bytes::from_static(b"after")).await;
+    assert_eq!(id.unwrap(), UintN::from(1u64));
 }

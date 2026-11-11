@@ -1332,6 +1332,14 @@ impl MemStore {
         self.closed.read().unwrap().contains_key(queue)
     }
 
+    /// A close began on this opening of the queue but has not removed it.
+    pub fn close_unfinished(&self, queue: &QueueId) -> bool {
+        let queues = self.queues.read().unwrap();
+        queues
+            .get(queue)
+            .is_some_and(|q| q.closed.load(Ordering::Relaxed))
+    }
+
     pub fn reopen(&self, queue: &QueueId) {
         self.closed.write().unwrap().remove(queue);
     }
