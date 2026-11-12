@@ -220,6 +220,12 @@ async fn a_starved_read_logs_its_wait() {
         assert!(out.recv().await.is_none());
         let (n, total) = probe.waits();
         assert_eq!(n, 2, "compress={compress}");
+        assert_eq!(
+            probe.line().contains(" compress="),
+            compress,
+            "{}",
+            probe.line()
+        );
         assert!(total >= std::time::Duration::from_millis(50), "{total:?}");
     }
 }

@@ -109,8 +109,9 @@ pub(crate) struct State {
     slots: VecDeque<Slot>,
     waiting: Option<Instant>,
     following: bool,
-    /// The entry count as each report saw it, to count the window's entries.
-    marks: VecDeque<(u64, u64)>,
+    /// The entry count and compression time as each report saw them, to
+    /// count the window's share of both.
+    marks: VecDeque<(u64, u64, u64)>,
     /// Writes still running, by start.
     open: Vec<Instant>,
 }
@@ -189,26 +190,40 @@ impl State {
 
     /// Entries since the window began, from the count each report saw; a
     /// report every period keeps it within one period of exact.
+    #[cfg(test)]
     pub(crate) fn entries(&mut self, total: u64, now: Instant) -> u64 {
+        self.in_window((total, 0), now).0
+    }
+
+    /// Entries and compression time since the window began, from the totals
+    /// each report saw; a report every period keeps them within one period.
+    fn in_window(&mut self, (entries, compress_us): (u64, u64), now: Instant) -> (u64, u64) {
         let p = period_of(now);
         let first = (p + 1).saturating_sub(SLOTS);
-        if self.marks.back().is_none_or(|(at, _)| *at != p) {
-            self.marks.push_back((p, total));
+        if self.marks.back().is_none_or(|(at, _, _)| *at != p) {
+            self.marks.push_back((p, entries, compress_us));
         }
-        while self.marks.front().is_some_and(|(at, _)| *at < first) {
+        while self.marks.front().is_some_and(|(at, _, _)| *at < first) {
             self.marks.pop_front();
         }
         // A read that began inside the window took all its entries in it, as
         // does every read while the window still reaches back to the first one.
         if first == 0 || self.since >= period_start(first) {
-            return total;
+            return (entries, compress_us);
         }
-        total - self.marks.front().map_or(0, |(_, seen)| *seen)
+        let (_, e0, c0) = self.marks.front().copied().unwrap_or((0, 0, 0));
+        (entries - e0, compress_us - c0)
     }
 
     /// The line, the time waited in the window, and whether there was a wait.
-    fn render(&mut self, what: &str, label: &str, total: u64, now: Instant) -> (String, u64, bool) {
-        let entries = self.entries(total, now);
+    fn render(
+        &mut self,
+        what: &str,
+        label: &str,
+        totals: (u64, u64),
+        now: Instant,
+    ) -> (String, u64, bool) {
+        let (entries, compress_us) = self.in_window(totals, now);
         let (hist, mut busy_us) = self.window(now);
         let span = self.span(now);
         // Waits still running count for their part inside the window; the
@@ -222,13 +237,17 @@ impl State {
         }
         let waiting = running.into_iter().max();
         let waited = hist.n > 0 || waiting.is_some();
-        let l = line(what, label, entries, &hist, busy_us, span, waiting);
+        let mut l = line(what, label, entries, &hist, busy_us, span, waiting);
+        if totals.1 > 0 {
+            let share = compress_us as f64 / 1e4 / span.as_secs_f64().max(1e-6);
+            l += &format!(" compress={share:.1} %");
+        }
         (l, busy_us, waited)
     }
 
     #[cfg(test)]
     pub(crate) fn line(&mut self, label: &str, now: Instant, ended: bool) -> Option<String> {
-        let (mut l, _, waited) = self.render("Read", label, 0, now);
+        let (mut l, _, waited) = self.render("Read", label, (0, 0), now);
         if !waited {
             return None;
         }
@@ -243,6 +262,8 @@ struct Shared {
     label: String,
     /// Entries taken, or records written.
     taken: AtomicU64,
+    /// Time spent compressing what the read sends.
+    compress_us: AtomicU64,
     state: Mutex<State>,
 }
 
@@ -284,6 +305,28 @@ pub struct ReadWait {
 /// for new writes, not for the server.
 pub struct Following(Arc<Shared>);
 
+/// Where the time compressing a read's entries goes: to the read's line and to
+/// the process total behind the pools line.
+#[derive(Clone, Default)]
+pub struct CompressMeter(Option<Arc<Shared>>);
+
+static COMPRESS_US: AtomicU64 = AtomicU64::new(0);
+
+impl CompressMeter {
+    pub fn add(&self, took: Duration) {
+        let us = took.as_micros() as u64;
+        COMPRESS_US.fetch_add(us, Ordering::Relaxed);
+        if let Some(shared) = &self.0 {
+            shared.compress_us.fetch_add(us, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Time spent compressing for every read of the process so far.
+pub fn compress_total() -> Duration {
+    Duration::from_micros(COMPRESS_US.load(Ordering::Relaxed))
+}
+
 impl Following {
     /// A wait still running ends here: what came before was the server's.
     pub fn mark(&self) {
@@ -292,6 +335,18 @@ impl Following {
         if let Some(at) = state.waiting.take() {
             state.add(at, Instant::now());
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn line(&self) -> String {
+        let totals = (
+            self.0.taken.load(Ordering::Relaxed),
+            self.0.compress_us.load(Ordering::Relaxed),
+        );
+        let mut state = self.0.state.lock().unwrap();
+        state
+            .render("Read", &self.0.label, totals, Instant::now())
+            .0
     }
 
     #[cfg(test)]
@@ -306,6 +361,7 @@ impl ReadWait {
         let shared = Arc::new(Shared {
             label,
             taken: AtomicU64::new(0),
+            compress_us: AtomicU64::new(0),
             state: Mutex::new(State::new(Instant::now())),
         });
         let mut reg = registry().lock().unwrap();
@@ -314,6 +370,10 @@ impl ReadWait {
         reg.reads.insert(id, shared.clone());
         reg.keep_reporting();
         Self { id, shared }
+    }
+
+    pub fn compress_meter(&self) -> CompressMeter {
+        CompressMeter(Some(self.shared.clone()))
     }
 
     pub fn following(&self) -> Following {
@@ -369,8 +429,11 @@ impl Drop for ReadWait {
             if let Some(at) = state.waiting.take() {
                 state.add(at, now);
             }
-            let taken = self.shared.taken.load(Ordering::Relaxed);
-            let (mut l, _, waited) = state.render("Read", &self.shared.label, taken, now);
+            let totals = (
+                self.shared.taken.load(Ordering::Relaxed),
+                self.shared.compress_us.load(Ordering::Relaxed),
+            );
+            let (mut l, _, waited) = state.render("Read", &self.shared.label, totals, now);
             l += ", ended";
             waited.then_some(l)
         };
@@ -442,9 +505,12 @@ fn report() -> Option<Vec<String>> {
     let mut done = Vec::new();
     for (id, shared) in reads {
         let mut state = shared.state.lock().unwrap();
-        let taken = shared.taken.load(Ordering::Relaxed);
+        let totals = (
+            shared.taken.load(Ordering::Relaxed),
+            shared.compress_us.load(Ordering::Relaxed),
+        );
         // Taken under the lock, so no wait can end after it and still count.
-        let (l, busy_us, waited) = state.render("Read", &shared.label, taken, Instant::now());
+        let (l, busy_us, waited) = state.render("Read", &shared.label, totals, Instant::now());
         // A follow whose window emptied has nothing more to report.
         if state.following && !waited {
             state.slots = VecDeque::new();
@@ -532,6 +598,7 @@ impl WriteTimer {
                         Arc::new(Shared {
                             label: format!("queue_id: {}", queue.short()),
                             taken: AtomicU64::new(0),
+                            compress_us: AtomicU64::new(0),
                             state: Mutex::new(State::new(started)),
                         })
                     }),
@@ -576,7 +643,7 @@ pub(crate) fn write_lines() -> Vec<String> {
     for (queue, shared) in all {
         let mut state = shared.state.lock().unwrap();
         let taken = shared.taken.load(Ordering::Relaxed);
-        let (l, busy_us, wrote) = state.render("Write", &shared.label, taken, Instant::now());
+        let (l, busy_us, wrote) = state.render("Write", &shared.label, (taken, 0), Instant::now());
         if wrote {
             live.push((l, busy_us));
         } else {

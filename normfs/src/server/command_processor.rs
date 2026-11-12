@@ -113,9 +113,16 @@ fn wire_slots() -> Arc<Semaphore> {
             let cores = std::thread::available_parallelism().map_or(2, |n| n.get());
             let slots = Arc::new(Semaphore::new(cores));
             let watched = Arc::downgrade(&slots);
+            let last = Mutex::new((Instant::now(), crate::read_wait::compress_total()));
             crate::read_wait::add_probe(move || {
                 let used = cores - watched.upgrade()?.available_permits();
-                Some(format!("wire compression {used}/{cores} in use"))
+                let (at, total) = (Instant::now(), crate::read_wait::compress_total());
+                let mut last = last.lock().unwrap();
+                let busy = (total - last.1).as_secs_f64() / at.duration_since(last.0).as_secs_f64();
+                *last = (at, total);
+                Some(format!(
+                    "wire compression {busy:.1} cores busy, large-entry slots {used}/{cores} in use"
+                ))
             });
             slots
         })
@@ -170,6 +177,11 @@ pub(crate) fn encoded_with(
         return out_rx;
     }
     let (pending_tx, mut pending_rx) = mpsc::channel(ENCODE_AHEAD);
+    let meter = wait
+        .as_ref()
+        .map(ReadWait::compress_meter)
+        .unwrap_or_default();
+    let job_meter = meter.clone();
     let stalled = Arc::new(Notify::new());
     let drain_stalled = stalled.clone();
     tokio::spawn(async move {
@@ -185,10 +197,13 @@ pub(crate) fn encoded_with(
                 .then(|| slots.clone().try_acquire_owned().ok())
                 .flatten();
             let job = permit.map(|permit| {
-                let data = data.clone();
+                let (data, meter) = (data.clone(), job_meter.clone());
                 tokio::task::spawn_blocking(move || {
                     let _permit = permit;
-                    compress_counted(&data)
+                    let started = Instant::now();
+                    let packed = compress_counted(&data);
+                    meter.add(started.elapsed());
+                    packed
                 })
             });
             if pending_tx.capacity() == 0 {
@@ -228,7 +243,10 @@ pub(crate) fn encoded_with(
                     }
                 },
                 None if inline && !hurried => {
-                    normfs_store::zstd_compress_at(&data, WIRE_LEVEL).ok()
+                    let started = Instant::now();
+                    let packed = normfs_store::zstd_compress_at(&data, WIRE_LEVEL).ok();
+                    meter.add(started.elapsed());
+                    packed
                 }
                 None => None,
             };
