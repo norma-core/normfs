@@ -945,6 +945,13 @@ impl NormFS {
             memory_pointers.clone(),
             settings.cold_read_files,
         );
+        let (cold, fs_load) = (reader_fsm.cold_probe(), fs.load_probe());
+        read_wait::add_probe(move || {
+            let ((used, total, waiting), (jobs, threads)) = (cold()?, fs_load()?);
+            Some(format!(
+                "cold reads {used}/{total} in use, {waiting} waiting; fs jobs {jobs} on {threads} threads"
+            ))
+        });
 
         let placer = Placer {
             mem: mem.clone(),
@@ -2088,6 +2095,7 @@ impl NormFS {
     /// run ahead of the disk rather than dropping what it already took.
     pub async fn enqueue(&self, queue: &QueueId, data: Bytes) -> Result<UintN, Error> {
         self.refuse_reserved(queue)?;
+        let _timer = read_wait::WriteTimer::start(queue, 1);
         let _write = self.writes.enter()?;
         if self.mem.is_closed(queue) {
             return Err(Error::QueueClosed);
@@ -2196,6 +2204,7 @@ impl NormFS {
         data: Vec<Bytes>,
     ) -> Result<Vec<UintN>, Error> {
         self.refuse_reserved(queue)?;
+        let _timer = read_wait::WriteTimer::start(queue, data.len() as u64);
         let _write = self.writes.enter()?;
         if data.is_empty() {
             return Ok(Vec::new());

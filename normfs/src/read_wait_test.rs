@@ -28,10 +28,18 @@ fn test_quantiles_of_a_spread() {
 
 #[test]
 fn test_line_without_waits_has_no_quantiles() {
-    let l = line("read_id: 1", &Hist::new(), 0, Duration::from_secs(60), None);
+    let l = line(
+        "Read",
+        "read_id: 1",
+        7,
+        &Hist::new(),
+        0,
+        Duration::from_secs(60),
+        None,
+    );
     assert_eq!(
         l,
-        "Read waits over 60 s (read_id: 1): waits=0 total=0.0 ms (0.0 %)"
+        "Read waits over 60 s (read_id: 1): entries=7 waits=0 total=0.0 ms (0.0 %)"
     );
 }
 
@@ -150,4 +158,81 @@ async fn test_a_cancelled_wait_counts_when_the_read_ends() {
     let (n, total) = probe.waits();
     assert_eq!(n, 1);
     assert!(total >= Duration::from_millis(20), "{total:?}");
+}
+
+#[tokio::test]
+async fn test_a_write_is_timed_per_queue() {
+    use super::read_wait::WriteTimer;
+    let queue = normfs_types::QueueIdResolver::new("test").resolve("timed-write");
+    drop(WriteTimer::start(&queue, 3));
+    let timer = WriteTimer::start(&queue, 2);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    drop(timer);
+    let (waits, records, total) = super::read_wait::write_load(&queue).unwrap();
+    assert_eq!((waits, records), (2, 5));
+    assert!(total >= Duration::from_millis(20), "{total:?}");
+}
+
+#[tokio::test]
+async fn test_an_unfinished_write_stays_listed() {
+    use super::read_wait::{write_lines, write_load, WriteTimer};
+    let queue = normfs_types::QueueIdResolver::new("test").resolve("stuck-write");
+    let timer = WriteTimer::start(&queue, 1);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let lines = write_lines();
+    let ours = lines
+        .iter()
+        .find(|l| l.contains("queue_id: stuck-write"))
+        .unwrap();
+    assert!(
+        ours.contains("waits=0") && ours.contains("waiting="),
+        "{ours}"
+    );
+    assert!(write_load(&queue).is_some());
+    drop(timer);
+    assert_eq!(write_load(&queue).unwrap().0, 1);
+}
+
+#[test]
+fn test_overlapping_writes_keep_their_periods() {
+    let mut s = State::new(Instant::now());
+    let t0 = super::read_wait::period_start(super::read_wait::period_of(Instant::now()) + 1);
+    let at = |secs: u64| t0 + Duration::from_secs(secs);
+    s.add(at(1), at(25));
+    s.add(at(2), at(5));
+    // The window now starts one period after t0: 15 s of the long write, none of the short.
+    let (h, busy_us) = s.window(at(61));
+    assert_eq!(h.n, 1);
+    assert_eq!(busy_us, 15_000_000);
+}
+
+#[test]
+fn test_a_new_read_counts_all_its_entries() {
+    let mut s = State::new(Instant::now());
+    assert_eq!(s.entries(5, Instant::now()), 5);
+    assert_eq!(s.entries(9, Instant::now()), 9);
+}
+
+#[tokio::test]
+async fn test_running_writes_all_count_in_the_total() {
+    use super::read_wait::{write_lines, WriteTimer};
+    let queue = normfs_types::QueueIdResolver::new("test").resolve("two-writes");
+    let (a, b) = (WriteTimer::start(&queue, 1), WriteTimer::start(&queue, 1));
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let lines = write_lines();
+    let ours = lines
+        .iter()
+        .find(|l| l.contains("queue_id: two-writes"))
+        .unwrap();
+    let total: f64 = ours
+        .split("total=")
+        .nth(1)
+        .unwrap()
+        .split(' ')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(total >= 60.0, "{ours}");
+    drop((a, b));
 }
