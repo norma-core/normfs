@@ -165,13 +165,22 @@ impl State {
         now.saturating_duration_since(self.since.max(period_start(first)))
     }
 
+    pub(crate) fn start_wait(&mut self, at: Instant) {
+        self.waiting = Some(at);
+    }
+
     pub(crate) fn line(&self, label: &str, now: Instant, ended: bool) -> Option<String> {
-        let (hist, busy_us) = self.window(now);
+        let (hist, mut busy_us) = self.window(now);
         let waiting = self.waiting.map(|at| now.saturating_duration_since(at));
         if hist.n == 0 && waiting.is_none() {
             return None;
         }
-        let mut l = line(label, &hist, busy_us, self.span(now), waiting);
+        let span = self.span(now);
+        // A wait still running counts for the part of it inside the window.
+        if let Some(w) = waiting {
+            busy_us += w.min(span).as_micros() as u64;
+        }
+        let mut l = line(label, &hist, busy_us, span, waiting);
         if ended {
             l += ", ended";
         }
@@ -269,7 +278,7 @@ impl ReadWait {
         let follows = {
             let mut state = self.shared.state.lock().unwrap();
             if !state.following {
-                state.waiting = Some(Instant::now());
+                state.start_wait(Instant::now());
             }
             state.following
         };
@@ -290,8 +299,13 @@ impl ReadWait {
 impl Drop for ReadWait {
     fn drop(&mut self) {
         let last = {
-            let state = self.shared.state.lock().unwrap();
-            state.line(&self.shared.label, Instant::now(), true)
+            let mut state = self.shared.state.lock().unwrap();
+            let now = Instant::now();
+            // A recv cancelled mid-wait never recorded it.
+            if let Some(at) = state.waiting.take() {
+                state.add(at, now);
+            }
+            state.line(&self.shared.label, now, true)
         };
         let mut reg = registry().lock().unwrap();
         reg.reads.remove(&self.id);
