@@ -12,7 +12,7 @@ links = "normfs_types_c"
 
 [dependencies]
 bytes = "1.5"
-uintn = { version = "0.4.10", path = "../uintn-rs" }
+uintn = { version = "0.4.11", path = "../uintn-rs" }
 
 [build-dependencies]
 cc = "1"
