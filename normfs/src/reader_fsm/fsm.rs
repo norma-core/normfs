@@ -782,6 +782,15 @@ impl ReaderFSM {
         }
     }
 
+    /// Whether the WAL or the store has `file_id`, from its header alone.
+    async fn local_file_exists(&self, queue: &QueueId, file_id: &UintN) -> bool {
+        let (wal, store) = tokio::join!(
+            self.wal.get_entries_before(queue, file_id),
+            self.store.get_entries_before(queue, file_id)
+        );
+        wal.is_ok() || matches!(store, Ok(Some(_)))
+    }
+
     /// Whether a read may still need entries past the file it is reading.
     async fn reads_past(&self, ctx: &ReadContext, data_source: DataSource) -> bool {
         let Some(last_id) = &ctx.last_id else {
@@ -1067,25 +1076,28 @@ impl ReaderFSM {
         let next_file_id = current_file.increment();
 
         // next_id never advances when no file holds it, so without this bound
-        // the walk increments the file id forever.
-        let wal_last_id = async {
-            let wal = &self.wal;
-            wal.get_last_file_id(&ctx.queue).await.ok().flatten()
-        };
-        let store_last_id = async {
-            let store = &self.store;
-            store.get_last_file_id(&ctx.queue).await.ok().flatten()
-        };
-        let (wal_last_id, store_last_id) = tokio::join!(wal_last_id, store_last_id);
-        let last_file_id = [wal_last_id, store_last_id, self.cloud_last(&ctx.queue)]
-            .into_iter()
-            .flatten()
-            .max();
-        if last_file_id.is_none_or(|last| next_file_id > last) {
-            log::debug!(target: "normfs-reader-fsm",
-                "No file after {} for queue {}, completing read",
-                current_file, ctx.queue.short());
-            return Ok(ReaderState::Completed);
+        // the walk increments the file id forever. Finding the last file lists
+        // every file of the queue, so it waits until the next one is missing.
+        if !self.local_file_exists(&ctx.queue, &next_file_id).await {
+            let wal_last_id = async {
+                let wal = &self.wal;
+                wal.get_last_file_id(&ctx.queue).await.ok().flatten()
+            };
+            let store_last_id = async {
+                let store = &self.store;
+                store.get_last_file_id(&ctx.queue).await.ok().flatten()
+            };
+            let (wal_last_id, store_last_id) = tokio::join!(wal_last_id, store_last_id);
+            let last_file_id = [wal_last_id, store_last_id, self.cloud_last(&ctx.queue)]
+                .into_iter()
+                .flatten()
+                .max();
+            if last_file_id.is_none_or(|last| next_file_id > last) {
+                log::debug!(target: "normfs-reader-fsm",
+                    "No file after {} for queue {}, completing read",
+                    current_file, ctx.queue.short());
+                return Ok(ReaderState::Completed);
+            }
         }
 
         if let Some(mut handle) = prefetch_handle {
