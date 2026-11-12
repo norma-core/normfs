@@ -8,6 +8,7 @@ use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::{mpsc, Notify, OwnedSemaphorePermit, Semaphore};
 use uintn::UintN;
 
+use super::read_wait::ReadWait;
 use crate::proto::{
     read_response, write_response, ClientRequest, Id, PingRequest, PingResponse, ReadRequest,
     ReadResponse, ServerResponse, SetupRequest, SetupResponse, WriteRequest, WriteResponse,
@@ -124,8 +125,16 @@ fn encoded(
     rx: mpsc::Receiver<ReadEntry>,
     compress: bool,
     report: RawReport,
+    wait: ReadWait,
 ) -> mpsc::Receiver<(ReadEntry, Encoded)> {
-    encoded_with(rx, compress, wire_slots(), report)
+    encoded_with(rx, compress, wire_slots(), report, Some(wait))
+}
+
+async fn next(rx: &mut mpsc::Receiver<ReadEntry>, wait: &Option<ReadWait>) -> Option<ReadEntry> {
+    match wait {
+        Some(wait) => wait.recv(rx).await,
+        None => rx.recv().await,
+    }
 }
 
 /// Where a read counts the entries it sent raw for want of a slot.
@@ -136,11 +145,12 @@ pub(crate) fn encoded_with(
     compress: bool,
     slots: Arc<Semaphore>,
     (events, queue): RawReport,
+    wait: Option<ReadWait>,
 ) -> mpsc::Receiver<(ReadEntry, Encoded)> {
     let (out_tx, out_rx) = mpsc::channel(ENCODE_AHEAD);
     if !compress {
         tokio::spawn(async move {
-            while let Some(mut entry) = rx.recv().await {
+            while let Some(mut entry) = next(&mut rx, &wait).await {
                 let data = std::mem::take(&mut entry.data);
                 if out_tx
                     .send((entry, (data, Encoding::EncNone)))
@@ -157,7 +167,7 @@ pub(crate) fn encoded_with(
     let stalled = Arc::new(Notify::new());
     let drain_stalled = stalled.clone();
     tokio::spawn(async move {
-        while let Some(mut entry) = rx.recv().await {
+        while let Some(mut entry) = next(&mut rx, &wait).await {
             let data = std::mem::take(&mut entry.data);
             let inline = (MIN_WIRE_SIZE..INLINE_WIRE_SIZE).contains(&data.len());
             // Only a live follow is dropped for a full channel; a read from
@@ -711,15 +721,27 @@ impl CommandProcessor {
 
         let (tx, rx) = mpsc::channel(2048);
 
+        let wait = ReadWait::start(format!(
+            "client_id: {}, read_id: {}, queue_id: {}",
+            sender.client_id(),
+            read_id,
+            queue_id.short()
+        ));
+        let following = wait.following();
         let normfs = self.normfs.clone();
         let queue_id_clone = queue_id.clone();
         let read_handle = tokio::spawn(async move {
-            normfs
+            let read = normfs
                 .reader_fsm
                 .read(queue_id_clone, position, limit, step, tx)
-                .await
+                .await;
+            if matches!(read, Ok(true)) {
+                following.mark();
+            }
+            read
         });
-        let mut entries = encoded(rx, compress, (self.normfs.events.clone(), queue_id.clone()));
+        let report = (self.normfs.events.clone(), queue_id.clone());
+        let mut entries = encoded(rx, compress, report, wait);
         while let Some((entry, (data, encoding))) = entries.recv().await {
             let mut buffer = BytesMut::new();
             entry.id.write_value_to_buffer(&mut buffer);
