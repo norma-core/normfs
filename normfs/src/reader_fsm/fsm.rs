@@ -56,6 +56,12 @@ impl ReaderFSM {
         }
     }
 
+    /// The cold-read slots' load for as long as this reader lives.
+    pub(crate) fn cold_probe(&self) -> impl Fn() -> Option<(usize, usize, usize)> + Send + 'static {
+        let cold = Arc::downgrade(&self.cold);
+        move || cold.upgrade().map(|cold| cold.load())
+    }
+
     /// The last file any cloud-direct life of this queue landed. It bounds a
     /// file walk alongside the last local file: a queue moved from store to
     /// cloud-direct has both, and the landed ones come after.

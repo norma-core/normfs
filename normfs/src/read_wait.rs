@@ -1,10 +1,13 @@
 //! How long each read's sending side waits for the reader's next entry, logged
 //! per read over a sliding window. A slow client keeps the reader's channel full
 //! and never shows a wait; a reader that cannot load its next file in time does.
+//! Each queue's writes and the load of the pools behind them go in the same log.
 
 use log::info;
+use normfs_types::QueueId;
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{self, error::TryRecvError};
 use tokio::task::JoinHandle;
@@ -106,6 +109,8 @@ pub(crate) struct State {
     slots: VecDeque<Slot>,
     waiting: Option<Instant>,
     following: bool,
+    /// The entry count as each report saw it, to count the window's entries.
+    marks: VecDeque<(u64, u64)>,
 }
 
 impl State {
@@ -117,11 +122,13 @@ impl State {
             slots: VecDeque::new(),
             waiting: None,
             following: false,
+            marks: VecDeque::new(),
         }
     }
 
     fn slot(&mut self, period: u64) -> &mut Slot {
-        if self.slots.back().is_none_or(|s| s.period != period) {
+        // Concurrent writes can end out of order; a late one joins the newest period.
+        if self.slots.back().is_none_or(|s| s.period < period) {
             self.slots.push_back(Slot {
                 period,
                 hist: Hist::new(),
@@ -169,9 +176,26 @@ impl State {
         self.waiting = Some(at);
     }
 
-    /// The read's line, the time it waited in the window, and whether it
-    /// waited at all.
-    fn render(&self, label: &str, now: Instant) -> (String, u64, bool) {
+    /// Entries since the window began, from the count each report saw; a
+    /// report every period keeps it within one period of exact.
+    fn entries(&mut self, total: u64, now: Instant) -> u64 {
+        let p = period_of(now);
+        let first = (p + 1).saturating_sub(SLOTS);
+        if self.marks.back().is_none_or(|(at, _)| *at != p) {
+            self.marks.push_back((p, total));
+        }
+        while self.marks.get(1).is_some_and(|(at, _)| *at <= first) {
+            self.marks.pop_front();
+        }
+        match self.marks.front() {
+            Some((at, seen)) if *at <= first => total - seen,
+            _ => total,
+        }
+    }
+
+    /// The line, the time waited in the window, and whether there was a wait.
+    fn render(&mut self, what: &str, label: &str, total: u64, now: Instant) -> (String, u64, bool) {
+        let entries = self.entries(total, now);
         let (hist, mut busy_us) = self.window(now);
         let waiting = self.waiting.map(|at| now.saturating_duration_since(at));
         let span = self.span(now);
@@ -180,11 +204,13 @@ impl State {
             busy_us += w.min(span).as_micros() as u64;
         }
         let waited = hist.n > 0 || waiting.is_some();
-        (line(label, &hist, busy_us, span, waiting), busy_us, waited)
+        let l = line(what, label, entries, &hist, busy_us, span, waiting);
+        (l, busy_us, waited)
     }
 
-    pub(crate) fn line(&self, label: &str, now: Instant, ended: bool) -> Option<String> {
-        let (mut l, _, waited) = self.render(label, now);
+    #[cfg(test)]
+    pub(crate) fn line(&mut self, label: &str, now: Instant, ended: bool) -> Option<String> {
+        let (mut l, _, waited) = self.render("Read", label, 0, now);
         if !waited {
             return None;
         }
@@ -197,6 +223,8 @@ impl State {
 
 struct Shared {
     label: String,
+    /// Entries taken, or records written.
+    taken: AtomicU64,
     state: Mutex<State>,
 }
 
@@ -259,6 +287,7 @@ impl ReadWait {
     pub fn start(label: String) -> Self {
         let shared = Arc::new(Shared {
             label,
+            taken: AtomicU64::new(0),
             state: Mutex::new(State::new(Instant::now())),
         });
         let mut reg = registry().lock().unwrap();
@@ -277,7 +306,10 @@ impl ReadWait {
     /// fails is the one most worth seeing.
     pub async fn recv<T>(&self, rx: &mut mpsc::Receiver<T>) -> Option<T> {
         match rx.try_recv() {
-            Ok(v) => return Some(v),
+            Ok(v) => {
+                self.shared.taken.fetch_add(1, Ordering::Relaxed);
+                return Some(v);
+            }
             Err(TryRecvError::Disconnected) => return None,
             Err(TryRecvError::Empty) => {}
         }
@@ -290,9 +322,16 @@ impl ReadWait {
             state.following
         };
         if follows {
-            return rx.recv().await;
+            let got = rx.recv().await;
+            if got.is_some() {
+                self.shared.taken.fetch_add(1, Ordering::Relaxed);
+            }
+            return got;
         }
         let got = rx.recv().await;
+        if got.is_some() {
+            self.shared.taken.fetch_add(1, Ordering::Relaxed);
+        }
         let mut state = self.shared.state.lock().unwrap();
         if let Some(at) = state.waiting.take() {
             state.add(at, Instant::now());
@@ -312,7 +351,10 @@ impl Drop for ReadWait {
             if let Some(at) = state.waiting.take() {
                 state.add(at, now);
             }
-            state.line(&self.shared.label, now, true)
+            let taken = self.shared.taken.load(Ordering::Relaxed);
+            let (mut l, _, waited) = state.render("Read", &self.shared.label, taken, now);
+            l += ", ended";
+            waited.then_some(l)
         };
         let mut reg = registry().lock().unwrap();
         reg.reads.remove(&self.id);
@@ -332,14 +374,16 @@ fn ms(us: u64) -> f64 {
 }
 
 pub(crate) fn line(
+    what: &str,
     label: &str,
+    entries: u64,
     h: &Hist,
     busy_us: u64,
     span: Duration,
     waiting: Option<Duration>,
 ) -> String {
     let mut s = format!(
-        "Read waits over {:.0} s ({}): waits={} total={:.1} ms ({:.1} %)",
+        "{what} waits over {:.0} s ({}): entries={entries} waits={} total={:.1} ms ({:.1} %)",
         span.as_secs_f64(),
         label,
         h.n,
@@ -367,7 +411,7 @@ pub(crate) fn line(
 fn report() -> Option<Vec<String>> {
     let (ended, unlisted, mut reads) = {
         let mut reg = registry().lock().unwrap();
-        if reg.reads.is_empty() && reg.ended.is_empty() {
+        if reg.reads.is_empty() && reg.ended.is_empty() && writers().read().unwrap().is_empty() {
             reg.reporting = false;
             return None;
         }
@@ -380,8 +424,9 @@ fn report() -> Option<Vec<String>> {
     let mut done = Vec::new();
     for (id, shared) in reads {
         let mut state = shared.state.lock().unwrap();
+        let taken = shared.taken.load(Ordering::Relaxed);
         // Taken under the lock, so no wait can end after it and still count.
-        let (l, busy_us, waited) = state.render(&shared.label, Instant::now());
+        let (l, busy_us, waited) = state.render("Read", &shared.label, taken, Instant::now());
         // A follow whose window emptied has nothing more to report.
         if state.following && !waited {
             state.slots = VecDeque::new();
@@ -412,7 +457,128 @@ fn report() -> Option<Vec<String>> {
     if unlisted > 0 {
         lines.push(format!("{unlisted} more ended reads waited"));
     }
+    lines.extend(write_lines());
+    let pools: Vec<String> = {
+        let mut probes = probes().lock().unwrap();
+        let mut out = Vec::new();
+        probes.retain(|probe| probe().map(|l| out.push(l)).is_some());
+        out
+    };
+    if !pools.is_empty() {
+        lines.push(format!("Pools: {}", pools.join("; ")));
+    }
     Some(lines)
+}
+
+type Probe = Box<dyn Fn() -> Option<String> + Send>;
+
+fn probes() -> &'static Mutex<Vec<Probe>> {
+    static PROBES: OnceLock<Mutex<Vec<Probe>>> = OnceLock::new();
+    PROBES.get_or_init(Default::default)
+}
+
+/// A pool's load for each report; dropped once it returns `None`, as when
+/// what it watches is gone.
+pub fn add_probe(probe: impl Fn() -> Option<String> + Send + 'static) {
+    probes().lock().unwrap().push(Box::new(probe));
+}
+
+fn writers() -> &'static RwLock<HashMap<QueueId, Arc<Shared>>> {
+    static WRITERS: OnceLock<RwLock<HashMap<QueueId, Arc<Shared>>>> = OnceLock::new();
+    WRITERS.get_or_init(Default::default)
+}
+
+/// Times one enqueue of `records` records into `queue`, until dropped.
+pub(crate) struct WriteTimer {
+    shared: Arc<Shared>,
+    started: Instant,
+}
+
+impl WriteTimer {
+    pub(crate) fn start(queue: &QueueId, records: u64) -> Self {
+        let found = writers().read().unwrap().get(queue).cloned();
+        let shared = found.unwrap_or_else(|| {
+            let shared = writers()
+                .write()
+                .unwrap()
+                .entry(queue.clone())
+                .or_insert_with(|| {
+                    Arc::new(Shared {
+                        label: format!("queue_id: {}", queue.short()),
+                        taken: AtomicU64::new(0),
+                        state: Mutex::new(State::new(Instant::now())),
+                    })
+                })
+                .clone();
+            registry().lock().unwrap().keep_reporting();
+            shared
+        });
+        shared.taken.fetch_add(records, Ordering::Relaxed);
+        Self {
+            shared,
+            started: Instant::now(),
+        }
+    }
+}
+
+/// Writes to `queue` in the window, the records in them, and the time they took.
+#[cfg(test)]
+pub(crate) fn write_load(queue: &QueueId) -> Option<(u64, u64, Duration)> {
+    let shared = writers().read().unwrap().get(queue)?.clone();
+    let (h, busy_us) = shared.state.lock().unwrap().window(Instant::now());
+    let records = shared.taken.load(Ordering::Relaxed);
+    Some((h.n, records, Duration::from_micros(busy_us)))
+}
+
+impl Drop for WriteTimer {
+    fn drop(&mut self) {
+        let mut state = self.shared.state.lock().unwrap();
+        state.add(self.started, Instant::now());
+    }
+}
+
+/// Every queue written in the window, the longest waits first; a queue with
+/// no write in it leaves.
+fn write_lines() -> Vec<String> {
+    let all: Vec<_> = writers()
+        .read()
+        .unwrap()
+        .iter()
+        .map(|(q, s)| (q.clone(), s.clone()))
+        .collect();
+    let mut live = Vec::new();
+    let mut idle = Vec::new();
+    for (queue, shared) in all {
+        let mut state = shared.state.lock().unwrap();
+        let taken = shared.taken.load(Ordering::Relaxed);
+        let (l, busy_us, wrote) = state.render("Write", &shared.label, taken, Instant::now());
+        if wrote {
+            live.push((l, busy_us));
+        } else {
+            idle.push(queue);
+        }
+    }
+    if !idle.is_empty() {
+        let mut writers = writers().write().unwrap();
+        for queue in idle {
+            writers.remove(&queue);
+        }
+    }
+    if live.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![format!(
+        "{} queues written in the last {} s",
+        live.len(),
+        (PERIOD * SLOTS as u32).as_secs()
+    )];
+    live.sort_by_key(|(_, busy_us)| std::cmp::Reverse(*busy_us));
+    let more = live.len().saturating_sub(MAX_LISTED);
+    lines.extend(live.into_iter().take(MAX_LISTED).map(|(l, _)| l));
+    if more > 0 {
+        lines.push(format!("{more} more queues written"));
+    }
+    lines
 }
 
 async fn report_loop() {

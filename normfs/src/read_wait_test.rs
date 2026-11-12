@@ -28,10 +28,18 @@ fn test_quantiles_of_a_spread() {
 
 #[test]
 fn test_line_without_waits_has_no_quantiles() {
-    let l = line("read_id: 1", &Hist::new(), 0, Duration::from_secs(60), None);
+    let l = line(
+        "Read",
+        "read_id: 1",
+        7,
+        &Hist::new(),
+        0,
+        Duration::from_secs(60),
+        None,
+    );
     assert_eq!(
         l,
-        "Read waits over 60 s (read_id: 1): waits=0 total=0.0 ms (0.0 %)"
+        "Read waits over 60 s (read_id: 1): entries=7 waits=0 total=0.0 ms (0.0 %)"
     );
 }
 
@@ -149,5 +157,18 @@ async fn test_a_cancelled_wait_counts_when_the_read_ends() {
     drop(wait);
     let (n, total) = probe.waits();
     assert_eq!(n, 1);
+    assert!(total >= Duration::from_millis(20), "{total:?}");
+}
+
+#[tokio::test]
+async fn test_a_write_is_timed_per_queue() {
+    use super::read_wait::WriteTimer;
+    let queue = normfs_types::QueueIdResolver::new("test").resolve("timed-write");
+    drop(WriteTimer::start(&queue, 3));
+    let timer = WriteTimer::start(&queue, 2);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    drop(timer);
+    let (waits, records, total) = super::read_wait::write_load(&queue).unwrap();
+    assert_eq!((waits, records), (2, 5));
     assert!(total >= Duration::from_millis(20), "{total:?}");
 }

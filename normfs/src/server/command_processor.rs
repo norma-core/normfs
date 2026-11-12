@@ -111,7 +111,13 @@ fn wire_slots() -> Arc<Semaphore> {
     SLOTS
         .get_or_init(|| {
             let cores = std::thread::available_parallelism().map_or(2, |n| n.get());
-            Arc::new(Semaphore::new(cores))
+            let slots = Arc::new(Semaphore::new(cores));
+            let watched = Arc::downgrade(&slots);
+            crate::read_wait::add_probe(move || {
+                let used = cores - watched.upgrade()?.available_permits();
+                Some(format!("wire compression {used}/{cores} in use"))
+            });
+            slots
         })
         .clone()
 }
