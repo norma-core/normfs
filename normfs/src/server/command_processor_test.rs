@@ -8,6 +8,7 @@ use tokio::sync::{mpsc, Semaphore};
 use uintn::UintN;
 
 use super::command_processor::{encoded_with, RawReport, PEAK};
+use super::read_wait::ReadWait;
 use crate::proto::Encoding;
 
 /// Events, entries and bytes reported as sent raw.
@@ -54,7 +55,7 @@ async fn many_compressed_reads_share_one_cap_and_keep_order() {
             tx.send(entry).await.unwrap();
         }
         drop(tx);
-        reads.push(encoded_with(rx, true, slots.clone(), quiet()));
+        reads.push(encoded_with(rx, true, slots.clone(), quiet(), None));
     }
     for mut out in reads {
         for i in 0..ENTRIES {
@@ -81,7 +82,7 @@ async fn a_follow_keeps_draining_while_every_slot_is_taken() {
     let (tx, rx) = mpsc::channel(2048);
     let raw = Arc::new(RawCount::default());
     let queue = QueueIdResolver::new("test").resolve("follow");
-    let mut out = encoded_with(rx, true, slots, (raw.clone(), queue));
+    let mut out = encoded_with(rx, true, slots, (raw.clone(), queue), None);
     let reader = tokio::spawn(async move {
         let mut raw = 0;
         while let Some((_, (_, encoding))) = out.recv().await {
@@ -119,7 +120,13 @@ fn a_follow_keeps_draining_past_a_stuck_compression() {
         let raw = Arc::new(RawCount::default());
         let queue = QueueIdResolver::new("test").resolve("follow");
         let (tx, rx) = mpsc::channel(2048);
-        let mut out = encoded_with(rx, true, Arc::new(Semaphore::new(1)), (raw.clone(), queue));
+        let mut out = encoded_with(
+            rx,
+            true,
+            Arc::new(Semaphore::new(1)),
+            (raw.clone(), queue),
+            None,
+        );
         let reader = tokio::spawn(async move {
             let mut n = 0;
             while out.recv().await.is_some() {
@@ -143,7 +150,7 @@ fn a_follow_keeps_draining_past_a_stuck_compression() {
 #[tokio::test]
 async fn a_small_entry_compresses_without_a_slot() {
     let (tx, rx) = mpsc::channel(4);
-    let mut out = encoded_with(rx, true, Arc::new(Semaphore::new(0)), quiet());
+    let mut out = encoded_with(rx, true, Arc::new(Semaphore::new(0)), quiet(), None);
     let data = Bytes::from(vec![7u8; 2048]);
     tx.send(ReadEntry::new(
         UintN::from(0u64),
@@ -161,7 +168,7 @@ async fn a_small_entry_compresses_without_a_slot() {
 async fn raw_entries(source: DataSource) -> usize {
     const ENTRIES: u64 = 64;
     let (tx, rx) = mpsc::channel(ENTRIES as usize);
-    let mut out = encoded_with(rx, true, Arc::new(Semaphore::new(0)), quiet());
+    let mut out = encoded_with(rx, true, Arc::new(Semaphore::new(0)), quiet(), None);
     let data = Bytes::from(vec![7u8; 2048]);
     for i in 0..ENTRIES {
         tx.send(ReadEntry::new(UintN::from(i), data.clone(), source))
@@ -184,4 +191,35 @@ async fn a_follow_falling_behind_sends_small_entries_raw() {
 #[tokio::test]
 async fn a_read_from_disk_compresses_every_small_entry() {
     assert_eq!(raw_entries(DataSource::DiskStore).await, 0);
+}
+
+#[tokio::test]
+async fn a_starved_read_logs_its_wait() {
+    for compress in [false, true] {
+        let wait = ReadWait::start("read_id: 1".into());
+        let probe = wait.following();
+        let (tx, rx) = mpsc::channel(4);
+        let mut out = encoded_with(
+            rx,
+            compress,
+            Arc::new(Semaphore::new(1)),
+            quiet(),
+            Some(wait),
+        );
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            let entry = ReadEntry::new(
+                UintN::from(0u64),
+                Bytes::from(vec![7u8; 2048]),
+                DataSource::DiskStore,
+            );
+            tx.send(entry).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        });
+        assert!(out.recv().await.is_some());
+        assert!(out.recv().await.is_none());
+        let (n, total) = probe.waits();
+        assert_eq!(n, 2, "compress={compress}");
+        assert!(total >= std::time::Duration::from_millis(50), "{total:?}");
+    }
 }
