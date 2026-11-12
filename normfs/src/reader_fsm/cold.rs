@@ -53,6 +53,7 @@ struct Recent {
 /// same file share one load.
 pub(crate) struct ColdFiles {
     slots: Arc<Semaphore>,
+    total: usize,
     loading: Loading,
     recent: Arc<Mutex<Recent>>,
     waiting: AtomicUsize,
@@ -63,6 +64,7 @@ impl ColdFiles {
     pub(crate) fn new(slots: usize) -> Self {
         Self {
             slots: Arc::new(Semaphore::new(slots.max(1))),
+            total: slots.max(1),
             loading: Mutex::new(BTreeMap::new()),
             recent: Arc::new(Mutex::new(Recent::default())),
             waiting: AtomicUsize::new(0),
@@ -158,6 +160,12 @@ impl ColdFiles {
             }
         };
         Some(permit.expect("the semaphore is never closed"))
+    }
+
+    /// Slots in use, all slots, and reads waiting for one.
+    pub(crate) fn load(&self) -> (usize, usize, usize) {
+        let used = self.total - self.slots.available_permits();
+        (used, self.total, self.waiting.load(Ordering::SeqCst))
     }
 
     /// Whether a read is waiting for a slot.

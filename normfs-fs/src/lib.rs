@@ -178,6 +178,7 @@ pub enum AppendOutcome {
 pub struct Fs {
     exec: Arc<dyn Executor>,
     slots: Arc<Semaphore>,
+    threads: usize,
     // Avoid repeated pool round trips for already provisioned store directories.
     provisioned: Arc<Mutex<Provisioned>>,
     root: Option<Arc<Path>>,
@@ -240,10 +241,28 @@ impl Fs {
         log::info!(target: "normfs-fs", "fs executor: {} with {threads} threads", exec.name());
         Ok(Fs {
             exec,
-            slots: Arc::new(Semaphore::new(threads.saturating_mul(32).clamp(1, 1024))),
+            slots: Arc::new(Semaphore::new(Self::slots_for(threads))),
+            threads,
             provisioned: Arc::new(Mutex::new(Provisioned::default())),
             root: cfg.root.map(Arc::from),
         })
+    }
+
+    fn slots_for(threads: usize) -> usize {
+        threads.saturating_mul(32).clamp(1, 1024)
+    }
+
+    /// Jobs submitted and not yet finished, and the threads that run them,
+    /// for as long as this `Fs` lives; holding the probe does not keep it.
+    pub fn load_probe(&self) -> impl Fn() -> Option<(usize, usize)> + Send + 'static {
+        let (slots, threads) = (Arc::downgrade(&self.slots), self.threads);
+        move || {
+            let slots = slots.upgrade()?;
+            Some((
+                Self::slots_for(threads) - slots.available_permits(),
+                threads,
+            ))
+        }
     }
 
     /// Keeps `guard` until every clone of this `Fs` is dropped and the pool has
