@@ -3,6 +3,9 @@ mod bucket_check;
 mod bucket_check_test;
 pub(crate) mod lookup;
 mod mem;
+pub mod read_wait;
+#[cfg(test)]
+mod read_wait_test;
 pub mod server;
 pub mod proto {
     include!("proto/normfs.rs");

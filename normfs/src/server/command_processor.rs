@@ -8,12 +8,12 @@ use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::{mpsc, Notify, OwnedSemaphorePermit, Semaphore};
 use uintn::UintN;
 
-use super::read_wait::ReadWait;
 use crate::proto::{
     read_response, write_response, ClientRequest, Id, PingRequest, PingResponse, ReadRequest,
     ReadResponse, ServerResponse, SetupRequest, SetupResponse, WriteRequest, WriteResponse,
 };
 use crate::proto::{Encoding, OffsetType};
+use crate::read_wait::ReadWait;
 use crate::{DataSource, Error, NormFS};
 use normfs_types::events::{EventSink, SystemEvent};
 use normfs_types::{QueueId, ReadEntry, ReadPosition};

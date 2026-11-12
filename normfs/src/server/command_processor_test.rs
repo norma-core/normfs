@@ -8,8 +8,8 @@ use tokio::sync::{mpsc, Semaphore};
 use uintn::UintN;
 
 use super::command_processor::{encoded_with, RawReport, PEAK};
-use super::read_wait::ReadWait;
 use crate::proto::Encoding;
+use crate::read_wait::ReadWait;
 
 /// Events, entries and bytes reported as sent raw.
 #[derive(Default)]
