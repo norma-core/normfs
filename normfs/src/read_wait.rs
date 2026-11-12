@@ -169,18 +169,25 @@ impl State {
         self.waiting = Some(at);
     }
 
-    pub(crate) fn line(&self, label: &str, now: Instant, ended: bool) -> Option<String> {
+    /// The read's line, the time it waited in the window, and whether it
+    /// waited at all.
+    fn render(&self, label: &str, now: Instant) -> (String, u64, bool) {
         let (hist, mut busy_us) = self.window(now);
         let waiting = self.waiting.map(|at| now.saturating_duration_since(at));
-        if hist.n == 0 && waiting.is_none() {
-            return None;
-        }
         let span = self.span(now);
         // A wait still running counts for the part of it inside the window.
         if let Some(w) = waiting {
             busy_us += w.min(span).as_micros() as u64;
         }
-        let mut l = line(label, &hist, busy_us, span, waiting);
+        let waited = hist.n > 0 || waiting.is_some();
+        (line(label, &hist, busy_us, span, waiting), busy_us, waited)
+    }
+
+    pub(crate) fn line(&self, label: &str, now: Instant, ended: bool) -> Option<String> {
+        let (mut l, _, waited) = self.render(label, now);
+        if !waited {
+            return None;
+        }
         if ended {
             l += ", ended";
         }
@@ -354,11 +361,11 @@ pub(crate) fn line(
     s
 }
 
-/// Lines for the reads that ended since the last report and every live read
-/// that waited in the window, or `None` once there is no read left, which
-/// also stops the loop.
+/// A snapshot of every live read, those that waited longest first, then the
+/// reads that ended since the last report; `None` once there is no read
+/// left, which also stops the loop.
 fn report() -> Option<Vec<String>> {
-    let (mut lines, unlisted, mut reads) = {
+    let (ended, unlisted, mut reads) = {
         let mut reg = registry().lock().unwrap();
         if reg.reads.is_empty() && reg.ended.is_empty() {
             reg.reporting = false;
@@ -368,29 +375,20 @@ fn report() -> Option<Vec<String>> {
         let unlisted = std::mem::take(&mut reg.unlisted);
         (std::mem::take(&mut reg.ended), unlisted, reads)
     };
-    if unlisted > 0 {
-        lines.push(format!("{unlisted} more ended reads waited"));
-    }
     reads.sort_unstable_by_key(|(id, _)| *id);
-    let (mut live, mut more) = (0, 0);
+    let mut live = Vec::new();
     let mut done = Vec::new();
     for (id, shared) in reads {
         let mut state = shared.state.lock().unwrap();
         // Taken under the lock, so no wait can end after it and still count.
-        let Some(l) = state.line(&shared.label, Instant::now(), false) else {
-            // A follow whose window emptied has nothing more to report.
-            if state.following {
-                state.slots = VecDeque::new();
-                done.push(id);
-            }
+        let (l, busy_us, waited) = state.render(&shared.label, Instant::now());
+        // A follow whose window emptied has nothing more to report.
+        if state.following && !waited {
+            state.slots = VecDeque::new();
+            done.push(id);
             continue;
-        };
-        if live < MAX_LISTED {
-            lines.push(l);
-            live += 1;
-        } else {
-            more += 1;
         }
+        live.push((l, busy_us, waited));
     }
     if !done.is_empty() {
         let mut reg = registry().lock().unwrap();
@@ -398,8 +396,21 @@ fn report() -> Option<Vec<String>> {
             reg.reads.remove(&id);
         }
     }
+    let waited = live.iter().filter(|(_, _, w)| *w).count();
+    let mut lines = vec![format!(
+        "{} live reads, {waited} waited in the last {} s",
+        live.len(),
+        (PERIOD * SLOTS as u32).as_secs()
+    )];
+    live.sort_by_key(|(_, busy_us, _)| std::cmp::Reverse(*busy_us));
+    let more = live.len().saturating_sub(MAX_LISTED);
+    lines.extend(live.into_iter().take(MAX_LISTED).map(|(l, _, _)| l));
     if more > 0 {
-        lines.push(format!("{more} more reads waited"));
+        lines.push(format!("{more} more live reads"));
+    }
+    lines.extend(ended);
+    if unlisted > 0 {
+        lines.push(format!("{unlisted} more ended reads waited"));
     }
     Some(lines)
 }
