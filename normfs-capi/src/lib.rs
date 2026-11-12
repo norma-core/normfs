@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use normfs::read_wait::ReadWait;
 use normfs::{Error, NormFS, NormFsSettings, QueueId, ReadPosition, UintN};
 use tokio::runtime::Runtime;
 use tokio::sync::{mpsc, watch};
@@ -124,6 +125,10 @@ pub unsafe extern "C" fn normfs_open(data_dir: *const c_char, out: *mut *mut Han
             Ok(dir) => PathBuf::from(dir),
             Err(code) => return code,
         };
+        // Logs go to stderr only when asked for, filtered as RUST_LOG would be.
+        if std::env::var_os("NORMFS_LOG").is_some() {
+            let _ = env_logger::Builder::from_env("NORMFS_LOG").try_init();
+        }
         let rt = match tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -328,11 +333,20 @@ fn read_records(
             limit.min((u64::MAX - next).saturating_add(1)).max(1)
         };
         let (tx, mut rx) = mpsc::channel(64);
+        // The wait log reports on the handle's runtime.
+        let _rt = h.rt.enter();
+        let wait = ReadWait::start(format!("queue_id: {}, from: {next}", queue.short()));
+        let following = wait.following();
         let fs = h.fs.clone();
         let q = queue.clone();
         let reader = h.rt.spawn(async move {
-            fs.read(&q, ReadPosition::Absolute(UintN::from(next)), limit, 1, tx)
-                .await
+            let read = fs
+                .read(&q, ReadPosition::Absolute(UintN::from(next)), limit, 1, tx)
+                .await;
+            if matches!(read, Ok(true)) {
+                following.mark();
+            }
+            read
         });
         let mut received = 0u64;
         let mut stopped = false;
@@ -340,7 +354,7 @@ fn read_records(
         loop {
             let entry = h.rt.block_on(async {
                 tokio::select! {
-                    entry = rx.recv() => Some(entry),
+                    entry = wait.recv(&mut rx) => Some(entry),
                     _ = stop.wait_for(|stopped| *stopped), if follow => None,
                 }
             });

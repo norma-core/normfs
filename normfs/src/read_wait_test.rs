@@ -1,4 +1,4 @@
-use super::read_wait::{line, Hist, ReadWait, State};
+use crate::read_wait::{line, Hist, ReadWait, State};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 

@@ -229,18 +229,18 @@ fn registry() -> &'static Mutex<Registry> {
 }
 
 /// One read's place in the log, removed on drop.
-pub(crate) struct ReadWait {
+pub struct ReadWait {
     id: u64,
     shared: Arc<Shared>,
 }
 
 /// Marks a read that went on to follow the queue: its waits from then on are
 /// for new writes, not for the server.
-pub(crate) struct Following(Arc<Shared>);
+pub struct Following(Arc<Shared>);
 
 impl Following {
     /// A wait still running ends here: what came before was the server's.
-    pub(crate) fn mark(&self) {
+    pub fn mark(&self) {
         let mut state = self.0.state.lock().unwrap();
         state.following = true;
         if let Some(at) = state.waiting.take() {
@@ -256,7 +256,7 @@ impl Following {
 }
 
 impl ReadWait {
-    pub(crate) fn start(label: String) -> Self {
+    pub fn start(label: String) -> Self {
         let shared = Arc::new(Shared {
             label,
             state: Mutex::new(State::new(Instant::now())),
@@ -269,13 +269,13 @@ impl ReadWait {
         Self { id, shared }
     }
 
-    pub(crate) fn following(&self) -> Following {
+    pub fn following(&self) -> Following {
         Following(self.shared.clone())
     }
 
     /// A wait that ends the read counts too: a read that stalls and then
     /// fails is the one most worth seeing.
-    pub(crate) async fn recv<T>(&self, rx: &mut mpsc::Receiver<T>) -> Option<T> {
+    pub async fn recv<T>(&self, rx: &mut mpsc::Receiver<T>) -> Option<T> {
         match rx.try_recv() {
             Ok(v) => return Some(v),
             Err(TryRecvError::Disconnected) => return None,

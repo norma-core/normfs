@@ -17,6 +17,7 @@ crate-type = ["staticlib", "rlib"]
 normfs = { workspace = true }
 tokio = { workspace = true }
 bytes = { workspace = true }
+env_logger = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
