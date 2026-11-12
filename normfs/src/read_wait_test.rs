@@ -125,3 +125,29 @@ async fn test_a_wait_running_when_the_read_follows_ends_there() {
     assert_eq!(got, Some(1));
     assert_eq!(probe.waits(), (n, total));
 }
+
+#[test]
+fn test_a_running_wait_counts_in_the_total() {
+    let mut s = State::new(Instant::now());
+    let t0 = Instant::now();
+    s.start_wait(t0);
+    let l = s
+        .line("read_id: 5", t0 + Duration::from_secs(5), false)
+        .unwrap();
+    assert!(l.contains("waits=0 total=5000.0 ms ("), "{l}");
+    assert!(l.ends_with("waiting=5000.0 ms"), "{l}");
+}
+
+#[tokio::test]
+async fn test_a_cancelled_wait_counts_when_the_read_ends() {
+    let wait = ReadWait::start("read_id: 6".into());
+    let probe = wait.following();
+    let (_tx, mut rx) = mpsc::channel::<u32>(4);
+    let pending = tokio::time::timeout(Duration::from_millis(20), wait.recv(&mut rx)).await;
+    assert!(pending.is_err());
+    assert_eq!(probe.waits().0, 0);
+    drop(wait);
+    let (n, total) = probe.waits();
+    assert_eq!(n, 1);
+    assert!(total >= Duration::from_millis(20), "{total:?}");
+}
