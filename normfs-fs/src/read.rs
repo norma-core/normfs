@@ -43,6 +43,14 @@ impl ReadFile {
         }
     }
 
+    pub(crate) fn filled(fs: Fs, file: File, buffer: Vec<u8>, n: usize) -> Self {
+        Self {
+            end: n,
+            buffer,
+            ..Self::new(fs, file)
+        }
+    }
+
     pub fn metadata(&self) -> impl Future<Output = io::Result<Metadata>> + Send + 'static {
         let (fs, file) = (self.fs.clone(), self.file.clone());
         async move { fs.metadata(file).await.map_err(Into::into) }
@@ -79,6 +87,21 @@ impl ReadFile {
         }
         self.offset = offset;
         Ok(offset)
+    }
+}
+
+/// What the first `poll_read` of a fresh `ReadFile` would have read, or
+/// nothing for an empty file, which callers turn away unread.
+pub(crate) fn first_window(file: &File, len: u64) -> io::Result<(Vec<u8>, usize)> {
+    if len == 0 {
+        return Ok((Vec::new(), 0));
+    }
+    let mut buffer = vec![0; AHEAD_MIN];
+    loop {
+        match crate::os::read_at(file, &mut buffer, 0) {
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            result => return result.map(|n| (buffer, n)),
+        }
     }
 }
 

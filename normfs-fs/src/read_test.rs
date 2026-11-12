@@ -174,3 +174,50 @@ async fn a_seek_inside_the_window_costs_no_read() {
     assert_eq!(piece[0], 150_000u32 as u8);
     assert_eq!(submissions.load(Ordering::SeqCst), after_first + 1);
 }
+
+#[tokio::test]
+async fn a_sized_open_reads_its_first_window_in_one_trip() {
+    use std::sync::atomic::Ordering;
+    use tokio::io::AsyncReadExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("data");
+    fs::write(&path, (0..200_000u32).map(|i| i as u8).collect::<Vec<_>>()).unwrap();
+    let mut fs = Fs::new(FsConfig {
+        threads: 1,
+        ..Default::default()
+    })
+    .unwrap();
+    let submissions = counting(&mut fs);
+    let (mut reader, len) = fs.open_read_sized(&path).await.unwrap();
+    assert_eq!(len, 200_000);
+    assert_eq!(submissions.load(Ordering::SeqCst), 1);
+    let mut head = [0; 128];
+    reader.read_exact(&mut head).await.unwrap();
+    reader.seek(std::io::SeekFrom::Start(0)).await.unwrap();
+    reader.read_exact(&mut head).await.unwrap();
+    assert_eq!(head[127], 127);
+    assert_eq!(submissions.load(Ordering::SeqCst), 1);
+    let mut rest = Vec::new();
+    reader.read_to_end(&mut rest).await.unwrap();
+    assert_eq!(rest.len(), 200_000 - 128);
+    assert_eq!(rest[0], 128);
+}
+
+#[tokio::test]
+async fn a_sized_open_of_an_empty_file_reads_nothing() {
+    use tokio::io::AsyncReadExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("data");
+    fs::write(&path, b"").unwrap();
+    let fs = Fs::new(FsConfig {
+        threads: 1,
+        ..Default::default()
+    })
+    .unwrap();
+    let (mut reader, len) = fs.open_read_sized(&path).await.unwrap();
+    assert_eq!(len, 0);
+    assert_eq!(reader.buffer.capacity(), 0);
+    let mut rest = Vec::new();
+    reader.read_to_end(&mut rest).await.unwrap();
+    assert!(rest.is_empty());
+}

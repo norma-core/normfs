@@ -1527,6 +1527,17 @@ impl NormFS {
                 queue.short(), latest_file_id, e);
         }
         let latest_unreadable = unreadable.is_some();
+        log::info!(target: "normfs",
+            "Queue '{}' - Latest file {} ends at WAL={:?}, Store={:?}",
+            queue.short(), latest_file_id,
+            wal_end.as_ref().ok().and_then(|o| o.as_ref()),
+            store_end.as_ref().ok().and_then(|o| o.as_ref()));
+        // Reused for the first step of the walk, as reading it again rescans the
+        // WAL file. A failed read is tried again there: it may have been transient.
+        let mut known_end = match (wal_end, store_end) {
+            (Ok(wal), Ok(store)) => Some(wal.max(store)),
+            _ => None,
+        };
 
         // Walk backward from the latest file ID to find the first file with actual entries
         let mut current_file_id = latest_file_id.clone();
@@ -1537,8 +1548,12 @@ impl NormFS {
                 queue.short(), current_file_id
             );
 
+            let end = match known_end.take() {
+                Some(end) => end,
+                None => self.get_file_end_all_sources(queue, &current_file_id).await,
+            };
             // Try to get the last entry ID in this file
-            match self.get_file_end_all_sources(queue, &current_file_id).await {
+            match end {
                 Some(last_entry_id) => {
                     log::info!(target: "normfs",
                         "Queue '{}' - Found file with entries: file_id={:?}, last_entry_id={:?}",

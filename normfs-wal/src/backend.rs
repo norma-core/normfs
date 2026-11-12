@@ -582,10 +582,11 @@ impl Backend for Local {
         file_id: &'a UintN,
     ) -> BackendFuture<'a, Option<Body>> {
         Box::pin(async move {
-            let Some(file) = absent(self.fs.open_read(&self.path(queue, file_id)).await)? else {
+            let Some((file, len)) =
+                absent(self.fs.open_read_sized(&self.path(queue, file_id)).await)?
+            else {
                 return Ok(None);
             };
-            let len = file.metadata().await?.len();
             Ok(Some(Body::Stream { file, len }))
         })
     }
@@ -693,10 +694,11 @@ impl Backend for Local {
         file_id: &'a UintN,
     ) -> BackendFuture<'a, Option<(Reader, u64)>> {
         Box::pin(async move {
-            let Some(file) = absent(self.fs.open_read(&self.path(queue, file_id)).await)? else {
+            let Some((file, len)) =
+                absent(self.fs.open_read_sized(&self.path(queue, file_id)).await)?
+            else {
                 return Ok(None);
             };
-            let len = file.metadata().await?.len();
             let reader: Reader = Box::new(file);
             Ok(Some((reader, len)))
         })
