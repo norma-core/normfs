@@ -212,3 +212,27 @@ fn test_a_new_read_counts_all_its_entries() {
     assert_eq!(s.entries(5, Instant::now()), 5);
     assert_eq!(s.entries(9, Instant::now()), 9);
 }
+
+#[tokio::test]
+async fn test_running_writes_all_count_in_the_total() {
+    use super::read_wait::{write_lines, WriteTimer};
+    let queue = normfs_types::QueueIdResolver::new("test").resolve("two-writes");
+    let (a, b) = (WriteTimer::start(&queue, 1), WriteTimer::start(&queue, 1));
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let lines = write_lines();
+    let ours = lines
+        .iter()
+        .find(|l| l.contains("queue_id: two-writes"))
+        .unwrap();
+    let total: f64 = ours
+        .split("total=")
+        .nth(1)
+        .unwrap()
+        .split(' ')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(total >= 60.0, "{ours}");
+    drop((a, b));
+}

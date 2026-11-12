@@ -210,12 +210,17 @@ impl State {
     fn render(&mut self, what: &str, label: &str, total: u64, now: Instant) -> (String, u64, bool) {
         let entries = self.entries(total, now);
         let (hist, mut busy_us) = self.window(now);
-        let waiting = self.waiting.map(|at| now.saturating_duration_since(at));
         let span = self.span(now);
-        // A wait still running counts for the part of it inside the window.
-        if let Some(w) = waiting {
-            busy_us += w.min(span).as_micros() as u64;
+        // Waits still running count for their part inside the window; the
+        // oldest shows as waiting=.
+        let running = self.waiting.iter().chain(self.open.iter());
+        let running: Vec<Duration> = running
+            .map(|at| now.saturating_duration_since(*at))
+            .collect();
+        for w in &running {
+            busy_us += w.min(&span).as_micros() as u64;
         }
+        let waiting = running.into_iter().max();
         let waited = hist.n > 0 || waiting.is_some();
         let l = line(what, label, entries, &hist, busy_us, span, waiting);
         (l, busy_us, waited)
@@ -570,7 +575,6 @@ pub(crate) fn write_lines() -> Vec<String> {
     let mut idle = Vec::new();
     for (queue, shared) in all {
         let mut state = shared.state.lock().unwrap();
-        state.waiting = state.open.iter().min().copied();
         let taken = shared.taken.load(Ordering::Relaxed);
         let (l, busy_us, wrote) = state.render("Write", &shared.label, taken, Instant::now());
         if wrote {
