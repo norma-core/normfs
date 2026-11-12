@@ -87,11 +87,11 @@ fn base() -> Instant {
     *BASE.get_or_init(Instant::now)
 }
 
-fn period_of(at: Instant) -> u64 {
+pub(crate) fn period_of(at: Instant) -> u64 {
     at.saturating_duration_since(base()).as_secs() / PERIOD.as_secs()
 }
 
-fn period_start(p: u64) -> Instant {
+pub(crate) fn period_start(p: u64) -> Instant {
     base() + PERIOD * p as u32
 }
 
@@ -111,6 +111,8 @@ pub(crate) struct State {
     following: bool,
     /// The entry count as each report saw it, to count the window's entries.
     marks: VecDeque<(u64, u64)>,
+    /// Writes still running, by start.
+    open: Vec<Instant>,
 }
 
 impl State {
@@ -123,23 +125,32 @@ impl State {
             waiting: None,
             following: false,
             marks: VecDeque::new(),
+            open: Vec::new(),
         }
     }
 
     fn slot(&mut self, period: u64) -> &mut Slot {
-        // Concurrent writes can end out of order; a late one joins the newest period.
-        if self.slots.back().is_none_or(|s| s.period < period) {
-            self.slots.push_back(Slot {
-                period,
-                hist: Hist::new(),
-                busy_us: 0,
-            });
-        }
-        self.slots.back_mut().expect("pushed above")
+        let new = Slot {
+            period,
+            hist: Hist::new(),
+            busy_us: 0,
+        };
+        let i = match self.slots.iter().position(|s| s.period >= period) {
+            Some(i) if self.slots[i].period == period => i,
+            Some(i) => {
+                self.slots.insert(i, new);
+                i
+            }
+            None => {
+                self.slots.push_back(new);
+                self.slots.len() - 1
+            }
+        };
+        &mut self.slots[i]
     }
 
-    /// A wait from `start` to `end`; waits of one read never overlap, so
-    /// periods only grow.
+    /// A wait from `start` to `end`. Writes to one queue can overlap and end
+    /// out of order, so each part goes to its own period.
     pub(crate) fn add(&mut self, start: Instant, end: Instant) {
         let last = period_of(end);
         for p in period_of(start).max((last + 1).saturating_sub(SLOTS))..=last {
@@ -178,19 +189,21 @@ impl State {
 
     /// Entries since the window began, from the count each report saw; a
     /// report every period keeps it within one period of exact.
-    fn entries(&mut self, total: u64, now: Instant) -> u64 {
+    pub(crate) fn entries(&mut self, total: u64, now: Instant) -> u64 {
         let p = period_of(now);
         let first = (p + 1).saturating_sub(SLOTS);
         if self.marks.back().is_none_or(|(at, _)| *at != p) {
             self.marks.push_back((p, total));
         }
-        while self.marks.get(1).is_some_and(|(at, _)| *at <= first) {
+        while self.marks.front().is_some_and(|(at, _)| *at < first) {
             self.marks.pop_front();
         }
-        match self.marks.front() {
-            Some((at, seen)) if *at <= first => total - seen,
-            _ => total,
+        // A read that began inside the window took all its entries in it, as
+        // does every read while the window still reaches back to the first one.
+        if first == 0 || self.since >= period_start(first) {
+            return total;
         }
+        total - self.marks.front().map_or(0, |(_, seen)| *seen)
     }
 
     /// The line, the time waited in the window, and whether there was a wait.
@@ -496,28 +509,32 @@ pub(crate) struct WriteTimer {
 
 impl WriteTimer {
     pub(crate) fn start(queue: &QueueId, records: u64) -> Self {
-        let found = writers().read().unwrap().get(queue).cloned();
+        let started = Instant::now();
+        // Opened under the map's lock, so a report cannot drop the queue in between.
+        let open = |shared: &Arc<Shared>| {
+            shared.taken.fetch_add(records, Ordering::Relaxed);
+            shared.state.lock().unwrap().open.push(started);
+            shared.clone()
+        };
+        let found = writers().read().unwrap().get(queue).map(open);
         let shared = found.unwrap_or_else(|| {
-            let shared = writers()
-                .write()
-                .unwrap()
-                .entry(queue.clone())
-                .or_insert_with(|| {
-                    Arc::new(Shared {
-                        label: format!("queue_id: {}", queue.short()),
-                        taken: AtomicU64::new(0),
-                        state: Mutex::new(State::new(Instant::now())),
-                    })
-                })
-                .clone();
+            let shared = open(
+                writers()
+                    .write()
+                    .unwrap()
+                    .entry(queue.clone())
+                    .or_insert_with(|| {
+                        Arc::new(Shared {
+                            label: format!("queue_id: {}", queue.short()),
+                            taken: AtomicU64::new(0),
+                            state: Mutex::new(State::new(started)),
+                        })
+                    }),
+            );
             registry().lock().unwrap().keep_reporting();
             shared
         });
-        shared.taken.fetch_add(records, Ordering::Relaxed);
-        Self {
-            shared,
-            started: Instant::now(),
-        }
+        Self { shared, started }
     }
 }
 
@@ -533,13 +550,16 @@ pub(crate) fn write_load(queue: &QueueId) -> Option<(u64, u64, Duration)> {
 impl Drop for WriteTimer {
     fn drop(&mut self) {
         let mut state = self.shared.state.lock().unwrap();
+        if let Some(i) = state.open.iter().position(|at| *at == self.started) {
+            state.open.swap_remove(i);
+        }
         state.add(self.started, Instant::now());
     }
 }
 
 /// Every queue written in the window, the longest waits first; a queue with
-/// no write in it leaves.
-fn write_lines() -> Vec<String> {
+/// no write in it and none running leaves.
+pub(crate) fn write_lines() -> Vec<String> {
     let all: Vec<_> = writers()
         .read()
         .unwrap()
@@ -550,6 +570,7 @@ fn write_lines() -> Vec<String> {
     let mut idle = Vec::new();
     for (queue, shared) in all {
         let mut state = shared.state.lock().unwrap();
+        state.waiting = state.open.iter().min().copied();
         let taken = shared.taken.load(Ordering::Relaxed);
         let (l, busy_us, wrote) = state.render("Write", &shared.label, taken, Instant::now());
         if wrote {
@@ -561,7 +582,13 @@ fn write_lines() -> Vec<String> {
     if !idle.is_empty() {
         let mut writers = writers().write().unwrap();
         for queue in idle {
-            writers.remove(&queue);
+            let still_idle = writers.get(&queue).is_some_and(|shared| {
+                let state = shared.state.lock().unwrap();
+                state.open.is_empty() && state.window(Instant::now()).0.n == 0
+            });
+            if still_idle {
+                writers.remove(&queue);
+            }
         }
     }
     if live.is_empty() {
