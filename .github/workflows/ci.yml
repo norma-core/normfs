@@ -86,13 +86,15 @@ jobs:
       # also run: WP assumes the intrinsic path rather than proving it.
       - name: x86_64
         run: |
-          cargo zigbuild -p normfs-wal --release --target x86_64-unknown-linux-gnu --tests
+          # Cargo names the test binaries it built; their directory moved in 1.100.
+          cargo zigbuild -p normfs-wal --release --target x86_64-unknown-linux-gnu --tests \
+              --message-format=json-render-diagnostics > build.json
           ran=0
-          for t in target/x86_64-unknown-linux-gnu/release/deps/normfs_wal-*; do
-              if [ -f "$t" ] && [ -x "$t" ]; then "$t"; ran=$((ran + 1)); fi
+          for t in $(jq -r 'select(.executable != null) | .executable' build.json); do
+              "$t"
+              ran=$((ran + 1))
           done
-          # A glob that matches no binary means the layout moved, not that the
-          # tests passed.
+          # No binary named means the build changed, not that the tests passed.
           test "$ran" -gt 0
       - name: aarch64
         run: cargo zigbuild -p normfs-wal --release --target aarch64-unknown-linux-gnu
