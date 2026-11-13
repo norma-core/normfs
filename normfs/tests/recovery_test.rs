@@ -2828,6 +2828,53 @@ async fn test_recovery_keeps_a_latest_file_it_cannot_read() {
     );
 }
 
+/// A read of the latest file that fails once must not be taken for a file
+/// with no entries: recovery would resume below its records and hand their
+/// ids out again.
+#[tokio::test]
+async fn test_recovery_rereads_a_latest_file_that_failed_once() {
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().to_path_buf();
+
+    let instance_id = {
+        let fs = NormFS::new(path.clone(), NormFsSettings::all_active())
+            .await
+            .unwrap();
+        let instance_id = fs.get_instance_id().to_string();
+        let queue_id = fs.resolve("test-queue");
+        fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
+        for i in 0..10 {
+            fs.enqueue(&queue_id, Bytes::from(format!("entry-{}", i)))
+                .await
+                .unwrap();
+        }
+        fs.close().await.unwrap();
+        instance_id
+    };
+
+    let queue_id = QueueIdResolver::new(&instance_id).resolve("test-queue");
+    let wal_path = get_queue_wal_path(&path, &queue_id);
+    let file_1 = UintN::from(1u64).to_file_path(wal_path.to_str().unwrap(), "wal");
+    normfs_wal::fail_reads(&file_1, 1);
+
+    let fs = NormFS::new(path.clone(), NormFsSettings::all_active())
+        .await
+        .unwrap();
+    let queue_id = fs.resolve("test-queue");
+    fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
+    let id = fs
+        .enqueue(&queue_id, Bytes::from("new-entry"))
+        .await
+        .unwrap();
+    fs.close().await.unwrap();
+    normfs_wal::heal(&file_1);
+    assert_eq!(
+        id,
+        UintN::from(10u64),
+        "the new record must follow the ten before it"
+    );
+}
+
 /// What a crash during a rotation retry leaves behind: file M is a valid prefix
 /// missing what its closing flush could not write, and file M+1's header was
 /// stamped with the enqueue side's counter, which counted those records.

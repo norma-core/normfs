@@ -51,9 +51,35 @@ mod on {
         }
     }
 
+    fn reads() -> &'static Mutex<HashMap<PathBuf, u32>> {
+        static FAILURES: OnceLock<Mutex<HashMap<PathBuf, u32>>> = OnceLock::new();
+        FAILURES.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    /// The next `times` sized opens of `path` fail after the open, as a
+    /// passing read error would.
+    pub fn fail_reads(path: impl AsRef<Path>, times: u32) {
+        reads()
+            .lock()
+            .unwrap()
+            .insert(path.as_ref().to_path_buf(), times);
+    }
+
+    pub(crate) fn take_read_failure(path: &Path) -> bool {
+        let mut failures = reads().lock().unwrap();
+        match failures.get_mut(path) {
+            Some(left) if *left > 0 => {
+                *left -= 1;
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub fn heal(path: impl AsRef<Path>) {
         scheduled().lock().unwrap().remove(path.as_ref());
         truncates().lock().unwrap().remove(path.as_ref());
+        reads().lock().unwrap().remove(path.as_ref());
     }
 
     pub(crate) fn take_failure(path: &Path) -> bool {
@@ -71,10 +97,10 @@ mod on {
 }
 
 #[cfg(any(test, feature = "fault-injection"))]
-pub use on::{fail_flushes, fail_truncates, heal};
+pub use on::{fail_flushes, fail_reads, fail_truncates, heal};
 
 #[cfg(any(test, feature = "fault-injection"))]
-pub(crate) use on::{take_failure, take_truncate_failure};
+pub(crate) use on::{take_failure, take_read_failure, take_truncate_failure};
 
 #[cfg(not(any(test, feature = "fault-injection")))]
 #[inline(always)]
@@ -84,5 +110,11 @@ pub(crate) fn take_failure(_path: &std::path::Path) -> bool {
 
 #[cfg(not(any(test, feature = "fault-injection")))]
 pub(crate) fn take_truncate_failure(_path: &std::path::Path) -> bool {
+    false
+}
+
+#[cfg(not(any(test, feature = "fault-injection")))]
+#[inline(always)]
+pub(crate) fn take_read_failure(_path: &std::path::Path) -> bool {
     false
 }

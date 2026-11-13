@@ -513,6 +513,31 @@ impl Fs {
         Ok(ReadFile::new(self.clone(), file))
     }
 
+    /// [`Fs::open_read`] with the file's length and its first window already
+    /// read, in one trip to the executor instead of three.
+    pub async fn open_read_sized(&self, path: &Path) -> io::Result<(ReadFile, u64)> {
+        let at = self.at(path)?;
+        let injected = fault::take_read_failure(path);
+        let (file, len, buffer, n) = self
+            .run_blocking(move || {
+                let file = beneath::open(&at, false)?;
+                if injected {
+                    return Err(io::Error::other("injected read failure"));
+                }
+                // Only the open says whether the file is there; past it a
+                // NotFound would read as absent.
+                let opened = |e: io::Error| match e.kind() {
+                    io::ErrorKind::NotFound => io::Error::other(e),
+                    _ => e,
+                };
+                let len = file.metadata().map_err(opened)?.len();
+                let (buffer, n) = read::first_window(&file, len).map_err(opened)?;
+                Ok((file, len, buffer, n))
+            })
+            .await?;
+        Ok((ReadFile::filled(self.clone(), file, buffer, n), len))
+    }
+
     pub async fn open(&self, path: &Path, write: bool) -> io::Result<File> {
         let at = self.at(path)?;
         Ok(self.run_blocking(move || beneath::open(&at, write)).await?)

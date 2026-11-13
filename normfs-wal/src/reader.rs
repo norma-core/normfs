@@ -150,11 +150,8 @@ async fn open(
     file_id: &UintN,
 ) -> Result<Option<(Reader, u64)>, WalError> {
     let file_path = file_id.to_file_path(base_path.to_str().unwrap(), "wal");
-    match fs.open_read(&file_path).await {
-        Ok(file) => {
-            let len = file.metadata().await?.len();
-            Ok(Some((Box::new(file), len)))
-        }
+    match fs.open_read_sized(&file_path).await {
+        Ok((file, len)) => Ok(Some((Box::new(file), len))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.into()),
     }

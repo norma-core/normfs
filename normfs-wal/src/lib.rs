@@ -29,7 +29,7 @@ pub use backend::{
 };
 pub use errors::*;
 #[cfg(any(test, feature = "fault-injection"))]
-pub use normfs_fs::fault::{fail_flushes, heal};
+pub use normfs_fs::fault::{fail_flushes, fail_reads, heal};
 pub use normfs_fs::{Fs, FsConfig};
 pub use pack_pool::{PackPool, PackSlot};
 pub use page_pool::{
