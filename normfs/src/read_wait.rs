@@ -295,6 +295,18 @@ fn registry() -> &'static Mutex<Registry> {
     REG.get_or_init(Default::default)
 }
 
+#[cfg(test)]
+pub(crate) fn ended_read(label: &str) -> Option<String> {
+    let label = format!("({label}):");
+    registry()
+        .lock()
+        .unwrap()
+        .ended
+        .iter()
+        .find(|line| line.contains(&label))
+        .cloned()
+}
+
 /// One read's place in the log, removed on drop.
 pub struct ReadWait {
     id: u64,
@@ -307,8 +319,9 @@ pub struct Following(Arc<Shared>);
 
 /// Where the time compressing a read's entries goes: to the read's line and to
 /// the process total behind the pools line.
+/// Retains the reporting owner so pending compression reaches the final log.
 #[derive(Clone, Default)]
-pub struct CompressMeter(Option<Arc<Shared>>);
+pub struct CompressMeter(Option<Arc<ReadWait>>);
 
 static COMPRESS_US: AtomicU64 = AtomicU64::new(0);
 
@@ -316,13 +329,13 @@ impl CompressMeter {
     pub fn add(&self, took: Duration) {
         let us = took.as_micros() as u64;
         COMPRESS_US.fetch_add(us, Ordering::Relaxed);
-        if let Some(shared) = &self.0 {
-            shared.compress_us.fetch_add(us, Ordering::Relaxed);
+        if let Some(wait) = &self.0 {
+            wait.shared.compress_us.fetch_add(us, Ordering::Relaxed);
         }
     }
 }
 
-/// Time spent compressing for every read of the process so far.
+/// Cumulative elapsed time in compression calls, including scheduling delays.
 pub fn compress_total() -> Duration {
     Duration::from_micros(COMPRESS_US.load(Ordering::Relaxed))
 }
@@ -372,8 +385,8 @@ impl ReadWait {
         Self { id, shared }
     }
 
-    pub fn compress_meter(&self) -> CompressMeter {
-        CompressMeter(Some(self.shared.clone()))
+    pub fn compress_meter(self: &Arc<Self>) -> CompressMeter {
+        CompressMeter(Some(self.clone()))
     }
 
     pub fn following(&self) -> Following {

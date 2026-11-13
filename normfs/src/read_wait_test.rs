@@ -1,4 +1,5 @@
 use crate::read_wait::{line, Hist, ReadWait, State};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
@@ -239,7 +240,7 @@ async fn test_running_writes_all_count_in_the_total() {
 
 #[test]
 fn test_compression_shows_on_the_read_and_in_the_total() {
-    let wait = ReadWait::start("read_id: 7".into());
+    let wait = Arc::new(ReadWait::start("read_id: 7".into()));
     let probe = wait.following();
     assert!(!probe.line().contains("compress="));
     let before = super::read_wait::compress_total();

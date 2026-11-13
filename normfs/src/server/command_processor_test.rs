@@ -11,6 +11,9 @@ use super::command_processor::{encoded_with, RawReport, PEAK};
 use crate::proto::Encoding;
 use crate::read_wait::ReadWait;
 
+// Other blocking compressions would corrupt the process-wide peak counter's cap check.
+static BLOCKING_TEST: Mutex<()> = Mutex::new(());
+
 /// Events, entries and bytes reported as sent raw.
 #[derive(Default)]
 struct RawCount(Mutex<(u64, u64, u64)>);
@@ -41,6 +44,7 @@ fn record(i: u64) -> Bytes {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn many_compressed_reads_share_one_cap_and_keep_order() {
+    let _exclusive = BLOCKING_TEST.lock().unwrap();
     const READS: u64 = 30;
     const ENTRIES: u64 = 20;
     const SLOTS: usize = 3;
@@ -108,6 +112,7 @@ async fn a_follow_keeps_draining_while_every_slot_is_taken() {
 
 #[test]
 fn a_follow_keeps_draining_past_a_stuck_compression() {
+    let _exclusive = BLOCKING_TEST.lock().unwrap();
     const ENTRIES: u64 = 2100;
     let rt = tokio::runtime::Builder::new_current_thread()
         .max_blocking_threads(1)
@@ -125,7 +130,7 @@ fn a_follow_keeps_draining_past_a_stuck_compression() {
             true,
             Arc::new(Semaphore::new(1)),
             (raw.clone(), queue),
-            None,
+            Some(ReadWait::start("abandoned-compression".into())),
         );
         let reader = tokio::spawn(async move {
             let mut n = 0;
@@ -143,8 +148,22 @@ fn a_follow_keeps_draining_past_a_stuck_compression() {
         drop(tx);
         assert_eq!(reader.await.unwrap(), ENTRIES);
         assert_eq!(raw.0.lock().unwrap().1, ENTRIES);
+        assert!(crate::read_wait::ended_read("abandoned-compression").is_none());
     });
     release.send(()).unwrap();
+    let line = rt.block_on(async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(line) = crate::read_wait::ended_read("abandoned-compression") {
+                    break line;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap()
+    });
+    assert!(line.contains(" compress="), "{line}");
 }
 
 #[tokio::test]
@@ -228,4 +247,76 @@ async fn a_starved_read_logs_its_wait() {
         );
         assert!(total >= std::time::Duration::from_millis(50), "{total:?}");
     }
+}
+
+#[tokio::test]
+async fn an_ended_read_reports_its_last_inline_compression() {
+    let label = "last-inline-compression";
+    let (tx, rx) = mpsc::channel(4);
+    let data = Bytes::from(vec![7u8; 8192]);
+    let mut out = encoded_with(
+        rx,
+        true,
+        Arc::new(Semaphore::new(0)),
+        quiet(),
+        Some(ReadWait::start(label.into())),
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    tx.send(ReadEntry::new(
+        UintN::from(0u64),
+        data.clone(),
+        DataSource::DiskStore,
+    ))
+    .await
+    .unwrap();
+    drop(tx);
+    let (_, (packed, encoding)) = out.recv().await.unwrap();
+    assert_eq!(encoding, Encoding::EncZstd);
+    assert_eq!(normfs_store::zstd_decompress(&packed).unwrap(), data);
+    assert!(out.recv().await.is_none());
+    let line = crate::read_wait::ended_read(label).unwrap();
+    assert!(line.contains(" compress="), "{line}");
+}
+
+#[test]
+fn an_ended_read_reports_its_last_blocking_compression() {
+    let _exclusive = BLOCKING_TEST.lock().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let (release, gate) = std::sync::mpsc::channel::<()>();
+    rt.spawn_blocking(move || gate.recv());
+    rt.block_on(async {
+        let label = "last-blocking-compression";
+        let (tx, rx) = mpsc::channel(4);
+        let mut out = encoded_with(
+            rx,
+            true,
+            Arc::new(Semaphore::new(1)),
+            quiet(),
+            Some(ReadWait::start(label.into())),
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let data = Bytes::from(vec![7u8; 64 * 1024]);
+        tx.send(ReadEntry::new(
+            UintN::from(0u64),
+            data.clone(),
+            DataSource::DiskStore,
+        ))
+        .await
+        .unwrap();
+        drop(tx);
+        tokio::task::yield_now().await;
+        let early = crate::read_wait::ended_read(label);
+        release.send(()).unwrap();
+        let (_, (packed, encoding)) = out.recv().await.unwrap();
+        assert_eq!(encoding, Encoding::EncZstd);
+        assert_eq!(normfs_store::zstd_decompress(&packed).unwrap(), data);
+        assert!(out.recv().await.is_none());
+        assert!(early.is_none(), "{early:?}");
+        let line = crate::read_wait::ended_read(label).unwrap();
+        assert!(line.contains(" compress="), "{line}");
+    });
 }

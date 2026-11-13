@@ -118,10 +118,11 @@ fn wire_slots() -> Arc<Semaphore> {
                 let used = cores - watched.upgrade()?.available_permits();
                 let (at, total) = (Instant::now(), crate::read_wait::compress_total());
                 let mut last = last.lock().unwrap();
-                let busy = (total - last.1).as_secs_f64() / at.duration_since(last.0).as_secs_f64();
+                let elapsed_per_second =
+                    (total - last.1).as_secs_f64() / at.duration_since(last.0).as_secs_f64();
                 *last = (at, total);
                 Some(format!(
-                    "wire compression {busy:.1} cores busy, large-entry slots {used}/{cores} in use"
+                    "wire compression elapsed={elapsed_per_second:.1} s/s, large-entry slots {used}/{cores} in use"
                 ))
             });
             slots
@@ -143,7 +144,7 @@ fn encoded(
     encoded_with(rx, compress, wire_slots(), report, Some(wait))
 }
 
-async fn next(rx: &mut mpsc::Receiver<ReadEntry>, wait: &Option<ReadWait>) -> Option<ReadEntry> {
+async fn next(rx: &mut mpsc::Receiver<ReadEntry>, wait: Option<&ReadWait>) -> Option<ReadEntry> {
     match wait {
         Some(wait) => wait.recv(rx).await,
         None => rx.recv().await,
@@ -163,7 +164,7 @@ pub(crate) fn encoded_with(
     let (out_tx, out_rx) = mpsc::channel(ENCODE_AHEAD);
     if !compress {
         tokio::spawn(async move {
-            while let Some(mut entry) = next(&mut rx, &wait).await {
+            while let Some(mut entry) = next(&mut rx, wait.as_ref()).await {
                 let data = std::mem::take(&mut entry.data);
                 if out_tx
                     .send((entry, (data, Encoding::EncNone)))
@@ -177,6 +178,7 @@ pub(crate) fn encoded_with(
         return out_rx;
     }
     let (pending_tx, mut pending_rx) = mpsc::channel(ENCODE_AHEAD);
+    let wait = wait.map(Arc::new);
     let meter = wait
         .as_ref()
         .map(ReadWait::compress_meter)
@@ -185,7 +187,7 @@ pub(crate) fn encoded_with(
     let stalled = Arc::new(Notify::new());
     let drain_stalled = stalled.clone();
     tokio::spawn(async move {
-        while let Some(mut entry) = next(&mut rx, &wait).await {
+        while let Some(mut entry) = next(&mut rx, wait.as_deref()).await {
             let data = std::mem::take(&mut entry.data);
             let inline = (MIN_WIRE_SIZE..INLINE_WIRE_SIZE).contains(&data.len());
             // Only a live follow is dropped for a full channel; a read from
