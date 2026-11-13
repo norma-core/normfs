@@ -2,13 +2,14 @@ use bytes::Bytes;
 use normfs_fs::{AppendOutcome, Fs, PublishSpec, ReadFile, Runs, Scan, ScanResult, TmpMode};
 use normfs_types::events::UploadFailure;
 use normfs_types::{DataSource, QueueId};
+use std::collections::HashMap;
 use std::fs::File;
 use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use uintn::UintN;
 
@@ -331,6 +332,119 @@ impl Layout {
     }
 }
 
+/// The first and last file id of each queue, kept as files come and go so
+/// that finding them does not list the directory. Shared by every backend on
+/// the same directory. Files only appear through them, but eviction removes
+/// files behind them, so a remembered end is checked to still be there.
+#[derive(Default)]
+pub struct FileEnds(Mutex<HashMap<QueueId, Ends>>);
+
+/// `None` is not known; `Some(None)` is known empty.
+#[derive(Default)]
+struct Ends {
+    /// Bumped by every change, so a listing that overlapped one is not kept.
+    generation: u64,
+    min: Option<Option<UintN>>,
+    max: Option<Option<UintN>>,
+    /// Puts and creates under way: their file may be on disk before the ends
+    /// hear of it, so until they finish the directory is listed instead.
+    landing: u64,
+}
+
+impl Ends {
+    fn side(&mut self, end: End) -> &mut Option<Option<UintN>> {
+        match end {
+            End::Min => &mut self.min,
+            End::Max => &mut self.max,
+        }
+    }
+}
+
+impl FileEnds {
+    /// The end if known, else the generation a listing must still find.
+    fn known(&self, queue: &QueueId, end: End) -> Result<Option<UintN>, u64> {
+        let mut map = self.0.lock().unwrap();
+        let ends = map.entry(queue.clone()).or_default();
+        let generation = ends.generation;
+        match ends.landing {
+            0 => ends.side(end).clone().ok_or(generation),
+            _ => Err(generation),
+        }
+    }
+
+    fn learn(&self, queue: &QueueId, end: End, generation: u64, found: Option<UintN>) {
+        let mut map = self.0.lock().unwrap();
+        let ends = map.entry(queue.clone()).or_default();
+        if ends.generation == generation && ends.landing == 0 {
+            *ends.side(end) = Some(found);
+        }
+    }
+
+    fn landing(&self, queue: &QueueId) {
+        let mut map = self.0.lock().unwrap();
+        let ends = map.entry(queue.clone()).or_default();
+        ends.generation += 1;
+        ends.landing += 1;
+    }
+
+    /// A put or create finished: `Some` with its file, `None` when it failed
+    /// and may or may not have left one.
+    /// One step with the counter, so the cache never reopens before it
+    /// holds the file.
+    fn landed(&self, queue: &QueueId, file_id: Option<&UintN>) {
+        let mut map = self.0.lock().unwrap();
+        let ends = map.entry(queue.clone()).or_default();
+        ends.landing = ends.landing.saturating_sub(1);
+        ends.generation += 1;
+        let Some(file_id) = file_id else {
+            ends.min = None;
+            ends.max = None;
+            return;
+        };
+        if let Some(min) = &mut ends.min
+            && min.as_ref().is_none_or(|m| file_id < m)
+        {
+            *min = Some(file_id.clone());
+        }
+        if let Some(max) = &mut ends.max
+            && max.as_ref().is_none_or(|m| file_id > m)
+        {
+            *max = Some(file_id.clone());
+        }
+    }
+
+    fn removed(&self, queue: &QueueId, file_id: &UintN) {
+        let mut map = self.0.lock().unwrap();
+        let ends = map.entry(queue.clone()).or_default();
+        ends.generation += 1;
+        for side in [&mut ends.min, &mut ends.max] {
+            if side.as_ref().is_some_and(|s| s.as_ref() == Some(file_id)) {
+                *side = None;
+            }
+        }
+    }
+
+    /// Forgets both ends; the generation a listing must then still find.
+    fn forget(&self, queue: &QueueId) -> u64 {
+        let mut map = self.0.lock().unwrap();
+        let ends = map.entry(queue.clone()).or_default();
+        ends.generation += 1;
+        ends.min = None;
+        ends.max = None;
+        ends.generation
+    }
+}
+
+/// A landing task's result. Its panic goes on unwinding in the caller; the
+/// ends stay closed to the cache for that queue, as the landing never finished.
+fn joined<T>(joined: Result<T, tokio::task::JoinError>) -> Result<T, BackendError> {
+    match joined {
+        Ok(result) => Ok(result),
+        Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+        Err(e) => Err(io::Error::other(e).into()),
+    }
+}
+
 /// Accounts a local put; the store's disk usage implements it.
 pub trait Publisher: Send + Sync {
     fn publish<'a>(
@@ -349,6 +463,7 @@ pub struct Local {
     layout: Layout,
     sync: bool,
     publisher: Option<Arc<dyn Publisher>>,
+    ends: Arc<FileEnds>,
 }
 
 impl Local {
@@ -359,6 +474,7 @@ impl Local {
             layout: Layout::Wal,
             sync: true,
             publisher: None,
+            ends: Arc::default(),
         }
     }
 
@@ -375,7 +491,24 @@ impl Local {
             layout: Layout::Store,
             sync,
             publisher: Some(publisher),
+            ends: Arc::default(),
         }
+    }
+
+    /// Shares `ends` with the other backends on this directory.
+    pub fn with_ends(mut self, ends: Arc<FileEnds>) -> Self {
+        self.ends = ends;
+        self
+    }
+
+    pub fn ends(&self) -> Arc<FileEnds> {
+        self.ends.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn landing(&self, queue: &QueueId) -> bool {
+        let map = self.ends.0.lock().unwrap();
+        map.get(queue).is_some_and(|ends| ends.landing > 0)
     }
 
     pub fn path(&self, queue: &QueueId, file_id: &UintN) -> PathBuf {
@@ -553,12 +686,22 @@ impl Backend for Local {
                 tmp_mode: TmpMode::Excl,
                 sync: self.sync,
             };
-            match &self.publisher {
-                Some(publisher) => publisher.publish(&self.fs, queue, spec).await?,
-                None => {
-                    self.fs.publish(spec, None).await?;
-                }
-            }
+            // On its own task, so a caller that gives up cannot leave the file
+            // landed and the ends not told.
+            let (fs, publisher, ends) =
+                (self.fs.clone(), self.publisher.clone(), self.ends.clone());
+            let (q, id) = (queue.clone(), file_id.clone());
+            ends.landing(queue);
+            let landing = tokio::spawn(async move {
+                let published = match &publisher {
+                    Some(publisher) => publisher.publish(&fs, &q, spec).await,
+                    None => fs.publish(spec, None).await.map(drop).map_err(Into::into),
+                };
+                // A failed put may still have left the file.
+                ends.landed(&q, published.is_ok().then_some(&id));
+                published
+            });
+            joined(landing.await)??;
             log::debug!(target: "normfs-wal",
                 "Put file for queue {}, file {}: {} bytes at {:?}", queue.short(), file_id, len, dst);
             Ok(())
@@ -624,14 +767,26 @@ impl Backend for Local {
 
     fn find<'a>(&'a self, queue: &'a QueueId, end: End) -> BackendFuture<'a, Option<UintN>> {
         Box::pin(async move {
+            let generation = match self.ends.known(queue, end) {
+                Ok(None) => return Ok(None),
+                Ok(Some(id)) => {
+                    if self.fs.stat(&self.path(queue, &id)).await?.is_some() {
+                        return Ok(Some(id));
+                    }
+                    self.ends.forget(queue)
+                }
+                Err(generation) => generation,
+            };
             let which = match end {
                 End::Min => Scan::Min,
                 End::Max => Scan::Max,
             };
-            match self.scan(queue, which).await? {
-                ScanResult::One(id) => Ok(Some(id)),
-                _ => Ok(None),
-            }
+            let found = match self.scan(queue, which).await? {
+                ScanResult::One(id) => Some(id),
+                _ => None,
+            };
+            self.ends.learn(queue, end, generation, found.clone());
+            Ok(found)
         })
     }
 
@@ -645,13 +800,19 @@ impl Backend for Local {
     }
 
     fn delete<'a>(&'a self, queue: &'a QueueId, file_id: &'a UintN) -> BackendFuture<'a, ()> {
-        Box::pin(async move { Ok(self.fs.unlink(&self.path(queue, file_id)).await?) })
+        Box::pin(async move {
+            let unlinked = self.fs.unlink(&self.path(queue, file_id)).await;
+            self.ends.removed(queue, file_id);
+            Ok(unlinked?)
+        })
     }
 
     fn clear<'a>(&'a self, queue: &'a QueueId) -> BackendFuture<'a, ()> {
         Box::pin(async move {
             let dir = self.dir(queue);
-            self.fs.remove_dir_all(&dir).await?;
+            let removed = self.fs.remove_dir_all(&dir).await;
+            self.ends.forget(queue);
+            removed?;
             self.fs.mkdir_all(&dir).await?;
             Ok(())
         })
@@ -668,7 +829,22 @@ impl Backend for Local {
         header: Bytes,
         sync: bool,
     ) -> BackendFuture<'a, Arc<dyn AppendTarget>> {
-        Box::pin(create_at(&self.fs, self.path(queue, file_id), header, sync))
+        Box::pin(async move {
+            let (fs, ends, path) = (
+                self.fs.clone(),
+                self.ends.clone(),
+                self.path(queue, file_id),
+            );
+            let (q, id) = (queue.clone(), file_id.clone());
+            ends.landing(queue);
+            // As in put: the ends hear of the file even if the caller gives up.
+            let creating = tokio::spawn(async move {
+                let created = create_at(&fs, path, header, sync).await;
+                ends.landed(&q, created.is_ok().then_some(&id));
+                created
+            });
+            joined(creating.await)?
+        })
     }
 
     fn reopen<'a>(

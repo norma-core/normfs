@@ -197,3 +197,75 @@ async fn a_wal_store_writes_batches_through_its_backend() {
     }
     assert_eq!(read, 1000);
 }
+
+async fn put(backend: &Local, queue: &QueueId, id: u64) {
+    let body = Body::Runs(vec![Bytes::from_static(b"x")]);
+    backend.put(queue, &UintN::from(id), body).await.unwrap();
+}
+
+async fn ends(backend: &Local, queue: &QueueId) -> (Option<UintN>, Option<UintN>) {
+    let min = backend.find(queue, End::Min).await.unwrap();
+    let max = backend.find(queue, End::Max).await.unwrap();
+    (min, max)
+}
+
+#[tokio::test]
+async fn remembered_ends_follow_puts_deletes_and_files_removed_behind_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let fs = normfs_fs::Fs::new(normfs_fs::FsConfig::default()).unwrap();
+    let backend = Local::wal(fs, dir.path());
+    let queue = QueueIdResolver::new("inst").resolve("cam");
+    let id = |n: u64| Some(UintN::from(n));
+
+    assert_eq!(ends(&backend, &queue).await, (None, None));
+    put(&backend, &queue, 2).await;
+    put(&backend, &queue, 3).await;
+    assert_eq!(ends(&backend, &queue).await, (id(2), id(3)));
+    put(&backend, &queue, 4).await;
+    put(&backend, &queue, 1).await;
+    assert_eq!(ends(&backend, &queue).await, (id(1), id(4)));
+    backend.delete(&queue, &UintN::from(4u64)).await.unwrap();
+    assert_eq!(ends(&backend, &queue).await, (id(1), id(3)));
+    // Eviction removes files without the backend.
+    std::fs::remove_file(backend.path(&queue, &UintN::from(1u64))).unwrap();
+    assert_eq!(ends(&backend, &queue).await, (id(2), id(3)));
+}
+
+#[tokio::test]
+async fn backends_sharing_ends_see_each_others_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let fs = normfs_fs::Fs::new(normfs_fs::FsConfig::default()).unwrap();
+    let main = Local::wal(fs.clone(), dir.path());
+    let other = Local::wal(fs, dir.path()).with_ends(main.ends());
+    let queue = QueueIdResolver::new("inst").resolve("cam");
+
+    put(&main, &queue, 1).await;
+    assert_eq!(ends(&main, &queue).await.1, Some(UintN::from(1u64)));
+    put(&other, &queue, 2).await;
+    assert_eq!(ends(&main, &queue).await.1, Some(UintN::from(2u64)));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_put_given_up_mid_way_still_reaches_the_ends() {
+    let dir = tempfile::tempdir().unwrap();
+    let fs = normfs_fs::Fs::new(normfs_fs::FsConfig::default()).unwrap();
+    let backend = Local::wal(fs, dir.path());
+    let queue = QueueIdResolver::new("inst").resolve("cam");
+    put(&backend, &queue, 1).await;
+    for n in 2..22u64 {
+        assert!(backend.find(&queue, End::Max).await.unwrap().is_some());
+        let body = Body::Runs(vec![Bytes::from_static(b"x")]);
+        let give_up = std::time::Duration::from_micros(n * 50);
+        let _ = tokio::time::timeout(give_up, backend.put(&queue, &UintN::from(n), body)).await;
+        // The landing outlives the caller; once it is done the ends match the disk.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while backend.landing(&queue) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        // A put that went down without its landing would finish only now.
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        let on_disk = backend.path(&queue, &UintN::from(n)).exists();
+        let max = backend.find(&queue, End::Max).await.unwrap();
+        assert_eq!(max == Some(UintN::from(n)), on_disk, "file {n}");
+    }
+}

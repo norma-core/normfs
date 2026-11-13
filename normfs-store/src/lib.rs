@@ -203,6 +203,8 @@ pub struct PersistStore {
     root: PathBuf,
     fs: Fs,
     local: Arc<Layer>,
+    /// The first and last store file of each queue, shared with page writers' puts.
+    ends: Arc<normfs_wal::backend::FileEnds>,
     disk_usage: Arc<DiskUsage>,
     config: StoreWriteConfig,
     crypto_ctx: Arc<CryptoContext>,
@@ -235,6 +237,7 @@ impl PersistStore {
 
         let disk_usage = Arc::new(DiskUsage::default());
         let backend = local_store(fs.clone(), &root_path, true, disk_usage.clone());
+        let ends = backend.ends();
         let verify = config.verify_signatures.then(|| crypto_ctx.clone());
 
         Self {
@@ -242,6 +245,7 @@ impl PersistStore {
             disk_usage,
             fs,
             local: Arc::new(Layer::new(Arc::new(backend), verify, false)),
+            ends,
             writer_handles: Mutex::new(None),
             shutdown_tx: Mutex::new(None),
             store_done_tx,
@@ -333,7 +337,8 @@ impl PersistStore {
 
     /// The local layer as a page writer's sink, with the queue's own fsync.
     pub fn local_sink(&self, fsync: bool) -> Arc<LayerSink> {
-        let put = local_store(self.fs.clone(), &self.root, fsync, self.disk_usage.clone());
+        let put = local_store(self.fs.clone(), &self.root, fsync, self.disk_usage.clone())
+            .with_ends(self.ends.clone());
         let after = AfterLanding::Announce(self.store_done_tx.clone());
         Arc::new(
             LayerSink::new(self.local.clone(), after, self.events.clone()).with_put(Arc::new(put)),
