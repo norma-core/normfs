@@ -6,19 +6,20 @@ use aes_gcm::{
 };
 use bytes::Bytes;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier};
-use hkdf::Hkdf;
 use normfs_types::QueueId;
 use rand_chacha::ChaCha20Rng;
-use rand_core::{RngCore, SeedableRng};
+use rand_core::SeedableRng;
 use sha2::{Digest, Sha256};
 use uintn::UintN;
-use zeroize::ZeroizeOnDrop;
+use zeroize::{ZeroizeOnDrop, Zeroizing};
 
+use crate::kdf::{self, KdfError, AES_KEY_SIZE, GCM_NONCE_SIZE};
 use crate::seed::{Seed, SeedError};
 
 #[derive(Debug)]
 pub enum CryptoError {
     Seed(SeedError),
+    Kdf(KdfError),
     KeyDerivation,
     Encryption,
     Decryption,
@@ -30,6 +31,7 @@ impl std::fmt::Display for CryptoError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CryptoError::Seed(e) => write!(f, "Seed error: {}", e),
+            CryptoError::Kdf(e) => write!(f, "Key derivation error: {}", e),
             CryptoError::KeyDerivation => write!(f, "Key derivation failed"),
             CryptoError::Encryption => write!(f, "Encryption failed"),
             CryptoError::Decryption => write!(f, "Decryption failed"),
@@ -43,6 +45,7 @@ impl std::error::Error for CryptoError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             CryptoError::Seed(e) => Some(e),
+            CryptoError::Kdf(e) => Some(e),
             _ => None,
         }
     }
@@ -112,35 +115,35 @@ impl CryptoContext {
             .map_err(|_| CryptoError::Verification)
     }
 
-    fn derive_rng(&self, queue_id: &QueueId, file_id: &UintN) -> Result<ChaCha20Rng, CryptoError> {
-        let hkdf = Hkdf::<Sha256>::new(None, self.seed.as_bytes());
-
+    /// The AES-256 key and GCM nonce for one file. Replaces a `ChaCha20Rng`
+    /// that existed only to draw these 44 bytes, in this order, from its first
+    /// keystream block.
+    fn derive_file_key(
+        &self,
+        queue_id: &QueueId,
+        file_id: &UintN,
+    ) -> Result<(Zeroizing<[u8; AES_KEY_SIZE]>, [u8; GCM_NONCE_SIZE]), CryptoError> {
+        // No separator and no length prefix between the halves. That is not an
+        // oversight to fix: it is what the keys on disk were derived from, and
+        // kdf_test.rs is the arbiter.
+        let base = queue_id.to_key_derivation_base().as_bytes();
         let file_id_bytes = file_id.value_to_bytes();
 
-        let mut info = Vec::new();
-        info.extend_from_slice(queue_id.to_key_derivation_base().as_bytes());
+        let mut info = Vec::with_capacity(base.len() + file_id_bytes.len());
+        info.extend_from_slice(base);
         info.extend_from_slice(&file_id_bytes);
 
-        let mut rng_seed = [0u8; 32];
-        hkdf.expand(&info, &mut rng_seed)
-            .map_err(|_| CryptoError::KeyDerivation)?;
-
-        Ok(ChaCha20Rng::from_seed(rng_seed))
+        kdf::derive_file_key(self.seed.as_bytes(), &info).map_err(CryptoError::Kdf)
     }
 
     fn file_cipher(
         &self,
         queue_id: &QueueId,
         file_id: &UintN,
-    ) -> Result<(Aes256Gcm, [u8; 12]), CryptoError> {
-        let mut rng = self.derive_rng(queue_id, file_id)?;
-
-        let mut aes_key = [0u8; 32];
-        rng.fill_bytes(&mut aes_key);
-        let cipher = Aes256Gcm::new(&aes_key.into());
-
-        let mut nonce_bytes = [0u8; 12];
-        rng.fill_bytes(&mut nonce_bytes);
+    ) -> Result<(Aes256Gcm, [u8; GCM_NONCE_SIZE]), CryptoError> {
+        let (aes_key, nonce_bytes) = self.derive_file_key(queue_id, file_id)?;
+        let cipher =
+            Aes256Gcm::new_from_slice(aes_key.as_ref()).map_err(|_| CryptoError::KeyDerivation)?;
         Ok((cipher, nonce_bytes))
     }
 
@@ -183,17 +186,15 @@ impl CryptoContext {
         nonce: &Bytes,
         ciphertext: &Bytes,
     ) -> Result<Bytes, CryptoError> {
-        if nonce.len() != 12 {
+        if nonce.len() != GCM_NONCE_SIZE {
             return Err(CryptoError::InvalidNonce);
         }
 
-        let mut rng = self.derive_rng(queue_id, file_id)?;
+        // The nonce comes off disk, so the derived one is discarded here --
+        // exactly as the old code discarded it by drawing only the key.
+        let (cipher, _derived_nonce) = self.file_cipher(queue_id, file_id)?;
 
-        let mut aes_key = [0u8; 32];
-        rng.fill_bytes(&mut aes_key);
-        let cipher = Aes256Gcm::new(&aes_key.into());
-
-        let nonce_array: [u8; 12] = nonce.as_ref().try_into().unwrap();
+        let nonce_array: [u8; GCM_NONCE_SIZE] = nonce.as_ref().try_into().unwrap();
         let nonce = Nonce::from(nonce_array);
 
         let plaintext = cipher

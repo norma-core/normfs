@@ -12,6 +12,10 @@ fn main() {
         } else {
             "c/src/seed_sys.c"
         }),
+        manifest_dir.join("c/src/sha256.c"),
+        manifest_dir.join("c/src/hmac_sha256.c"),
+        manifest_dir.join("c/src/chacha20.c"),
+        manifest_dir.join("c/src/kdf.c"),
     ];
     if windows {
         println!("cargo:rustc-link-lib=bcrypt");
