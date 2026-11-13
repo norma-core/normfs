@@ -144,7 +144,8 @@ impl Packer {
     }
 
     /// Seals the first `input_len` bytes of `slot` as store file `file_id`,
-    /// the same bytes [`crate::store_file::build`] makes of them. The result
+    /// in the layout [`crate::store_file::build`] makes of them -- the same
+    /// bytes only unencrypted, since each seal draws its own nonce. The result
     /// holds the slot until it is dropped.
     #[allow(clippy::too_many_arguments)]
     pub fn seal(

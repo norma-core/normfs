@@ -118,8 +118,16 @@ async fn an_uncompressed_file_is_the_same_bytes_either_way() {
     for encryption in [EncryptionType::None, EncryptionType::Aes] {
         let sealed = f.seal(&data, 3, CompressionType::None, encryption).await;
         let built = f.build(&data, 3, CompressionType::None, encryption);
-        assert_eq!(sealed.to_bytes(), built.to_bytes(), "{encryption:?}");
         assert_eq!(sealed.raw_len, built.raw_len);
+        if encryption == EncryptionType::None {
+            assert_eq!(sealed.to_bytes(), built.to_bytes());
+        } else {
+            // Each seal draws its own nonce, so the bytes agree only in shape.
+            assert_eq!(sealed.header, built.header);
+            assert_eq!(sealed.body.len(), built.body.len());
+            assert_eq!(f.open(&sealed, 3), data);
+            assert_eq!(f.open(&built, 3), data);
+        }
     }
 }
 
